@@ -1,4 +1,5 @@
 #pragma once
+#include "engine/page.hpp"      // Row lives here now
 #include <string>
 #include <vector>
 #include <filesystem>
@@ -13,9 +14,8 @@ struct ColumnDef {
 struct TableSchema {
     std::string table_name;
     std::vector<ColumnDef> columns;
+    int primary_key_index = 0;      // default: first column
 };
-
-using Row = std::vector<std::string>;
 
 class Storage {
 public:
@@ -43,9 +43,10 @@ private:
     std::filesystem::path data_dir_;
     std::filesystem::path dbPath(const std::string& db) const;
     std::filesystem::path tablePath(const std::string& db, const std::string& tbl) const;
-    static std::string escapeCSV(const std::string& f);
-    static std::vector<std::string> parseCSVLine(const std::string& line);
-    static std::string rowToCSV(const Row& row);
+
+    // Meta page serialization
+    static std::string serializeSchema(const TableSchema& s);
+    static TableSchema deserializeSchema(const char* data, uint32_t len);
 };
 
 } // namespace db

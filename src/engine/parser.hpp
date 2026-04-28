@@ -14,6 +14,7 @@ enum class TokenType {
     KW_UPDATE, KW_SET, KW_DELETE,
     KW_AND, KW_OR, KW_NOT, KW_USE,
     KW_INT, KW_FLOAT, KW_BOOL, KW_TEXT, KW_VARCHAR,
+    KW_PRIMARY, KW_KEY,
     IDENTIFIER, STRING_LITERAL, NUMBER_LITERAL, BOOL_LITERAL,
     OP_EQ, OP_NEQ, OP_LT, OP_GT, OP_LTE, OP_GTE,
     LPAREN, RPAREN, COMMA, SEMICOLON, STAR,
@@ -40,7 +41,7 @@ enum class QueryType {
     USE_DATABASE
 };
 
-struct ColDef { std::string name, type; };
+struct ColDef { std::string name, type; bool is_primary_key = false; };
 struct SetClause { std::string column, value; };
 
 struct ParsedQuery {
@@ -48,6 +49,7 @@ struct ParsedQuery {
     std::string database_name;
     std::string table_name;
     std::vector<ColDef> column_defs;
+    int primary_key_index = -1;     // -1 = not specified (defaults to 0)
     std::vector<std::string> select_columns;
     bool select_all = false;
     std::vector<std::string> insert_columns;

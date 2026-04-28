@@ -18,6 +18,7 @@ static const std::unordered_map<std::string, TokenType> KEYWORDS = {
     {"AND",TokenType::KW_AND},{"OR",TokenType::KW_OR},{"NOT",TokenType::KW_NOT},{"USE",TokenType::KW_USE},
     {"INT",TokenType::KW_INT},{"FLOAT",TokenType::KW_FLOAT},{"BOOL",TokenType::KW_BOOL},
     {"TEXT",TokenType::KW_TEXT},{"VARCHAR",TokenType::KW_VARCHAR},
+    {"PRIMARY",TokenType::KW_PRIMARY},{"KEY",TokenType::KW_KEY},
     {"TRUE",TokenType::BOOL_LITERAL},{"FALSE",TokenType::BOOL_LITERAL},
 };
 
@@ -178,6 +179,7 @@ ParsedQuery Parser::parseCreateTable() {
     q.table_name = expect(IDENTIFIER).value;
     expect(LPAREN);
 
+    int col_idx = 0;
     do {
         ColDef col;
         col.name = expect(IDENTIFIER).value;
@@ -191,7 +193,17 @@ ParsedQuery Parser::parseCreateTable() {
             expect(RPAREN);
         }
         col.type = tp;
+
+        // Optional PRIMARY KEY
+        if (check(KW_PRIMARY)) {
+            consume();
+            expect(KW_KEY);
+            col.is_primary_key = true;
+            q.primary_key_index = col_idx;
+        }
+
         q.column_defs.push_back(col);
+        ++col_idx;
     } while (match(COMMA));
 
     expect(RPAREN);

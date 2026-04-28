@@ -124,6 +124,8 @@ json Executor::execCreateTable(const ParsedQuery& q) {
     schema.table_name = q.table_name;
     for (const auto& cd : q.column_defs)
         schema.columns.push_back({cd.name, cd.type});
+    // PRIMARY KEY: use specified index, or default to 0 (first column)
+    schema.primary_key_index = (q.primary_key_index >= 0) ? q.primary_key_index : 0;
 
     if (storage_.createTable(current_db_, schema))
         return ok("Table '" + q.table_name + "' created.");
