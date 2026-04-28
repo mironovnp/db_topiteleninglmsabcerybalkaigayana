@@ -1,0 +1,75 @@
+#include "client_lib/db_client.hpp"
+#include <httplib.h>
+#include <iostream>
+
+namespace db {
+
+DBClient::DBClient() = default;
+
+bool DBClient::connect(const std::string& host, int port) {
+    host_ = host;
+    port_ = port;
+    connected_ = ping();
+    return connected_;
+}
+
+bool DBClient::ping() {
+    try {
+        httplib::Client cli(host_, port_);
+        cli.set_connection_timeout(3);
+        auto res = cli.Get("/ping");
+        return res && res->status == 200;
+    } catch (...) {
+        return false;
+    }
+}
+
+QueryResult DBClient::executeQuery(const std::string& sql) {
+    QueryResult qr;
+    qr.success = false;
+
+    if (!connected_) {
+        qr.message = "Not connected to server.";
+        return qr;
+    }
+
+    try {
+        httplib::Client cli(host_, port_);
+        cli.set_connection_timeout(10);
+        cli.set_read_timeout(30);
+
+        nlohmann::json body;
+        body["sql"] = sql;
+
+        auto res = cli.Post("/query", body.dump(), "application/json");
+        if (!res) {
+            qr.message = "Connection failed.";
+            return qr;
+        }
+
+        auto j = nlohmann::json::parse(res->body);
+        qr.success = j.value("success", false);
+        qr.message = j.value("message", "");
+        qr.type = j.value("type", "");
+        qr.affected_rows = j.value("affected_rows", 0);
+
+        if (j.contains("columns")) {
+            for (const auto& c : j["columns"])
+                qr.columns.push_back(c.get<std::string>());
+        }
+        if (j.contains("rows")) {
+            for (const auto& row : j["rows"]) {
+                std::vector<std::string> r;
+                for (const auto& v : row)
+                    r.push_back(v.is_string() ? v.get<std::string>() : v.dump());
+                qr.rows.push_back(std::move(r));
+            }
+        }
+    } catch (const std::exception& e) {
+        qr.message = std::string("Error: ") + e.what();
+    }
+
+    return qr;
+}
+
+} // namespace db
