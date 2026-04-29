@@ -24,7 +24,7 @@ public:
     bool connect(const std::string& host, int port);
 
     /// Execute an SQL query and return the result
-    QueryResult executeQuery(const std::string& sql);
+    QueryResult executeQuery(const std::string& sql, bool dry_run = false);
 
     /// Check if server is reachable
     bool ping();

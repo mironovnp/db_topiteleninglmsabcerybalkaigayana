@@ -15,6 +15,8 @@ enum class TokenType {
     KW_AND, KW_OR, KW_NOT, KW_USE,
     KW_INT, KW_FLOAT, KW_BOOL, KW_TEXT, KW_VARCHAR,
     KW_PRIMARY, KW_KEY,
+    KW_ORDER, KW_BY, KW_GROUP, KW_HAVING, KW_ASC, KW_DESC, KW_AS,
+    KW_COUNT, KW_SUM, KW_AVG, KW_MIN, KW_MAX,
     IDENTIFIER, STRING_LITERAL, NUMBER_LITERAL, BOOL_LITERAL,
     OP_EQ, OP_NEQ, OP_LT, OP_GT, OP_LTE, OP_GTE,
     LPAREN, RPAREN, COMMA, SEMICOLON, STAR,
@@ -23,12 +25,17 @@ enum class TokenType {
 
 struct Token { TokenType type; std::string value; };
 
+// ── Token types and AggrFunc ──────────────────────────────────────────
+
+enum class AggrFunc { NONE, COUNT, SUM, AVG, MIN, MAX };
+
 // ── WHERE expression tree ──────────────────────────────────────────────
 
 struct WhereExpr {
     enum Kind { CMP, AND_OP, OR_OP, NOT_OP };
     Kind kind;
     std::string column, op, value;                   // CMP
+    AggrFunc aggr = AggrFunc::NONE;                  // For HAVING
     std::shared_ptr<WhereExpr> left, right;          // AND/OR/NOT(left only)
 };
 
@@ -44,18 +51,33 @@ enum class QueryType {
 struct ColDef { std::string name, type; bool is_primary_key = false; };
 struct SetClause { std::string column, value; };
 
+struct SelectColumn {
+    std::string name; // column name or "*"
+    AggrFunc aggr = AggrFunc::NONE;
+    std::string alias; // optional alias for AS
+};
+
+struct OrderByClause {
+    std::string column;
+    AggrFunc aggr = AggrFunc::NONE;
+    bool asc = true;
+};
+
 struct ParsedQuery {
     QueryType type;
     std::string database_name;
     std::string table_name;
     std::vector<ColDef> column_defs;
     int primary_key_index = -1;     // -1 = not specified (defaults to 0)
-    std::vector<std::string> select_columns;
+    std::vector<SelectColumn> select_columns;
     bool select_all = false;
     std::vector<std::string> insert_columns;
     std::vector<std::vector<std::string>> insert_values;
     std::vector<SetClause> set_clauses;
     std::shared_ptr<WhereExpr> where;
+    std::vector<std::string> group_by;
+    std::shared_ptr<WhereExpr> having;
+    std::vector<OrderByClause> order_by;
 };
 
 // ── Lexer ──────────────────────────────────────────────────────────────

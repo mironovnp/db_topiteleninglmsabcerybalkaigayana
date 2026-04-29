@@ -19,6 +19,10 @@ static const std::unordered_map<std::string, TokenType> KEYWORDS = {
     {"INT",TokenType::KW_INT},{"FLOAT",TokenType::KW_FLOAT},{"BOOL",TokenType::KW_BOOL},
     {"TEXT",TokenType::KW_TEXT},{"VARCHAR",TokenType::KW_VARCHAR},
     {"PRIMARY",TokenType::KW_PRIMARY},{"KEY",TokenType::KW_KEY},
+    {"ORDER",TokenType::KW_ORDER},{"BY",TokenType::KW_BY},{"GROUP",TokenType::KW_GROUP},
+    {"HAVING",TokenType::KW_HAVING},{"ASC",TokenType::KW_ASC},{"DESC",TokenType::KW_DESC},
+    {"AS",TokenType::KW_AS},{"COUNT",TokenType::KW_COUNT},{"SUM",TokenType::KW_SUM},
+    {"AVG",TokenType::KW_AVG},{"MIN",TokenType::KW_MIN},{"MAX",TokenType::KW_MAX},
     {"TRUE",TokenType::BOOL_LITERAL},{"FALSE",TokenType::BOOL_LITERAL},
 };
 
@@ -105,7 +109,7 @@ std::vector<Token> Lexer::tokenize() {
                                                  tokens.push_back(readWord());
         else                                     tokens.push_back(readOp());
     }
-    tokens.push_back({END_OF_INPUT, ""});
+    tokens.push_back({END_OF_INPUT, "<EOF>"});
     return tokens;
 }
 
@@ -115,7 +119,11 @@ std::vector<Token> Lexer::tokenize() {
 
 Parser::Parser(const std::vector<Token>& tokens) : tokens_(tokens) {}
 
-const Token& Parser::cur() const { return tokens_[pos_]; }
+const Token& Parser::cur() const {
+    static const Token eof_tok = {TokenType::END_OF_INPUT, "<EOF>"};
+    if (pos_ < tokens_.size()) return tokens_[pos_];
+    return eof_tok;
+}
 
 Token Parser::consume() { return tokens_[pos_++]; }
 
@@ -139,20 +147,20 @@ ParsedQuery Parser::parse() {
         consume();
         if (check(KW_DATABASE)) return parseCreateDB();
         if (check(KW_TABLE))    return parseCreateTable();
-        throw std::runtime_error("Expected DATABASE or TABLE after CREATE");
+        throw std::runtime_error("Expected DATABASE or TABLE after CREATE, got: " + cur().value);
     }
     if (check(KW_DROP)) {
         consume();
         if (check(KW_DATABASE)) return parseDropDB();
         if (check(KW_TABLE))    return parseDropTable();
-        throw std::runtime_error("Expected DATABASE or TABLE after DROP");
+        throw std::runtime_error("Expected DATABASE or TABLE after DROP, got: " + cur().value);
     }
     if (check(KW_SELECT)) { consume(); return parseSelect(); }
     if (check(KW_INSERT)) { consume(); return parseInsert(); }
     if (check(KW_UPDATE)) { consume(); return parseUpdate(); }
     if (check(KW_DELETE)) { consume(); return parseDelete(); }
     if (check(KW_USE))    { consume(); return parseUse(); }
-    throw std::runtime_error("Unknown query: " + cur().value);
+    throw std::runtime_error("Unknown query, got: " + cur().value);
 }
 
 // ── DDL ────────────────────────────────────────────────────────────────
@@ -238,12 +246,42 @@ ParsedQuery Parser::parseSelect() {
         q.select_all = true;
     } else {
         do {
-            q.select_columns.push_back(expect(IDENTIFIER).value);
+            SelectColumn sc;
+            if (match(KW_COUNT)) { sc.aggr = AggrFunc::COUNT; expect(LPAREN); if(match(STAR)) sc.name = "*"; else sc.name = expect(IDENTIFIER).value; expect(RPAREN); }
+            else if (match(KW_SUM)) { sc.aggr = AggrFunc::SUM; expect(LPAREN); sc.name = expect(IDENTIFIER).value; expect(RPAREN); }
+            else if (match(KW_AVG)) { sc.aggr = AggrFunc::AVG; expect(LPAREN); sc.name = expect(IDENTIFIER).value; expect(RPAREN); }
+            else if (match(KW_MIN)) { sc.aggr = AggrFunc::MIN; expect(LPAREN); sc.name = expect(IDENTIFIER).value; expect(RPAREN); }
+            else if (match(KW_MAX)) { sc.aggr = AggrFunc::MAX; expect(LPAREN); sc.name = expect(IDENTIFIER).value; expect(RPAREN); }
+            else { sc.name = expect(IDENTIFIER).value; }
+            if (match(KW_AS)) sc.alias = expect(IDENTIFIER).value;
+            q.select_columns.push_back(sc);
         } while (match(COMMA));
     }
     expect(KW_FROM);
     q.table_name = expect(IDENTIFIER).value;
     if (match(KW_WHERE)) q.where = parseExprOr();
+    if (match(KW_GROUP)) {
+        expect(KW_BY);
+        do {
+            q.group_by.push_back(expect(IDENTIFIER).value);
+        } while (match(COMMA));
+    }
+    if (match(KW_HAVING)) q.having = parseExprOr();
+    if (match(KW_ORDER)) {
+        expect(KW_BY);
+        do {
+            OrderByClause ob;
+            if (match(KW_COUNT)) { ob.aggr = AggrFunc::COUNT; expect(LPAREN); if(match(STAR)) ob.column = "*"; else ob.column = expect(IDENTIFIER).value; expect(RPAREN); }
+            else if (match(KW_SUM)) { ob.aggr = AggrFunc::SUM; expect(LPAREN); ob.column = expect(IDENTIFIER).value; expect(RPAREN); }
+            else if (match(KW_AVG)) { ob.aggr = AggrFunc::AVG; expect(LPAREN); ob.column = expect(IDENTIFIER).value; expect(RPAREN); }
+            else if (match(KW_MIN)) { ob.aggr = AggrFunc::MIN; expect(LPAREN); ob.column = expect(IDENTIFIER).value; expect(RPAREN); }
+            else if (match(KW_MAX)) { ob.aggr = AggrFunc::MAX; expect(LPAREN); ob.column = expect(IDENTIFIER).value; expect(RPAREN); }
+            else { ob.column = expect(IDENTIFIER).value; }
+            if (match(KW_DESC)) ob.asc = false;
+            else match(KW_ASC); // optional ASC
+            q.order_by.push_back(ob);
+        } while (match(COMMA));
+    }
     match(SEMICOLON);
     return q;
 }
@@ -359,7 +397,13 @@ std::shared_ptr<WhereExpr> Parser::parseExprAtom() {
     // comparison: column op value
     auto node = std::make_shared<WhereExpr>();
     node->kind = WhereExpr::CMP;
-    node->column = expect(IDENTIFIER).value;
+
+    if (match(KW_COUNT)) { node->aggr = AggrFunc::COUNT; expect(LPAREN); if(match(STAR)) node->column = "*"; else node->column = expect(IDENTIFIER).value; expect(RPAREN); }
+    else if (match(KW_SUM)) { node->aggr = AggrFunc::SUM; expect(LPAREN); node->column = expect(IDENTIFIER).value; expect(RPAREN); }
+    else if (match(KW_AVG)) { node->aggr = AggrFunc::AVG; expect(LPAREN); node->column = expect(IDENTIFIER).value; expect(RPAREN); }
+    else if (match(KW_MIN)) { node->aggr = AggrFunc::MIN; expect(LPAREN); node->column = expect(IDENTIFIER).value; expect(RPAREN); }
+    else if (match(KW_MAX)) { node->aggr = AggrFunc::MAX; expect(LPAREN); node->column = expect(IDENTIFIER).value; expect(RPAREN); }
+    else { node->column = expect(IDENTIFIER).value; }
 
     Token opTok = consume();
     switch (opTok.type) {

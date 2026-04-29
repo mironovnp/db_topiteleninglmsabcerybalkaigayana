@@ -3,6 +3,7 @@
 #include "engine/parser.hpp"
 #include <nlohmann/json.hpp>
 #include <string>
+#include <map>
 
 namespace db {
 
@@ -28,6 +29,19 @@ private:
     void requireDB() const;
     bool evalWhere(const WhereExpr& expr, const Row& row,
                    const TableSchema& schema) const;
+
+    struct AggrState {
+        int count = 0;
+        double sum = 0.0;
+        double min_val = 0.0;
+        double max_val = 0.0;
+        bool initialized = false;
+    };
+    
+    // Evaluate HAVING condition using the representative row of a group and its aggregate states
+    bool evalHaving(const WhereExpr& expr, const Row& row, const TableSchema& schema,
+                    const std::map<std::pair<AggrFunc, std::string>, AggrState>& aggrs) const;
+
     int colIndex(const TableSchema& s, const std::string& name) const;
     int compareValues(const std::string& a, const std::string& b,
                       const std::string& type) const;

@@ -24,7 +24,7 @@ bool DBClient::ping() {
     }
 }
 
-QueryResult DBClient::executeQuery(const std::string& sql) {
+QueryResult DBClient::executeQuery(const std::string& sql, bool dry_run) {
     QueryResult qr;
     qr.success = false;
 
@@ -40,6 +40,7 @@ QueryResult DBClient::executeQuery(const std::string& sql) {
 
         nlohmann::json body;
         body["sql"] = sql;
+        body["dry_run"] = dry_run;
 
         auto res = cli.Post("/query", body.dump(), "application/json");
         if (!res) {

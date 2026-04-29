@@ -94,12 +94,48 @@ int main(int argc, char* argv[]) {
         if (line == "exit" || line == "quit" || line == "\\q") break;
         if (line.empty()) continue;
 
+        if (line == "\\c") {
+            query.clear();
+            std::cout << "Query buffer cleared.\n\n";
+            continue;
+        }
+
         query += (query.empty() ? "" : " ") + line;
 
-        // Wait for semicolon to execute
-        if (query.back() != ';') continue;
+        // Check if the first word is a valid SQL command to avoid buffering garbage
+        std::string first_word;
+        for (char c : query) {
+            if (c == ' ' || c == ';' || c == '\n' || c == '\t') break;
+            first_word += std::toupper(c);
+        }
+        
+        if (!first_word.empty()) {
+            bool valid_start = (first_word == "SELECT" || first_word == "CREATE" || 
+                                first_word == "DROP" || first_word == "INSERT" || 
+                                first_word == "UPDATE" || first_word == "DELETE" || 
+                                first_word == "USE");
+            if (!valid_start) {
+                std::cout << "\033[31m[ERROR]\033[0m Unexpected keyword: " << first_word << "\n\n";
+                query.clear();
+                continue;
+            }
+        }
 
-        auto result = client.executeQuery(query);
+        bool has_semi = (query.back() == ';');
+
+        // If it doesn't have a semicolon, we validate syntax (dry_run)
+        auto result = client.executeQuery(query, !has_semi);
+
+        if (!has_semi) {
+            if (!result.success) {
+                // It's a REAL syntax error (not just EOF)
+                std::cout << "\033[31m[ERROR]\033[0m " << result.message << "\n\n";
+                query.clear();
+            }
+            // If success (type == "incomplete"), just show -> and wait for more
+            continue;
+        }
+
         query.clear();
 
         if (!result.success) {

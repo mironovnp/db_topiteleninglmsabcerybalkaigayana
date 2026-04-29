@@ -25,9 +25,16 @@ fi
 echo "=== Starting databasetopit ==="
 echo "[*] Server: $HOST:$PORT"
 
+# ── Cleanup old instances ──
+pkill -f "$BUILD_DIR/dbserver" 2>/dev/null || true
+
 # ── Start server in background ──
 "$BUILD_DIR/dbserver" --host "$HOST" --port "$PORT" &
 SERVER_PID=$!
+
+# ── Ensure cleanup on exit ──
+trap 'echo ""; echo "[*] Shutting down server..."; kill -9 "$SERVER_PID" 2>/dev/null || true' EXIT INT TERM
+
 sleep 1
 
 # ── Check server started ──
@@ -42,10 +49,3 @@ echo ""
 
 # ── Start CLI ──
 "$BUILD_DIR/dbcli" --host "$HOST" --port "$PORT" || true
-
-# ── Cleanup ──
-echo ""
-echo "[*] Shutting down server..."
-kill "$SERVER_PID" 2>/dev/null || true
-wait "$SERVER_PID" 2>/dev/null || true
-echo "[✓] Done."

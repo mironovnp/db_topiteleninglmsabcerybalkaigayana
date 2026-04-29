@@ -24,6 +24,25 @@ void Server::start() {
                 return;
             }
 
+            bool dry_run = body.value("dry_run", false);
+            if (dry_run) {
+                try {
+                    db::Lexer lexer(sql);
+                    db::Parser parser(lexer.tokenize());
+                    parser.parse();
+                } catch (const std::exception& e) {
+                    std::string err = e.what();
+                    if (err.find("<EOF>") != std::string::npos) {
+                        res.set_content(json({{"success", true}, {"type", "incomplete"}}).dump(), "application/json");
+                    } else {
+                        res.set_content(json({{"success", false}, {"message", err}}).dump(), "application/json");
+                    }
+                    return;
+                }
+                res.set_content(json({{"success", true}, {"type", "incomplete"}}).dump(), "application/json");
+                return;
+            }
+
             auto result = executor_.execute(sql);
             res.set_content(result.dump(), "application/json");
         } catch (const std::exception& e) {
