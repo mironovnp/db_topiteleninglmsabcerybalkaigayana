@@ -16,6 +16,9 @@ private:
     Storage storage_;
     std::string current_db_;
 
+    const TableSchema* outer_schema_ = nullptr;
+    const Row* outer_row_ = nullptr;
+
     nlohmann::json execCreateDB(const ParsedQuery& q);
     nlohmann::json execDropDB(const ParsedQuery& q);
     nlohmann::json execCreateTable(const ParsedQuery& q);
@@ -29,7 +32,12 @@ private:
 
     void requireDB() const;
     bool evalWhere(const WhereExpr& expr, const Row& row,
-                   const TableSchema& schema) const;
+                   const TableSchema& schema,
+                   const TableSchema* outer_schema = nullptr,
+                   const Row* outer_row = nullptr) const;
+    std::vector<Row> execute_subquery(const ParsedQuery& q,
+                                      const TableSchema* outer_schema = nullptr,
+                                      const Row* outer_row = nullptr);
 
     struct AggrState {
         int count = 0;

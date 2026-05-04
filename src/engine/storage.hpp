@@ -9,6 +9,12 @@ namespace db {
 struct ColumnDef {
     std::string name;
     std::string type; // INT, FLOAT, BOOL, TEXT, VARCHAR(N)
+    bool not_null = false;
+    bool unique = false;
+    bool has_default = false;
+    std::string default_value;
+    std::string fk_ref_table;
+    std::string fk_ref_column;
 };
 
 struct TableSchema {
@@ -49,6 +55,9 @@ public:
     bool alterTableAddColumn(const std::string& db_name,
                              const std::string& table_name,
                              const ColumnDef& new_col);
+    bool alterTableDropColumn(const std::string& db_name,
+                              const std::string& table_name,
+                              const std::string& col_name);
 
 private:
     std::filesystem::path data_dir_;

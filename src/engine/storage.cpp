@@ -67,6 +67,28 @@ std::string Storage::serializeSchema(const TableSchema& s) {
         uint16_t tl = static_cast<uint16_t>(col.type.size());
         buf.append(reinterpret_cast<const char*>(&tl), 2);
         buf.append(col.type);
+        // Constraint flags: 1 byte
+        uint8_t flags = 0;
+        if (col.not_null) flags |= 0x01;
+        if (col.unique) flags |= 0x02;
+        if (col.has_default) flags |= 0x04;
+        if (!col.fk_ref_table.empty()) flags |= 0x08;
+        buf.push_back(static_cast<char>(flags));
+        // Default value (if any)
+        if (col.has_default) {
+            uint16_t dl = static_cast<uint16_t>(col.default_value.size());
+            buf.append(reinterpret_cast<const char*>(&dl), 2);
+            buf.append(col.default_value);
+        }
+        // FK ref (if any)
+        if (!col.fk_ref_table.empty()) {
+            uint16_t trl = static_cast<uint16_t>(col.fk_ref_table.size());
+            buf.append(reinterpret_cast<const char*>(&trl), 2);
+            buf.append(col.fk_ref_table);
+            uint16_t crl = static_cast<uint16_t>(col.fk_ref_column.size());
+            buf.append(reinterpret_cast<const char*>(&crl), 2);
+            buf.append(col.fk_ref_column);
+        }
     }
     return buf;
 }
@@ -92,6 +114,26 @@ TableSchema Storage::deserializeSchema(const char* data, uint32_t len) {
         uint16_t tl; memcpy(&tl, p, 2); p += 2;
         if (p + tl > end) break;
         cd.type.assign(p, tl); p += tl;
+        // Constraint flags (if data available)
+        if (p < end) {
+            uint8_t flags = static_cast<uint8_t>(*p); p++;
+            cd.not_null = (flags & 0x01) != 0;
+            cd.unique = (flags & 0x02) != 0;
+            cd.has_default = (flags & 0x04) != 0;
+            bool has_fk = (flags & 0x08) != 0;
+            if (cd.has_default && p + 2 <= end) {
+                uint16_t dl; memcpy(&dl, p, 2); p += 2;
+                if (p + dl <= end) { cd.default_value.assign(p, dl); p += dl; }
+            }
+            if (has_fk && p + 2 <= end) {
+                uint16_t trl; memcpy(&trl, p, 2); p += 2;
+                if (p + trl <= end) { cd.fk_ref_table.assign(p, trl); p += trl; }
+                if (p + 2 <= end) {
+                    uint16_t crl; memcpy(&crl, p, 2); p += 2;
+                    if (p + crl <= end) { cd.fk_ref_column.assign(p, crl); p += crl; }
+                }
+            }
+        }
         s.columns.push_back(std::move(cd));
     }
     return s;
@@ -345,6 +387,44 @@ bool Storage::alterTableAddColumn(const std::string& db_name,
         row.push_back("");
 
     // 6. Rewrite file with new schema and extended rows
+    return writeAllRows(db_name, table_name, rows, schema);
+}
+
+// ── alterTableDropColumn ────────────────────────────────────────
+
+bool Storage::alterTableDropColumn(const std::string& db_name,
+                                    const std::string& table_name,
+                                    const std::string& col_name) {
+    if (!tableExists(db_name, table_name)) return false;
+
+    // 1. Read current schema
+    TableSchema schema = getTableSchema(db_name, table_name);
+
+    // 2. Find column index
+    int drop_idx = -1;
+    for (int i = 0; i < (int)schema.columns.size(); ++i)
+        if (schema.columns[i].name == col_name) { drop_idx = i; break; }
+    if (drop_idx < 0) return false;
+
+    // 3. Cannot drop primary key column
+    if (drop_idx == schema.primary_key_index) return false;
+
+    // 4. Read all existing rows
+    auto rows = readAllRows(db_name, table_name);
+
+    // 5. Remove column from schema
+    schema.columns.erase(schema.columns.begin() + drop_idx);
+    // Adjust primary key index if needed
+    if (drop_idx < schema.primary_key_index)
+        schema.primary_key_index--;
+
+    // 6. Remove field from each row
+    for (auto& row : rows) {
+        if (drop_idx < (int)row.size())
+            row.erase(row.begin() + drop_idx);
+    }
+
+    // 7. Rewrite file with new schema and trimmed rows
     return writeAllRows(db_name, table_name, rows, schema);
 }
 

@@ -19,6 +19,9 @@ enum class TokenType {
     KW_COUNT, KW_SUM, KW_AVG, KW_MIN, KW_MAX,
     KW_ALTER, KW_ADD, KW_COLUMN,
     KW_JOIN, KW_INNER, KW_LEFT, KW_RIGHT, KW_OUTER, KW_ON,
+    KW_LIMIT, KW_OFFSET,
+    KW_IN, KW_EXISTS, KW_NULL,
+    KW_UNIQUE, KW_DEFAULT, KW_FOREIGN, KW_REFERENCES,
     IDENTIFIER, STRING_LITERAL, NUMBER_LITERAL, BOOL_LITERAL,
     OP_EQ, OP_NEQ, OP_LT, OP_GT, OP_LTE, OP_GTE,
     LPAREN, RPAREN, COMMA, SEMICOLON, STAR, DOT,
@@ -31,14 +34,20 @@ struct Token { TokenType type; std::string value; };
 
 enum class AggrFunc { NONE, COUNT, SUM, AVG, MIN, MAX };
 
+// ── Forward declaration ────────────────────────────────────────────────
+struct ParsedQuery;
+
 // ── WHERE expression tree ──────────────────────────────────────────────
 
 struct WhereExpr {
-    enum Kind { CMP, AND_OP, OR_OP, NOT_OP };
+    enum Kind { CMP, AND_OP, OR_OP, NOT_OP, IN_OP, EXISTS_OP };
     Kind kind;
     std::string column, op, value;                   // CMP
     AggrFunc aggr = AggrFunc::NONE;                  // For HAVING
     std::shared_ptr<WhereExpr> left, right;          // AND/OR/NOT(left only)
+    std::vector<std::string> in_values;              // IN (val1, val2, ...)
+    std::shared_ptr<ParsedQuery> subquery;           // IN (SELECT ...) / EXISTS (SELECT ...)
+    bool negated = false;                            // NOT IN / NOT EXISTS
 };
 
 // ── Query representation ───────────────────────────────────────────────
@@ -48,10 +57,22 @@ enum class QueryType {
     CREATE_TABLE, DROP_TABLE,
     SELECT, INSERT, UPDATE, DELETE_Q,
     USE_DATABASE,
-    ALTER_TABLE
+    ALTER_TABLE, ALTER_DROP_COL
 };
 
-struct ColDef { std::string name, type; bool is_primary_key = false; };
+enum class AlterAction { ADD_COL, DROP_COL };
+
+struct ColDef {
+    std::string name, type;
+    bool is_primary_key = false;
+    bool not_null = false;
+    bool unique = false;
+    bool has_default = false;
+    std::string default_value;
+    // FOREIGN KEY
+    std::string fk_ref_table;
+    std::string fk_ref_column;
+};
 struct SetClause { std::string column, value; };
 
 struct SelectColumn {
@@ -97,9 +118,14 @@ struct ParsedQuery {
     std::vector<OrderByClause> order_by;
     // JOIN
     std::vector<JoinClause> joins;
-    // ALTER TABLE ADD COLUMN
+    // ALTER TABLE
+    AlterAction alter_action = AlterAction::ADD_COL;
     std::string alter_col_name;
     std::string alter_col_type;
+    ColDef alter_col_def;           // full col def with constraints
+    // LIMIT / OFFSET
+    int limit = -1;                 // -1 = no limit
+    int offset = 0;
 };
 
 // ── Lexer ──────────────────────────────────────────────────────────────
