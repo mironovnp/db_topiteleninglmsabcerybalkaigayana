@@ -237,6 +237,14 @@ bool Storage::writeAllRows(const std::string& db_name,
         schema.table_name = table_name;
         pool.unpinPage(0, false);
     }
+    return writeAllRows(db_name, table_name, rows, schema);
+}
+
+bool Storage::writeAllRows(const std::string& db_name,
+                           const std::string& table_name,
+                           const std::vector<Row>& rows,
+                           const TableSchema& schema) {
+    auto p = tablePath(db_name, table_name);
 
     // Delete and recreate the file
     std::filesystem::remove(p);
@@ -286,6 +294,58 @@ bool Storage::writeAllRows(const std::string& db_name,
 
     pool.flushAll();
     return true;
+}
+
+// ── findRow ─────────────────────────────────────────────────────
+
+Row Storage::findRow(const std::string& db_name,
+                     const std::string& table_name,
+                     const std::string& key) const {
+    auto p = tablePath(db_name, table_name);
+    BufferPool pool(p.string());
+
+    Page* meta = pool.fetchPage(0);
+    PageId root_id;
+    memcpy(&root_id, meta->data + 16, 4);
+    uint32_t payload_len = meta->getNumRecords();
+    TableSchema s = deserializeSchema(meta->data + 16, payload_len);
+    pool.unpinPage(0, false);
+
+    std::string key_type = s.columns.empty() ? "TEXT"
+                           : s.columns[s.primary_key_index].type;
+
+    BPlusTree tree(pool, root_id, key_type);
+    auto result = tree.search(key);
+    if (result.has_value()) return result.value();
+    return Row{}; // empty = not found
+}
+
+// ── alterTableAddColumn ─────────────────────────────────────────
+
+bool Storage::alterTableAddColumn(const std::string& db_name,
+                                   const std::string& table_name,
+                                   const ColumnDef& new_col) {
+    if (!tableExists(db_name, table_name)) return false;
+
+    // 1. Read current schema
+    TableSchema schema = getTableSchema(db_name, table_name);
+
+    // 2. Check column doesn't already exist
+    for (const auto& col : schema.columns)
+        if (col.name == new_col.name) return false;
+
+    // 3. Read all existing rows
+    auto rows = readAllRows(db_name, table_name);
+
+    // 4. Add new column to schema
+    schema.columns.push_back(new_col);
+
+    // 5. Extend each row with default empty string
+    for (auto& row : rows)
+        row.push_back("");
+
+    // 6. Rewrite file with new schema and extended rows
+    return writeAllRows(db_name, table_name, rows, schema);
 }
 
 } // namespace db

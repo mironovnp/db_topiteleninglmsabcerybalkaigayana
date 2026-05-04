@@ -113,7 +113,7 @@ int main(int argc, char* argv[]) {
             bool valid_start = (first_word == "SELECT" || first_word == "CREATE" || 
                                 first_word == "DROP" || first_word == "INSERT" || 
                                 first_word == "UPDATE" || first_word == "DELETE" || 
-                                first_word == "USE");
+                                first_word == "USE" || first_word == "ALTER");
             if (!valid_start) {
                 std::cout << "\033[31m[ERROR]\033[0m Unexpected keyword: " << first_word << "\n\n";
                 query.clear();

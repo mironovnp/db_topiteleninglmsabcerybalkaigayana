@@ -23,8 +23,16 @@ void Executor::requireDB() const {
 }
 
 int Executor::colIndex(const TableSchema& s, const std::string& name) const {
+    // Exact match first (handles "table.col" and bare names)
     for (size_t i = 0; i < s.columns.size(); ++i)
         if (s.columns[i].name == name) return static_cast<int>(i);
+    // Bare-name fallback: match column whose name ends with ".name"
+    for (size_t i = 0; i < s.columns.size(); ++i) {
+        const auto& cn = s.columns[i].name;
+        auto dot = cn.rfind('.');
+        if (dot != std::string::npos && cn.substr(dot + 1) == name)
+            return static_cast<int>(i);
+    }
     return -1;
 }
 
@@ -134,6 +142,7 @@ json Executor::execute(const std::string& sql) {
             switch (query.type) {
             case QueryType::CREATE_TABLE:    return execCreateTable(query);
             case QueryType::DROP_TABLE:      return execDropTable(query);
+            case QueryType::ALTER_TABLE:     return execAlterTable(query);
             case QueryType::SELECT:          return execSelect(query);
             case QueryType::INSERT:          return execInsert(query);
             case QueryType::UPDATE:          return execUpdate(query);
@@ -190,18 +199,212 @@ json Executor::execDropTable(const ParsedQuery& q) {
     return err("Table '" + q.table_name + "' does not exist.");
 }
 
-// ── SELECT ─────────────────────────────────────────────────────────────
+// ── ALTER TABLE ────────────────────────────────────────────────────
+
+json Executor::execAlterTable(const ParsedQuery& q) {
+    requireDB();
+    if (!storage_.tableExists(current_db_, q.table_name))
+        return err("Table '" + q.table_name + "' does not exist.");
+    ColumnDef cd{ q.alter_col_name, q.alter_col_type };
+    if (storage_.alterTableAddColumn(current_db_, q.table_name, cd))
+        return ok("Column '" + q.alter_col_name + "' added to '" + q.table_name + "'.");
+    return err("Column '" + q.alter_col_name + "' already exists or alter failed.");
+}
+
+// ── SELECT ───────────────────────────────────────────────────────
 
 json Executor::execSelect(const ParsedQuery& q) {
     requireDB();
     auto schema = storage_.getTableSchema(current_db_, q.table_name);
-    auto rows = storage_.readAllRows(current_db_, q.table_name);
+    auto rows   = storage_.readAllRows(current_db_, q.table_name);
+
+    // ───────────────────────────────────────────────────────────────
+    // JOIN processing
+    // ───────────────────────────────────────────────────────────────
+    // Add table prefix to all column names so we can resolve table.col
+    // merged_schema holds all columns with names prefixed as "table.col"
+    // but also keeps bare column name for backward compat (first owner wins).
+    TableSchema merged = schema;
+    // prefix left table columns with table_name
+    for (auto& col : merged.columns)
+        col.name = q.table_name + "." + col.name;
+
+    for (const auto& jc : q.joins) {
+        if (!storage_.tableExists(current_db_, jc.table_name))
+            return err("JOIN table '" + jc.table_name + "' does not exist.");
+
+        auto rschema = storage_.getTableSchema(current_db_, jc.table_name);
+
+        // Determine which column is the PK of right table and if join is by PK
+        // ON left_col = right_col  — detect which side is PK of right table
+        // left_col / right_col have .table and .column fields
+        // We figure out: for each left row, what key to look up in right table
+        // Case 1: right_col.table == jc.table_name (or empty) && right_col.column is PK of right
+        // Case 2: left_col.table  == jc.table_name                     — swapped
+
+        auto colName = [](const QualifiedCol& qc){ return qc.column; };
+
+        bool fast_path = false;
+        bool swapped   = false; // true means lookup key comes from right row, scan right
+
+        auto isRightPK = [&](const std::string& colname) {
+            return rschema.columns[rschema.primary_key_index].name == colname;
+        };
+
+        // Check: right_col refers to right table PK => fast lookup in right
+        if ((jc.right_col.table.empty() || jc.right_col.table == jc.table_name) &&
+             isRightPK(jc.right_col.column)) {
+            fast_path = true; swapped = false;
+        } else if ((jc.left_col.table.empty() || jc.left_col.table == jc.table_name) &&
+                    isRightPK(jc.left_col.column)) {
+            fast_path = true; swapped = true;
+        }
+
+        // Find index of the join column in the left (merged) rows
+        // left col name (unqualified)
+        std::string left_join_col  = swapped ? colName(jc.right_col) : colName(jc.left_col);
+        std::string left_join_tbl  = swapped ? jc.right_col.table    : jc.left_col.table;
+        std::string right_join_col = swapped ? colName(jc.left_col)  : colName(jc.right_col);
+
+        // Find left column index in merged schema
+        auto findMergedIdx = [&](const std::string& tbl, const std::string& col) -> int {
+            // Try qualified name first
+            for (int i = 0; i < (int)merged.columns.size(); ++i) {
+                const std::string& cn = merged.columns[i].name;
+                // cn is like "tablename.col"
+                auto dot = cn.find('.');
+                std::string ctbl = (dot != std::string::npos) ? cn.substr(0, dot) : "";
+                std::string ccol = (dot != std::string::npos) ? cn.substr(dot+1) : cn;
+                if (!tbl.empty() && ctbl == tbl && ccol == col) return i;
+                if (tbl.empty() && ccol == col) return i;
+            }
+            return -1;
+        };
+
+        int left_idx = findMergedIdx(left_join_tbl, left_join_col);
+        if (left_idx < 0)
+            return err("JOIN ON: unknown column '" + left_join_col + "'");
+
+        // null row for right table (used in LEFT JOIN)
+        Row null_right(rschema.columns.size(), "");
+
+        std::vector<Row> right_rows;
+        if (!fast_path)
+            right_rows = storage_.readAllRows(current_db_, jc.table_name);
+
+        // For RIGHT JOIN we need to track which right rows were matched
+        std::vector<bool> right_matched;
+        if (jc.join_type == JoinClause::RIGHT) {
+            if (fast_path)
+                right_rows = storage_.readAllRows(current_db_, jc.table_name);
+            right_matched.assign(right_rows.size(), false);
+        }
+
+        // Find right column index in rschema (for fallback scan)
+        int right_idx = -1;
+        if (!fast_path) {
+            for (int i = 0; i < (int)rschema.columns.size(); ++i)
+                if (rschema.columns[i].name == right_join_col) { right_idx = i; break; }
+            if (right_idx < 0)
+                return err("JOIN ON: unknown column '" + right_join_col + "' in '" + jc.table_name + "'");
+        }
+
+        std::vector<Row> joined_rows;
+
+        for (size_t li = 0; li < rows.size(); ++li) {
+            const Row& lrow = rows[li];
+            const std::string& key = lrow[left_idx];
+
+            std::vector<Row> matches;
+
+            if (fast_path) {
+                // O(log N) B+ lookup
+                Row found = storage_.findRow(current_db_, jc.table_name, key);
+                if (!found.empty()) {
+                    if (jc.join_type == JoinClause::RIGHT) {
+                        // Mark matched right row
+                        for (size_t ri = 0; ri < right_rows.size(); ++ri)
+                            if (right_rows[ri][rschema.primary_key_index] == key) {
+                                right_matched[ri] = true; break;
+                            }
+                    }
+                    matches.push_back(std::move(found));
+                }
+            } else {
+                // Full scan fallback
+                for (size_t ri = 0; ri < right_rows.size(); ++ri) {
+                    if (right_rows[ri][right_idx] == key) {
+                        if (jc.join_type == JoinClause::RIGHT)
+                            right_matched[ri] = true;
+                        matches.push_back(right_rows[ri]);
+                    }
+                }
+            }
+
+            if (matches.empty()) {
+                if (jc.join_type == JoinClause::LEFT) {
+                    // LEFT JOIN: emit left row + null right
+                    Row combined = lrow;
+                    combined.insert(combined.end(), null_right.begin(), null_right.end());
+                    joined_rows.push_back(std::move(combined));
+                }
+                // INNER / RIGHT: skip unmatched left rows here
+            } else {
+                for (const auto& rrow : matches) {
+                    Row combined = lrow;
+                    combined.insert(combined.end(), rrow.begin(), rrow.end());
+                    joined_rows.push_back(std::move(combined));
+                }
+            }
+        }
+
+        // RIGHT JOIN: emit unmatched right rows
+        if (jc.join_type == JoinClause::RIGHT) {
+            Row null_left(merged.columns.size(), "");
+            for (size_t ri = 0; ri < right_rows.size(); ++ri) {
+                if (!right_matched[ri]) {
+                    Row combined = null_left;
+                    combined.insert(combined.end(), right_rows[ri].begin(), right_rows[ri].end());
+                    joined_rows.push_back(std::move(combined));
+                }
+            }
+        }
+
+        // Extend merged schema with right table columns (prefixed)
+        for (const auto& col : rschema.columns) {
+            ColumnDef cd;
+            cd.name = jc.table_name + "." + col.name;
+            cd.type = col.type;
+            merged.columns.push_back(cd);
+        }
+
+        rows = std::move(joined_rows);
+    }
+    // End JOIN processing
+
+    // Helper: resolve column name (possibly "tbl.col") in merged schema
+    // Returns index in merged.columns, or -1 if not found
+    auto resolveCol = [&](const std::string& name) -> int {
+        // Try exact match (e.g., "users.id")
+        for (int i = 0; i < (int)merged.columns.size(); ++i)
+            if (merged.columns[i].name == name) return i;
+        // Try bare column name (last part after dot in schema)
+        for (int i = 0; i < (int)merged.columns.size(); ++i) {
+            auto dot = merged.columns[i].name.rfind('.');
+            std::string bare = (dot != std::string::npos)
+                               ? merged.columns[i].name.substr(dot+1)
+                               : merged.columns[i].name;
+            if (bare == name) return i;
+        }
+        return -1;
+    };
+
 
     // 1. Filter by WHERE
     if (q.where) {
         std::vector<Row> filtered;
         for (const auto& row : rows)
-            if (evalWhere(*q.where, row, schema))
+            if (evalWhere(*q.where, row, merged))
                 filtered.push_back(row);
         rows = std::move(filtered);
     }
@@ -242,7 +445,7 @@ json Executor::execSelect(const ParsedQuery& q) {
             // Compute group key
             std::string key;
             for (const auto& gb : q.group_by) {
-                int idx = colIndex(schema, gb);
+                int idx = resolveCol(gb);
                 if (idx < 0) return err("Unknown column in GROUP BY: " + gb);
                 key += row[idx] + "|";
             }
@@ -257,7 +460,7 @@ json Executor::execSelect(const ParsedQuery& q) {
                 state.count++;
                 if (col == "*") continue; // COUNT(*) handled by state.count
 
-                int idx = colIndex(schema, col);
+                int idx = resolveCol(col);
                 if (idx < 0) {
                     throw std::runtime_error("Unknown column in aggregate: " + col);
                 }
@@ -282,7 +485,7 @@ json Executor::execSelect(const ParsedQuery& q) {
         if (group_map.empty() && q.group_by.empty()) {
              // Handle queries like SELECT COUNT(*) FROM empty_table
              GroupData empty_gd;
-             empty_gd.rep_row = Row(schema.columns.size(), "");
+             empty_gd.rep_row = Row(merged.columns.size(), "");
              for (const auto& ag : needed_aggrs) {
                  empty_gd.aggrs[ag] = AggrState();
              }
@@ -303,7 +506,7 @@ json Executor::execSelect(const ParsedQuery& q) {
         std::vector<GroupData> filtered;
         for (const auto& gd : groups) {
             try {
-                if (evalHaving(*q.having, gd.rep_row, schema, gd.aggrs))
+                if (evalHaving(*q.having, gd.rep_row, merged, gd.aggrs))
                     filtered.push_back(gd);
             } catch (const std::exception& e) {
                 return err(e.what());
@@ -316,10 +519,12 @@ json Executor::execSelect(const ParsedQuery& q) {
     std::vector<std::string> colNames;
     std::vector<SelectColumn> final_select;
     if (q.select_all) {
-        for (const auto& col : schema.columns) {
+        for (const auto& col : merged.columns) {
             SelectColumn sc; sc.name = col.name;
             final_select.push_back(sc);
-            colNames.push_back(col.name);
+            // Display name: strip table prefix for readability
+            auto dot = col.name.rfind('.');
+            colNames.push_back(dot != std::string::npos ? col.name.substr(dot+1) : col.name);
         }
     } else {
         for (const auto& sc : q.select_columns) {
@@ -359,7 +564,7 @@ json Executor::execSelect(const ParsedQuery& q) {
                     res_row.push_back("0");
                 }
             } else {
-                int idx = colIndex(schema, sc.name);
+                int idx = resolveCol(sc.name);
                 if (idx < 0) return err("Unknown column: " + sc.name);
                 res_row.push_back(gd.rep_row[idx]);
             }
@@ -390,8 +595,8 @@ json Executor::execSelect(const ParsedQuery& q) {
                 std::string type = "TEXT";
                 if (final_select[idx].aggr != AggrFunc::NONE) type = "FLOAT";
                 else {
-                    int sidx = colIndex(schema, final_select[idx].name);
-                    if (sidx >= 0) type = schema.columns[sidx].type;
+                    int sidx = resolveCol(final_select[idx].name);
+                    if (sidx >= 0) type = merged.columns[sidx].type;
                 }
 
                 int cmp = compareValues(a[idx], b[idx], type);

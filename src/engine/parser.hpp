@@ -17,9 +17,11 @@ enum class TokenType {
     KW_PRIMARY, KW_KEY,
     KW_ORDER, KW_BY, KW_GROUP, KW_HAVING, KW_ASC, KW_DESC, KW_AS,
     KW_COUNT, KW_SUM, KW_AVG, KW_MIN, KW_MAX,
+    KW_ALTER, KW_ADD, KW_COLUMN,
+    KW_JOIN, KW_INNER, KW_LEFT, KW_RIGHT, KW_OUTER, KW_ON,
     IDENTIFIER, STRING_LITERAL, NUMBER_LITERAL, BOOL_LITERAL,
     OP_EQ, OP_NEQ, OP_LT, OP_GT, OP_LTE, OP_GTE,
-    LPAREN, RPAREN, COMMA, SEMICOLON, STAR,
+    LPAREN, RPAREN, COMMA, SEMICOLON, STAR, DOT,
     END_OF_INPUT
 };
 
@@ -45,7 +47,8 @@ enum class QueryType {
     CREATE_DATABASE, DROP_DATABASE,
     CREATE_TABLE, DROP_TABLE,
     SELECT, INSERT, UPDATE, DELETE_Q,
-    USE_DATABASE
+    USE_DATABASE,
+    ALTER_TABLE
 };
 
 struct ColDef { std::string name, type; bool is_primary_key = false; };
@@ -63,6 +66,20 @@ struct OrderByClause {
     bool asc = true;
 };
 
+// JOIN clause: table alias for qualified column names (tbl.col)
+struct QualifiedCol {
+    std::string table;  // empty = unqualified
+    std::string column;
+};
+
+struct JoinClause {
+    enum Type { INNER, LEFT, RIGHT };
+    Type join_type = INNER;
+    std::string table_name;
+    QualifiedCol left_col;   // ON left_col = right_col
+    QualifiedCol right_col;
+};
+
 struct ParsedQuery {
     QueryType type;
     std::string database_name;
@@ -78,6 +95,11 @@ struct ParsedQuery {
     std::vector<std::string> group_by;
     std::shared_ptr<WhereExpr> having;
     std::vector<OrderByClause> order_by;
+    // JOIN
+    std::vector<JoinClause> joins;
+    // ALTER TABLE ADD COLUMN
+    std::string alter_col_name;
+    std::string alter_col_type;
 };
 
 // ── Lexer ──────────────────────────────────────────────────────────────
@@ -120,6 +142,9 @@ private:
     ParsedQuery parseUpdate();
     ParsedQuery parseDelete();
     ParsedQuery parseUse();
+    ParsedQuery parseAlterTable();
+
+    QualifiedCol parseQualifiedCol();
 
     std::shared_ptr<WhereExpr> parseExprOr();
     std::shared_ptr<WhereExpr> parseExprAnd();

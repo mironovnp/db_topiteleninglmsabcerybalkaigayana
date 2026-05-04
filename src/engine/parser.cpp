@@ -24,6 +24,10 @@ static const std::unordered_map<std::string, TokenType> KEYWORDS = {
     {"AS",TokenType::KW_AS},{"COUNT",TokenType::KW_COUNT},{"SUM",TokenType::KW_SUM},
     {"AVG",TokenType::KW_AVG},{"MIN",TokenType::KW_MIN},{"MAX",TokenType::KW_MAX},
     {"TRUE",TokenType::BOOL_LITERAL},{"FALSE",TokenType::BOOL_LITERAL},
+    {"ALTER",TokenType::KW_ALTER},{"ADD",TokenType::KW_ADD},{"COLUMN",TokenType::KW_COLUMN},
+    {"JOIN",TokenType::KW_JOIN},{"INNER",TokenType::KW_INNER},
+    {"LEFT",TokenType::KW_LEFT},{"RIGHT",TokenType::KW_RIGHT},{"OUTER",TokenType::KW_OUTER},
+    {"ON",TokenType::KW_ON},
 };
 
 // Bring enum values into scope for readability
@@ -75,7 +79,7 @@ Token Lexer::readWord() {
 
 Token Lexer::readOp() {
     char c = input_[pos_++];
-    if (c == '=' ) return {OP_EQ, "="};
+    if (c == '=') return {OP_EQ, "="};
     if (c == '<') {
         if (pos_ < input_.size() && input_[pos_] == '=') { ++pos_; return {OP_LTE, "<="}; }
         return {OP_LT, "<"};
@@ -90,6 +94,7 @@ Token Lexer::readOp() {
     if (c == ',') return {COMMA, ","};
     if (c == ';') return {SEMICOLON, ";"};
     if (c == '*') return {STAR, "*"};
+    if (c == '.') return {DOT, "."};
     throw std::runtime_error(std::string("Unexpected character: ") + c);
 }
 
@@ -155,6 +160,7 @@ ParsedQuery Parser::parse() {
         if (check(KW_TABLE))    return parseDropTable();
         throw std::runtime_error("Expected DATABASE or TABLE after DROP, got: " + cur().value);
     }
+    if (check(KW_ALTER)) { consume(); return parseAlterTable(); }
     if (check(KW_SELECT)) { consume(); return parseSelect(); }
     if (check(KW_INSERT)) { consume(); return parseInsert(); }
     if (check(KW_UPDATE)) { consume(); return parseUpdate(); }
@@ -238,6 +244,41 @@ ParsedQuery Parser::parseUse() {
     return q;
 }
 
+// ── ALTER TABLE ─────────────────────────────────────────────────────────
+
+ParsedQuery Parser::parseAlterTable() {
+    expect(KW_TABLE);
+    ParsedQuery q; q.type = QueryType::ALTER_TABLE;
+    q.table_name = expect(IDENTIFIER).value;
+    expect(KW_ADD);
+    match(KW_COLUMN); // optional COLUMN keyword
+    q.alter_col_name = expect(IDENTIFIER).value;
+    // Type keyword
+    Token tt = consume();
+    std::string tp = tt.value;
+    if (tp == "VARCHAR") {
+        expect(LPAREN);
+        tp += "(" + expect(NUMBER_LITERAL).value + ")";
+        expect(RPAREN);
+    }
+    q.alter_col_type = tp;
+    match(SEMICOLON);
+    return q;
+}
+
+// ── Helper: parse [table.]column ────────────────────────────────────────
+
+QualifiedCol Parser::parseQualifiedCol() {
+    QualifiedCol qc;
+    qc.column = expect(IDENTIFIER).value;
+    if (check(DOT)) {
+        consume(); // eat '.'
+        qc.table = qc.column;
+        qc.column = expect(IDENTIFIER).value;
+    }
+    return qc;
+}
+
 // ── SELECT ─────────────────────────────────────────────────────────────
 
 ParsedQuery Parser::parseSelect() {
@@ -252,13 +293,53 @@ ParsedQuery Parser::parseSelect() {
             else if (match(KW_AVG)) { sc.aggr = AggrFunc::AVG; expect(LPAREN); sc.name = expect(IDENTIFIER).value; expect(RPAREN); }
             else if (match(KW_MIN)) { sc.aggr = AggrFunc::MIN; expect(LPAREN); sc.name = expect(IDENTIFIER).value; expect(RPAREN); }
             else if (match(KW_MAX)) { sc.aggr = AggrFunc::MAX; expect(LPAREN); sc.name = expect(IDENTIFIER).value; expect(RPAREN); }
-            else { sc.name = expect(IDENTIFIER).value; }
+            else {
+                // Support qualified name: table.column
+                sc.name = expect(IDENTIFIER).value;
+                if (check(DOT)) {
+                    consume();
+                    sc.name = sc.name + "." + expect(IDENTIFIER).value;
+                }
+            }
             if (match(KW_AS)) sc.alias = expect(IDENTIFIER).value;
             q.select_columns.push_back(sc);
         } while (match(COMMA));
     }
     expect(KW_FROM);
     q.table_name = expect(IDENTIFIER).value;
+
+    // ── JOIN clauses ────────────────────────────────────────────────────
+    while (true) {
+        JoinClause::Type jtype = JoinClause::INNER;
+        if (check(KW_INNER)) {
+            consume();
+            expect(KW_JOIN);
+        } else if (check(KW_LEFT)) {
+            consume();
+            match(KW_OUTER); // optional OUTER
+            expect(KW_JOIN);
+            jtype = JoinClause::LEFT;
+        } else if (check(KW_RIGHT)) {
+            consume();
+            match(KW_OUTER); // optional OUTER
+            expect(KW_JOIN);
+            jtype = JoinClause::RIGHT;
+        } else if (check(KW_JOIN)) {
+            consume(); // bare JOIN = INNER JOIN
+        } else {
+            break;
+        }
+        JoinClause jc;
+        jc.join_type = jtype;
+        jc.table_name = expect(IDENTIFIER).value;
+        expect(KW_ON);
+        jc.left_col  = parseQualifiedCol();
+        expect(OP_EQ);
+        jc.right_col = parseQualifiedCol();
+        q.joins.push_back(std::move(jc));
+    }
+    // ── End JOIN ─────────────────────────────────────────────────────────
+
     if (match(KW_WHERE)) q.where = parseExprOr();
     if (match(KW_GROUP)) {
         expect(KW_BY);

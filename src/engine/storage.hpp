@@ -36,8 +36,19 @@ public:
     std::vector<Row> readAllRows(const std::string& db_name, const std::string& table_name) const;
     bool writeAllRows(const std::string& db_name, const std::string& table_name,
                       const std::vector<Row>& rows);
+    // writeAllRows with explicit schema (used by alterTableAddColumn)
+    bool writeAllRows(const std::string& db_name, const std::string& table_name,
+                      const std::vector<Row>& rows, const TableSchema& schema);
     int appendRows(const std::string& db_name, const std::string& table_name,
                    const std::vector<Row>& rows);
+    // B+ tree point lookup — returns empty Row if key not found
+    Row findRow(const std::string& db_name, const std::string& table_name,
+                const std::string& key) const;
+
+    // DDL mutation
+    bool alterTableAddColumn(const std::string& db_name,
+                             const std::string& table_name,
+                             const ColumnDef& new_col);
 
 private:
     std::filesystem::path data_dir_;

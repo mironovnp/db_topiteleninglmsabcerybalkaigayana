@@ -25,6 +25,7 @@ private:
     nlohmann::json execUpdate(const ParsedQuery& q);
     nlohmann::json execDelete(const ParsedQuery& q);
     nlohmann::json execUse(const ParsedQuery& q);
+    nlohmann::json execAlterTable(const ParsedQuery& q);
 
     void requireDB() const;
     bool evalWhere(const WhereExpr& expr, const Row& row,
