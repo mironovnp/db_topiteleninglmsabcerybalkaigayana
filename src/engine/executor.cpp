@@ -630,6 +630,95 @@ json Executor::execSelect(const ParsedQuery& q) {
         }
     }
 
+    // 4. ORDER BY
+    if (!q.order_by.empty()) {
+        // Pre-validate ORDER BY columns
+        for (const auto& ob : q.order_by) {
+            if (ob.aggr != AggrFunc::NONE) continue;
+            int proj_idx = -1;
+            for (size_t i = 0; i < final_select.size(); ++i) {
+                if ((!final_select[i].alias.empty() && final_select[i].alias == ob.column) ||
+                    final_select[i].name == ob.column ||
+                    colNames[i] == ob.column) {
+                    proj_idx = static_cast<int>(i);
+                    break;
+                }
+            }
+            if (proj_idx < 0) {
+                int sidx = resolveCol(ob.column);
+                if (sidx < 0) return err("ORDER BY column not found: " + ob.column);
+            }
+        }
+
+        std::sort(groups.begin(), groups.end(), [&](const GroupData& a, const GroupData& b) {
+            for (const auto& ob : q.order_by) {
+                std::string valA, valB, type = "TEXT";
+                if (ob.aggr != AggrFunc::NONE) {
+                    type = "FLOAT";
+                    auto getAggr = [&](const GroupData& g) -> std::string {
+                        auto it = g.aggrs.find({ob.aggr, ob.column});
+                        if (it == g.aggrs.end()) return "0";
+                        if (ob.aggr == AggrFunc::COUNT) return std::to_string(it->second.count);
+                        if (ob.aggr == AggrFunc::SUM) return std::to_string(it->second.sum);
+                        if (ob.aggr == AggrFunc::AVG) return std::to_string(it->second.count ? it->second.sum / it->second.count : 0);
+                        if (ob.aggr == AggrFunc::MIN) return std::to_string(it->second.min_val);
+                        if (ob.aggr == AggrFunc::MAX) return std::to_string(it->second.max_val);
+                        return "0";
+                    };
+                    valA = getAggr(a); valB = getAggr(b);
+                } else {
+                    int proj_idx = -1;
+                    for (size_t i = 0; i < final_select.size(); ++i) {
+                        if ((!final_select[i].alias.empty() && final_select[i].alias == ob.column) ||
+                            final_select[i].name == ob.column ||
+                            colNames[i] == ob.column) {
+                            proj_idx = static_cast<int>(i); break;
+                        }
+                    }
+                    if (proj_idx >= 0) {
+                        auto evalProj = [&](const GroupData& g) -> std::string {
+                            const auto& sc = final_select[proj_idx];
+                            if (sc.aggr != AggrFunc::NONE) {
+                                auto it = g.aggrs.find({sc.aggr, sc.name});
+                                if (it != g.aggrs.end()) {
+                                    if (sc.aggr == AggrFunc::COUNT) return std::to_string(it->second.count);
+                                    if (sc.aggr == AggrFunc::SUM) return std::to_string(it->second.sum);
+                                    if (sc.aggr == AggrFunc::AVG) return std::to_string(it->second.count ? it->second.sum / it->second.count : 0);
+                                    if (sc.aggr == AggrFunc::MIN) return std::to_string(it->second.min_val);
+                                    if (sc.aggr == AggrFunc::MAX) return std::to_string(it->second.max_val);
+                                }
+                                return "0";
+                            } else {
+                                int sidx = resolveCol(sc.name);
+                                if (sidx >= 0) return g.rep_row[sidx];
+                                return "";
+                            }
+                        };
+                        valA = evalProj(a); valB = evalProj(b);
+                        const auto& sc = final_select[proj_idx];
+                        if (sc.aggr != AggrFunc::NONE) type = "FLOAT";
+                        else {
+                            int sidx = resolveCol(sc.name);
+                            if (sidx >= 0) type = merged.columns[sidx].type;
+                        }
+                    } else {
+                        int sidx = resolveCol(ob.column);
+                        if (sidx >= 0) {
+                            valA = a.rep_row[sidx]; valB = b.rep_row[sidx];
+                            type = merged.columns[sidx].type;
+                        }
+                    }
+                }
+                
+                int cmp = compareValues(valA, valB, type);
+                if (cmp != 0) {
+                    return ob.asc ? (cmp < 0) : (cmp > 0);
+                }
+            }
+            return false;
+        });
+    }
+
     std::vector<Row> result_rows;
     for (const auto& gd : groups) {
         Row res_row;
@@ -652,42 +741,6 @@ json Executor::execSelect(const ParsedQuery& q) {
             }
         }
         result_rows.push_back(std::move(res_row));
-    }
-
-    // 4. ORDER BY
-    if (!q.order_by.empty()) {
-        std::vector<std::pair<int, bool>> sort_criteria; // {result_col_index, is_asc}
-        for (const auto& ob : q.order_by) {
-            int idx = -1;
-            for (size_t i = 0; i < final_select.size(); ++i) {
-                if (final_select[i].aggr == ob.aggr && (
-                    (!final_select[i].alias.empty() && final_select[i].alias == ob.column) || 
-                    final_select[i].name == ob.column ||
-                    colNames[i] == ob.column)) {
-                    idx = static_cast<int>(i); break;
-                }
-            }
-            if (idx < 0) return err("ORDER BY column not in SELECT: " + ob.column);
-            sort_criteria.push_back({idx, ob.asc});
-        }
-
-        std::sort(result_rows.begin(), result_rows.end(), [&](const Row& a, const Row& b) {
-            for (const auto& crit : sort_criteria) {
-                int idx = crit.first;
-                std::string type = "TEXT";
-                if (final_select[idx].aggr != AggrFunc::NONE) type = "FLOAT";
-                else {
-                    int sidx = resolveCol(final_select[idx].name);
-                    if (sidx >= 0) type = merged.columns[sidx].type;
-                }
-
-                int cmp = compareValues(a[idx], b[idx], type);
-                if (cmp != 0) {
-                    return crit.second ? (cmp < 0) : (cmp > 0);
-                }
-            }
-            return false;
-        });
     }
 
     // 5. Build result

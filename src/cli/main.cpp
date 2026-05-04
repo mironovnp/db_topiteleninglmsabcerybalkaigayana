@@ -121,7 +121,13 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        bool has_semi = (query.back() == ';');
+        // Check if it ends with a semicolon (ignoring trailing spaces)
+        bool has_semi = false;
+        for (auto it = query.rbegin(); it != query.rend(); ++it) {
+            if (*it == ' ' || *it == '\t' || *it == '\r' || *it == '\n') continue;
+            if (*it == ';') has_semi = true;
+            break;
+        }
 
         // If it doesn't have a semicolon, we validate syntax (dry_run)
         auto result = client.executeQuery(query, !has_semi);
