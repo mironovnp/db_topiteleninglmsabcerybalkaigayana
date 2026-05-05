@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include "engine/storage.hpp"
 
 namespace db {
 
@@ -20,8 +21,7 @@ enum class TokenType {
     KW_ALTER, KW_ADD, KW_COLUMN,
     KW_JOIN, KW_INNER, KW_LEFT, KW_RIGHT, KW_OUTER, KW_ON,
     KW_LIMIT, KW_OFFSET,
-    KW_IN, KW_EXISTS, KW_NULL,
-    KW_UNIQUE, KW_DEFAULT, KW_FOREIGN, KW_REFERENCES,
+    KW_IN, KW_EXISTS, KW_NULL, KW_UNIQUE, KW_DEFAULT, KW_FOREIGN, KW_REFERENCES, KW_CASCADE,
     IDENTIFIER, STRING_LITERAL, NUMBER_LITERAL, BOOL_LITERAL,
     OP_EQ, OP_NEQ, OP_LT, OP_GT, OP_LTE, OP_GTE,
     LPAREN, RPAREN, COMMA, SEMICOLON, STAR, DOT,
@@ -72,6 +72,7 @@ struct ColDef {
     // FOREIGN KEY
     std::string fk_ref_table;
     std::string fk_ref_column;
+    OnDeleteAction on_delete = OnDeleteAction::NO_ACTION;
 };
 struct SetClause { std::string column, value; };
 

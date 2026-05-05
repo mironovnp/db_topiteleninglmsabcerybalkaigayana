@@ -256,6 +256,7 @@ json Executor::execCreateTable(const ParsedQuery& q) {
         col.default_value = cd.default_value;
         col.fk_ref_table = cd.fk_ref_table;
         col.fk_ref_column = cd.fk_ref_column;
+        col.on_delete = cd.on_delete;
         schema.columns.push_back(col);
     }
     // PRIMARY KEY: use specified index, or default to 0 (first column)
@@ -925,26 +926,115 @@ json Executor::execUpdate(const ParsedQuery& q) {
 
 // ── DELETE ─────────────────────────────────────────────────────────────
 
+void Executor::performDelete(const std::string& db_name, const std::string& table_name, const std::vector<Row>& rows_to_delete, int& total_deleted) {
+    if (rows_to_delete.empty()) return;
+    
+    total_deleted += rows_to_delete.size();
+
+    auto schema = storage_.getTableSchema(db_name, table_name);
+
+    // Find dependencies
+    struct Dependency {
+        std::string dep_table_name;
+        int dep_col_index;
+        int ref_col_index;
+        OnDeleteAction on_delete;
+    };
+    std::vector<Dependency> dependencies;
+
+    auto tables = storage_.listTables(db_name);
+    for (const auto& t : tables) {
+        auto t_schema = storage_.getTableSchema(db_name, t);
+        for (size_t c = 0; c < t_schema.columns.size(); ++c) {
+            const auto& col = t_schema.columns[c];
+            if (col.fk_ref_table == table_name) {
+                int ref_idx = colIndex(schema, col.fk_ref_column);
+                if (ref_idx >= 0) {
+                    dependencies.push_back({t, (int)c, ref_idx, col.on_delete});
+                }
+            }
+        }
+    }
+
+    for (const auto& dep : dependencies) {
+        auto dep_rows = storage_.readAllRows(db_name, dep.dep_table_name);
+        std::vector<Row> dep_kept;
+        std::vector<Row> dep_to_delete;
+        bool needs_write = false;
+
+        for (auto& d_row : dep_rows) {
+            bool matches = false;
+            if (dep.dep_col_index < (int)d_row.size() && !d_row[dep.dep_col_index].empty()) {
+                for (const auto& r_del : rows_to_delete) {
+                    if (dep.ref_col_index < (int)r_del.size() && 
+                        d_row[dep.dep_col_index] == r_del[dep.ref_col_index]) {
+                        matches = true;
+                        break;
+                    }
+                }
+            }
+            if (matches) {
+                if (dep.on_delete == OnDeleteAction::NO_ACTION) {
+                    throw std::runtime_error("Cannot delete: foreign key constraint violation from table '" + dep.dep_table_name + "'");
+                } else if (dep.on_delete == OnDeleteAction::SET_NULL) {
+                    d_row[dep.dep_col_index] = "";
+                    dep_kept.push_back(d_row);
+                    needs_write = true;
+                } else if (dep.on_delete == OnDeleteAction::CASCADE) {
+                    dep_to_delete.push_back(d_row);
+                    needs_write = true;
+                }
+            } else {
+                dep_kept.push_back(d_row);
+            }
+        }
+
+        if (needs_write) {
+            // Write dependent table modifications first
+            storage_.writeAllRows(db_name, dep.dep_table_name, dep_kept);
+            // Then cascade delete if necessary
+            if (!dep_to_delete.empty()) {
+                performDelete(db_name, dep.dep_table_name, dep_to_delete, total_deleted);
+            }
+        }
+    }
+}
+
 json Executor::execDelete(const ParsedQuery& q) {
     requireDB();
     auto schema = storage_.getTableSchema(current_db_, q.table_name);
     auto rows = storage_.readAllRows(current_db_, q.table_name);
 
     std::vector<Row> kept;
-    int deleted = 0;
+    std::vector<Row> deleted_rows;
     for (const auto& row : rows) {
         bool match = !q.where || evalWhere(*q.where, row, schema);
-        if (match) ++deleted;
+        if (match) deleted_rows.push_back(row);
         else kept.push_back(row);
     }
 
+    if (deleted_rows.empty()) {
+        json result;
+        result["success"] = true;
+        result["type"] = "modify";
+        result["affected_rows"] = 0;
+        result["message"] = "0 row(s) deleted.";
+        return result;
+    }
+
+    int total_deleted = 0;
+    
+    // Process foreign key constraints (RESTRICT, CASCADE, SET NULL)
+    performDelete(current_db_, q.table_name, deleted_rows, total_deleted);
+    
+    // Write back the main table
     storage_.writeAllRows(current_db_, q.table_name, kept);
 
     json result;
     result["success"] = true;
     result["type"] = "modify";
-    result["affected_rows"] = deleted;
-    result["message"] = std::to_string(deleted) + " row(s) deleted.";
+    result["affected_rows"] = total_deleted;
+    result["message"] = std::to_string(total_deleted) + " row(s) deleted (including cascades).";
     return result;
 }
 

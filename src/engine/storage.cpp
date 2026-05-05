@@ -73,6 +73,8 @@ std::string Storage::serializeSchema(const TableSchema& s) {
         if (col.unique) flags |= 0x02;
         if (col.has_default) flags |= 0x04;
         if (!col.fk_ref_table.empty()) flags |= 0x08;
+        if (col.on_delete == OnDeleteAction::CASCADE) flags |= 0x10;
+        else if (col.on_delete == OnDeleteAction::SET_NULL) flags |= 0x20;
         buf.push_back(static_cast<char>(flags));
         // Default value (if any)
         if (col.has_default) {
@@ -121,6 +123,9 @@ TableSchema Storage::deserializeSchema(const char* data, uint32_t len) {
             cd.unique = (flags & 0x02) != 0;
             cd.has_default = (flags & 0x04) != 0;
             bool has_fk = (flags & 0x08) != 0;
+            if ((flags & 0x10) != 0) cd.on_delete = OnDeleteAction::CASCADE;
+            else if ((flags & 0x20) != 0) cd.on_delete = OnDeleteAction::SET_NULL;
+            else cd.on_delete = OnDeleteAction::NO_ACTION;
             if (cd.has_default && p + 2 <= end) {
                 uint16_t dl; memcpy(&dl, p, 2); p += 2;
                 if (p + dl <= end) { cd.default_value.assign(p, dl); p += dl; }
@@ -140,6 +145,18 @@ TableSchema Storage::deserializeSchema(const char* data, uint32_t len) {
 }
 
 // ── Table ops ──────────────────────────────────────────────────────────
+
+std::vector<std::string> Storage::listTables(const std::string& db_name) const {
+    std::vector<std::string> tables;
+    auto p = dbPath(db_name);
+    if (!std::filesystem::exists(p)) return tables;
+    for (const auto& entry : std::filesystem::directory_iterator(p)) {
+        if (entry.is_regular_file() && entry.path().extension() == ".db") {
+            tables.push_back(entry.path().stem().string());
+        }
+    }
+    return tables;
+}
 
 bool Storage::createTable(const std::string& db_name,
                           const TableSchema& schema) {

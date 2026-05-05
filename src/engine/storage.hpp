@@ -6,6 +6,12 @@
 
 namespace db {
 
+enum class OnDeleteAction {
+    NO_ACTION = 0,
+    CASCADE = 1,
+    SET_NULL = 2
+};
+
 struct ColumnDef {
     std::string name;
     std::string type; // INT, FLOAT, BOOL, TEXT, VARCHAR(N)
@@ -15,6 +21,7 @@ struct ColumnDef {
     std::string default_value;
     std::string fk_ref_table;
     std::string fk_ref_column;
+    OnDeleteAction on_delete = OnDeleteAction::NO_ACTION;
 };
 
 struct TableSchema {
@@ -37,6 +44,7 @@ public:
     bool dropTable(const std::string& db_name, const std::string& table_name);
     bool tableExists(const std::string& db_name, const std::string& table_name) const;
     TableSchema getTableSchema(const std::string& db_name, const std::string& table_name) const;
+    std::vector<std::string> listTables(const std::string& db_name) const;
 
     // Rows
     std::vector<Row> readAllRows(const std::string& db_name, const std::string& table_name) const;

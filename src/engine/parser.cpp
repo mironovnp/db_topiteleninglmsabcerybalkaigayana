@@ -32,6 +32,7 @@ static const std::unordered_map<std::string, TokenType> KEYWORDS = {
     {"IN",TokenType::KW_IN},{"EXISTS",TokenType::KW_EXISTS},{"NULL",TokenType::KW_NULL},
     {"UNIQUE",TokenType::KW_UNIQUE},{"DEFAULT",TokenType::KW_DEFAULT},
     {"FOREIGN",TokenType::KW_FOREIGN},{"REFERENCES",TokenType::KW_REFERENCES},
+    {"CASCADE",TokenType::KW_CASCADE},
 };
 
 // Bring enum values into scope for readability
@@ -234,6 +235,16 @@ ParsedQuery Parser::parseCreateTable() {
                 expect(LPAREN);
                 col.fk_ref_column = expect(IDENTIFIER).value;
                 expect(RPAREN);
+                if (match(KW_ON)) {
+                    expect(KW_DELETE);
+                    if (match(KW_CASCADE)) col.on_delete = OnDeleteAction::CASCADE;
+                    else if (match(KW_SET)) {
+                        expect(KW_NULL);
+                        col.on_delete = OnDeleteAction::SET_NULL;
+                    } else {
+                        throw std::runtime_error("Expected CASCADE or SET NULL after ON DELETE");
+                    }
+                }
             } else {
                 break;
             }

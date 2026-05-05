@@ -39,6 +39,8 @@ private:
                                       const TableSchema* outer_schema = nullptr,
                                       const Row* outer_row = nullptr);
 
+    void performDelete(const std::string& db_name, const std::string& table_name, const std::vector<Row>& rows_to_delete, int& total_deleted);
+
     struct AggrState {
         int count = 0;
         double sum = 0.0;
