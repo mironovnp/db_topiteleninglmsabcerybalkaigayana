@@ -534,28 +534,41 @@ bool Storage::createIndex(const std::string& db_name, const std::string& table_n
     int pk_idx = schema.primary_key_index;
     std::string col_type = schema.columns[col_idx].type;
 
-    // Sort by column value for bulk load
+    // Sort by composite key for bulk load
     std::vector<Row> idx_rows;
     for (const auto& row : rows) {
         if (col_idx < (int)row.size() && !row[col_idx].empty()) {
-            idx_rows.push_back({row[col_idx], row[pk_idx]});
+            std::string composite = row[col_idx] + std::string(1, '\0') + row[pk_idx];
+            idx_rows.push_back({composite, row[pk_idx]});
         }
     }
     std::sort(idx_rows.begin(), idx_rows.end(),
               [&](const Row& a, const Row& b) {
+                  size_t na = a[0].find('\0');
+                  size_t nb = b[0].find('\0');
+                  std::string va = (na == std::string::npos) ? a[0] : a[0].substr(0, na);
+                  std::string vb = (nb == std::string::npos) ? b[0] : b[0].substr(0, nb);
+                  
+                  int cmp = 0;
                   if (col_type == "INT") {
                       long la = 0, lb = 0;
-                      try { la = std::stol(a[0]); } catch (...) {}
-                      try { lb = std::stol(b[0]); } catch (...) {}
-                      return la < lb;
+                      try { if (!va.empty()) la = std::stol(va); } catch (...) {}
+                      try { if (!vb.empty()) lb = std::stol(vb); } catch (...) {}
+                      cmp = (la < lb) ? -1 : (la > lb) ? 1 : 0;
+                  } else if (col_type == "FLOAT") {
+                      double da = 0, db = 0;
+                      try { if (!va.empty()) da = std::stod(va); } catch (...) {}
+                      try { if (!vb.empty()) db = std::stod(vb); } catch (...) {}
+                      cmp = (da < db) ? -1 : (da > db) ? 1 : 0;
+                  } else {
+                      cmp = va.compare(vb);
                   }
-                  if (col_type == "FLOAT") {
-                      double da = 0, db2 = 0;
-                      try { da = std::stod(a[0]); } catch (...) {}
-                      try { db2 = std::stod(b[0]); } catch (...) {}
-                      return da < db2;
-                  }
-                  return a[0] < b[0];
+                  
+                  if (cmp != 0) return cmp < 0;
+                  
+                  std::string sa = (na == std::string::npos) ? "" : a[0].substr(na + 1);
+                  std::string sb = (nb == std::string::npos) ? "" : b[0].substr(nb + 1);
+                  return sa < sb;
               });
 
     // Create the .idx file with meta page + bulk-loaded tree
@@ -639,18 +652,12 @@ std::vector<std::string> Storage::indexLookup(const std::string& db_name,
     pool.unpinPage(0, false);
 
     BPlusTree tree(pool, root_id, col_type);
-    auto result = tree.search(value);
-    if (result.has_value()) {
-        // The row stored in the index is [primary_key]
-        return {result.value()[1]}; // idx_rows are {col_value, pk_value}
-    }
-
-    // For non-unique indexes, scan all leaves to find all matches
-    auto all = tree.scanAll();
+    auto matches = tree.scanPrefix(value);
+    
     std::vector<std::string> pks;
-    for (const auto& row : all) {
-        if (!row.empty() && row[0] == value && row.size() > 1) {
-            pks.push_back(row[1]);
+    for (const auto& row : matches) {
+        if (row.size() >= 2) {
+            pks.push_back(row[1]); // Row in index is [composite, pk]
         }
     }
     return pks;

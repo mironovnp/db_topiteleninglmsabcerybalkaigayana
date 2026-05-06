@@ -29,6 +29,8 @@ public:
 
     // ── Scans ──────────────────────────────────────────────────────────
     std::vector<Row> scanAll() const;
+    std::vector<Row> scanPrefix(const std::string& prefix) const;
+
 
     // ── Bulk load (sorted rows, key_col_index) ─────────────────────────
     /// Builds the tree bottom-up from pre-sorted rows.

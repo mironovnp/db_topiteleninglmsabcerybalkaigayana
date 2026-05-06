@@ -18,19 +18,38 @@ BPlusTree::BPlusTree(BufferPool& pool, PageId root_page_id,
 // ════════════════════════════════════════════════════════════════════════
 
 int BPlusTree::compareKeys(const std::string& a, const std::string& b) const {
+    size_t null_a = a.find('\0');
+    size_t null_b = b.find('\0');
+
+    std::string val_a = (null_a == std::string::npos) ? a : a.substr(0, null_a);
+    std::string val_b = (null_b == std::string::npos) ? b : b.substr(0, null_b);
+
+    int cmp = 0;
     if (key_type_ == "INT") {
         long la = 0, lb = 0;
-        try { la = std::stol(a); } catch (...) {}
-        try { lb = std::stol(b); } catch (...) {}
-        return (la < lb) ? -1 : (la > lb) ? 1 : 0;
-    }
-    if (key_type_ == "FLOAT") {
+        try { if (!val_a.empty()) la = std::stol(val_a); } catch (...) {}
+        try { if (!val_b.empty()) lb = std::stol(val_b); } catch (...) {}
+        cmp = (la < lb) ? -1 : (la > lb) ? 1 : 0;
+    } else if (key_type_ == "FLOAT") {
         double da = 0, db = 0;
-        try { da = std::stod(a); } catch (...) {}
-        try { db = std::stod(b); } catch (...) {}
-        return (da < db) ? -1 : (da > db) ? 1 : 0;
+        try { if (!val_a.empty()) da = std::stod(val_a); } catch (...) {}
+        try { if (!val_b.empty()) db = std::stod(val_b); } catch (...) {}
+        cmp = (da < db) ? -1 : (da > db) ? 1 : 0;
+    } else {
+        cmp = val_a.compare(val_b);
     }
-    return a.compare(b);
+
+    if (cmp != 0) return cmp;
+
+    // Primary values equal. Compare PK suffixes for secondary indexes.
+    if (null_a != std::string::npos && null_b != std::string::npos) {
+        return a.substr(null_a + 1).compare(b.substr(null_b + 1));
+    }
+    // "val" < "val\0pk"
+    if (null_a == std::string::npos && null_b != std::string::npos) return -1;
+    if (null_a != std::string::npos && null_b == std::string::npos) return 1;
+
+    return 0;
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -198,6 +217,49 @@ std::vector<Row> BPlusTree::scanAll() const {
         uint32_t n = pg->getNumRecords();
         for (uint32_t i = 0; i < n; ++i) {
             auto cv = readCell(*pg, i);
+            result.push_back(deserializeRow(cv.row_ptr, cv.row_len));
+        }
+        PageId next = leafGetNextId(*pg);
+        pool_.unpinPage(cur, false);
+        cur = next;
+    }
+    return result;
+}
+
+std::vector<Row> BPlusTree::scanPrefix(const std::string& prefix) const {
+    std::vector<Row> result;
+    PageId lid = findLeaf(prefix);
+    PageId cur = lid;
+
+    bool done = false;
+    while (cur != INVALID_PAGE_ID && !done) {
+        Page* pg = pool_.fetchPage(cur);
+        uint32_t n = pg->getNumRecords();
+        for (uint32_t i = 0; i < n; ++i) {
+            auto cv = readCell(*pg, i);
+            
+            // Compare only the "value" part
+            size_t null_idx = cv.key.find('\0');
+            std::string val_part = (null_idx == std::string::npos) ? cv.key : cv.key.substr(0, null_idx);
+
+            int cmp = 0;
+            if (key_type_ == "INT") {
+                long la = 0, lb = 0;
+                try { if (!val_part.empty()) la = std::stol(val_part); } catch (...) {}
+                try { if (!prefix.empty()) lb = std::stol(prefix); } catch (...) {}
+                cmp = (la < lb) ? -1 : (la > lb) ? 1 : 0;
+            } else if (key_type_ == "FLOAT") {
+                double da = 0, db = 0;
+                try { if (!val_part.empty()) da = std::stod(val_part); } catch (...) {}
+                try { if (!prefix.empty()) db = std::stod(prefix); } catch (...) {}
+                cmp = (da < db) ? -1 : (da > db) ? 1 : 0;
+            } else {
+                cmp = val_part.compare(prefix);
+            }
+
+            if (cmp < 0) continue;
+            if (cmp > 0) { done = true; break; }
+            
             result.push_back(deserializeRow(cv.row_ptr, cv.row_len));
         }
         PageId next = leafGetNextId(*pg);
