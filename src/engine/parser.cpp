@@ -33,6 +33,7 @@ static const std::unordered_map<std::string, TokenType> KEYWORDS = {
     {"UNIQUE",TokenType::KW_UNIQUE},{"DEFAULT",TokenType::KW_DEFAULT},
     {"FOREIGN",TokenType::KW_FOREIGN},{"REFERENCES",TokenType::KW_REFERENCES},
     {"CASCADE",TokenType::KW_CASCADE},
+    {"INDEX",TokenType::KW_INDEX},
 };
 
 // Bring enum values into scope for readability
@@ -157,13 +158,15 @@ ParsedQuery Parser::parse() {
         consume();
         if (check(KW_DATABASE)) return parseCreateDB();
         if (check(KW_TABLE))    return parseCreateTable();
-        throw std::runtime_error("Expected DATABASE or TABLE after CREATE, got: " + cur().value);
+        if (check(KW_INDEX))    return parseCreateIndex();
+        throw std::runtime_error("Expected DATABASE, TABLE or INDEX after CREATE, got: " + cur().value);
     }
     if (check(KW_DROP)) {
         consume();
         if (check(KW_DATABASE)) return parseDropDB();
         if (check(KW_TABLE))    return parseDropTable();
-        throw std::runtime_error("Expected DATABASE or TABLE after DROP, got: " + cur().value);
+        if (check(KW_INDEX))    return parseDropIndex();
+        throw std::runtime_error("Expected DATABASE, TABLE or INDEX after DROP, got: " + cur().value);
     }
     if (check(KW_ALTER)) { consume(); return parseAlterTable(); }
     if (check(KW_SELECT)) { consume(); return parseSelect(); }
@@ -617,12 +620,45 @@ std::shared_ptr<WhereExpr> Parser::parseExprAtom() {
     }
 
     // Support right side as table.column or string literal or number
-    node->value = consume().value;
-    if (check(DOT)) {
+    Token rhs = consume();
+    node->value = rhs.value;
+    if (rhs.type == STRING_LITERAL || rhs.type == NUMBER_LITERAL || rhs.type == BOOL_LITERAL) {
+        node->is_literal = true;
+    } else if (check(DOT)) {
         consume();
         node->value += "." + expect(IDENTIFIER).value;
     }
     return node;
+}
+
+// ── CREATE INDEX ──────────────────────────────────────────────────────
+
+ParsedQuery Parser::parseCreateIndex() {
+    expect(KW_INDEX);
+    ParsedQuery q;
+    q.type = QueryType::CREATE_INDEX;
+    q.index_name = expect(IDENTIFIER).value;
+    expect(KW_ON);
+    q.table_name = expect(IDENTIFIER).value;
+    expect(LPAREN);
+    // Column name for the index
+    q.alter_col_name = expect(IDENTIFIER).value;
+    expect(RPAREN);
+    match(SEMICOLON);
+    return q;
+}
+
+// ── DROP INDEX ────────────────────────────────────────────────────────
+
+ParsedQuery Parser::parseDropIndex() {
+    expect(KW_INDEX);
+    ParsedQuery q;
+    q.type = QueryType::DROP_INDEX;
+    q.index_name = expect(IDENTIFIER).value;
+    expect(KW_ON);
+    q.table_name = expect(IDENTIFIER).value;
+    match(SEMICOLON);
+    return q;
 }
 
 } // namespace db

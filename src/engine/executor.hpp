@@ -29,6 +29,8 @@ private:
     nlohmann::json execDelete(const ParsedQuery& q);
     nlohmann::json execUse(const ParsedQuery& q);
     nlohmann::json execAlterTable(const ParsedQuery& q);
+    nlohmann::json execCreateIndex(const ParsedQuery& q);
+    nlohmann::json execDropIndex(const ParsedQuery& q);
 
     void requireDB() const;
     bool evalWhere(const WhereExpr& expr, const Row& row,
@@ -56,6 +58,11 @@ private:
     int colIndex(const TableSchema& s, const std::string& name) const;
     int compareValues(const std::string& a, const std::string& b,
                       const std::string& type) const;
+
+    // Try to use secondary index for simple WHERE col = value
+    // Returns true if optimization was applied, false to fall back to full scan
+    bool tryIndexScan(const ParsedQuery& q, const TableSchema& schema,
+                      std::vector<Row>& out_rows) const;
 
     static nlohmann::json ok(const std::string& msg);
     static nlohmann::json err(const std::string& msg);

@@ -80,20 +80,22 @@ bool Executor::evalWhere(const WhereExpr& expr, const Row& row,
 
         // Determine right hand side: either a column value or a literal
         std::string right_val = expr.value;
-        int right_idx = colIndex(schema, expr.value);
-        if (right_idx >= 0) {
-            right_val = row[right_idx];
-        } else if (outer_schema && (right_idx = colIndex(*outer_schema, expr.value)) >= 0) {
-            right_val = (*outer_row)[right_idx];
-        } else if (expr.value.find('.') != std::string::npos) {
-            std::string debug = "Failed to resolve RHS: " + expr.value;
-            if (outer_schema) {
-                debug += " | outer_schema cols:";
-                for (const auto& c : outer_schema->columns) debug += " " + c.name;
-            } else {
-                debug += " | NO outer_schema";
+        if (!expr.is_literal) {
+            int right_idx = colIndex(schema, expr.value);
+            if (right_idx >= 0) {
+                right_val = row[right_idx];
+            } else if (outer_schema && (right_idx = colIndex(*outer_schema, expr.value)) >= 0) {
+                right_val = (*outer_row)[right_idx];
+            } else if (expr.value.find('.') != std::string::npos) {
+                std::string debug = "Failed to resolve RHS: " + expr.value;
+                if (outer_schema) {
+                    debug += " | outer_schema cols:";
+                    for (const auto& c : outer_schema->columns) debug += " " + c.name;
+                } else {
+                    debug += " | NO outer_schema";
+                }
+                throw std::runtime_error(debug);
             }
-            throw std::runtime_error(debug);
         }
 
         int cmp = compareValues(val, right_val, type);
@@ -207,6 +209,8 @@ json Executor::execute(const std::string& sql) {
             case QueryType::CREATE_TABLE:    return execCreateTable(query);
             case QueryType::DROP_TABLE:      return execDropTable(query);
             case QueryType::ALTER_TABLE:     return execAlterTable(query);
+            case QueryType::CREATE_INDEX:    return execCreateIndex(query);
+            case QueryType::DROP_INDEX:      return execDropIndex(query);
             case QueryType::SELECT:          return execSelect(query);
             case QueryType::INSERT:          return execInsert(query);
             case QueryType::UPDATE:          return execUpdate(query);
@@ -299,7 +303,13 @@ json Executor::execAlterTable(const ParsedQuery& q) {
 json Executor::execSelect(const ParsedQuery& q) {
     requireDB();
     auto schema = storage_.getTableSchema(current_db_, q.table_name);
-    auto rows   = storage_.readAllRows(current_db_, q.table_name);
+
+    // Try secondary index optimization for simple WHERE col = value
+    std::vector<Row> rows;
+    bool used_index = tryIndexScan(q, schema, rows);
+    if (!used_index) {
+        rows = storage_.readAllRows(current_db_, q.table_name);
+    }
 
     // ───────────────────────────────────────────────────────────────
     // JOIN processing
@@ -886,6 +896,12 @@ json Executor::execInsert(const ParsedQuery& q) {
     }
 
     int n = storage_.appendRows(current_db_, q.table_name, rows);
+
+    // Maintain secondary indexes
+    for (const auto& row : rows) {
+        storage_.indexInsertRow(current_db_, q.table_name, schema, row);
+    }
+
     json result;
     result["success"] = true;
     result["type"] = "modify";
@@ -905,11 +921,18 @@ json Executor::execUpdate(const ParsedQuery& q) {
     for (auto& row : rows) {
         bool match = !q.where || evalWhere(*q.where, row, schema);
         if (match) {
+            // Remove old index entries
+            storage_.indexRemoveRow(current_db_, q.table_name, schema, row);
+
             for (const auto& sc : q.set_clauses) {
                 int idx = colIndex(schema, sc.column);
                 if (idx < 0) return err("Unknown column: " + sc.column);
                 row[idx] = sc.value;
             }
+
+            // Add new index entries
+            storage_.indexInsertRow(current_db_, q.table_name, schema, row);
+
             ++affected;
         }
     }
@@ -1024,6 +1047,11 @@ json Executor::execDelete(const ParsedQuery& q) {
 
     int total_deleted = 0;
     
+    // Remove deleted rows from secondary indexes
+    for (const auto& row : deleted_rows) {
+        storage_.indexRemoveRow(current_db_, q.table_name, schema, row);
+    }
+
     // Process foreign key constraints (RESTRICT, CASCADE, SET NULL)
     performDelete(current_db_, q.table_name, deleted_rows, total_deleted);
     
@@ -1036,6 +1064,64 @@ json Executor::execDelete(const ParsedQuery& q) {
     result["affected_rows"] = total_deleted;
     result["message"] = std::to_string(total_deleted) + " row(s) deleted (including cascades).";
     return result;
+}
+
+// ── CREATE INDEX ──────────────────────────────────────────────────────
+
+json Executor::execCreateIndex(const ParsedQuery& q) {
+    requireDB();
+    if (storage_.createIndex(current_db_, q.table_name, q.index_name, q.alter_col_name))
+        return ok("Index '" + q.index_name + "' created on " + q.table_name + "(" + q.alter_col_name + ").");
+    return err("Failed to create index '" + q.index_name + "'. Column may not exist or index already exists.");
+}
+
+// ── DROP INDEX ────────────────────────────────────────────────────────
+
+json Executor::execDropIndex(const ParsedQuery& q) {
+    requireDB();
+    if (storage_.dropIndex(current_db_, q.table_name, q.index_name))
+        return ok("Index '" + q.index_name + "' dropped.");
+    return err("Index '" + q.index_name + "' not found.");
+}
+
+// ── tryIndexScan ──────────────────────────────────────────────────────
+// Attempt to optimize a simple WHERE col = value query using a secondary index.
+// Returns true and fills out_rows if optimization was applied.
+
+bool Executor::tryIndexScan(const ParsedQuery& q, const TableSchema& schema,
+                             std::vector<Row>& out_rows) const {
+    // Only optimize simple equality conditions without JOINs
+    if (!q.joins.empty()) return false;
+    if (!q.where) return false;
+
+    // Only handle simple CMP with '='
+    const WhereExpr& w = *q.where;
+    if (w.kind != WhereExpr::CMP || w.op != "=") return false;
+
+    // Find the column
+    std::string col_name = w.column;
+    int col_idx = colIndex(schema, col_name);
+    if (col_idx < 0) return false;
+
+    // Don't use secondary index if it's the primary key (already fast)
+    if (col_idx == schema.primary_key_index) return false;
+
+    // Check if index exists
+    if (!storage_.hasIndex(current_db_, q.table_name, schema.columns[col_idx].name))
+        return false;
+
+    // Use the index to find primary keys
+    auto pks = storage_.indexLookup(current_db_, q.table_name,
+                                     schema.columns[col_idx].name, w.value);
+    
+    // Fetch each row by primary key
+    for (const auto& pk : pks) {
+        Row row = storage_.findRow(current_db_, q.table_name, pk);
+        if (!row.empty()) {
+            out_rows.push_back(std::move(row));
+        }
+    }
+    return true;
 }
 
 } // namespace db

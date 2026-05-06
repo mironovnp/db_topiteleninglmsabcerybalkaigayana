@@ -22,6 +22,7 @@ enum class TokenType {
     KW_JOIN, KW_INNER, KW_LEFT, KW_RIGHT, KW_OUTER, KW_ON,
     KW_LIMIT, KW_OFFSET,
     KW_IN, KW_EXISTS, KW_NULL, KW_UNIQUE, KW_DEFAULT, KW_FOREIGN, KW_REFERENCES, KW_CASCADE,
+    KW_INDEX,
     IDENTIFIER, STRING_LITERAL, NUMBER_LITERAL, BOOL_LITERAL,
     OP_EQ, OP_NEQ, OP_LT, OP_GT, OP_LTE, OP_GTE,
     LPAREN, RPAREN, COMMA, SEMICOLON, STAR, DOT,
@@ -48,6 +49,7 @@ struct WhereExpr {
     std::vector<std::string> in_values;              // IN (val1, val2, ...)
     std::shared_ptr<ParsedQuery> subquery;           // IN (SELECT ...) / EXISTS (SELECT ...)
     bool negated = false;                            // NOT IN / NOT EXISTS
+    bool is_literal = false;                         // True if value is a string/number literal
 };
 
 // ── Query representation ───────────────────────────────────────────────
@@ -57,7 +59,8 @@ enum class QueryType {
     CREATE_TABLE, DROP_TABLE,
     SELECT, INSERT, UPDATE, DELETE_Q,
     USE_DATABASE,
-    ALTER_TABLE, ALTER_DROP_COL
+    ALTER_TABLE, ALTER_DROP_COL,
+    CREATE_INDEX, DROP_INDEX
 };
 
 enum class AlterAction { ADD_COL, DROP_COL };
@@ -127,6 +130,8 @@ struct ParsedQuery {
     // LIMIT / OFFSET
     int limit = -1;                 // -1 = no limit
     int offset = 0;
+    // CREATE INDEX / DROP INDEX
+    std::string index_name;
 };
 
 // ── Lexer ──────────────────────────────────────────────────────────────
@@ -170,6 +175,8 @@ private:
     ParsedQuery parseDelete();
     ParsedQuery parseUse();
     ParsedQuery parseAlterTable();
+    ParsedQuery parseCreateIndex();
+    ParsedQuery parseDropIndex();
 
     QualifiedCol parseQualifiedCol();
 

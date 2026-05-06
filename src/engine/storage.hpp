@@ -24,10 +24,16 @@ struct ColumnDef {
     OnDeleteAction on_delete = OnDeleteAction::NO_ACTION;
 };
 
+struct IndexDef {
+    std::string index_name;
+    std::string column_name;
+};
+
 struct TableSchema {
     std::string table_name;
     std::vector<ColumnDef> columns;
     int primary_key_index = 0;      // default: first column
+    std::vector<IndexDef> indexes;  // secondary indexes
 };
 
 class Storage {
@@ -67,10 +73,34 @@ public:
                               const std::string& table_name,
                               const std::string& col_name);
 
+    // Secondary indexes
+    bool createIndex(const std::string& db_name, const std::string& table_name,
+                     const std::string& index_name, const std::string& column_name);
+    bool dropIndex(const std::string& db_name, const std::string& table_name,
+                   const std::string& index_name);
+    // Lookup via secondary index: returns list of primary keys matching the value
+    std::vector<std::string> indexLookup(const std::string& db_name,
+                                         const std::string& table_name,
+                                         const std::string& column_name,
+                                         const std::string& value) const;
+    // Insert/remove entries from all secondary indexes of a table
+    void indexInsertRow(const std::string& db_name, const std::string& table_name,
+                        const TableSchema& schema, const Row& row);
+    void indexRemoveRow(const std::string& db_name, const std::string& table_name,
+                        const TableSchema& schema, const Row& row);
+    // Check if a secondary index exists for a column
+    bool hasIndex(const std::string& db_name, const std::string& table_name,
+                  const std::string& column_name) const;
+
+    // Public access to schema serialization (used by index helpers)
+    static std::string serializeSchemaPublic(const TableSchema& s) { return serializeSchema(s); }
+
 private:
     std::filesystem::path data_dir_;
     std::filesystem::path dbPath(const std::string& db) const;
     std::filesystem::path tablePath(const std::string& db, const std::string& tbl) const;
+    std::filesystem::path indexPath(const std::string& db, const std::string& tbl,
+                                    const std::string& col) const;
 
     // Meta page serialization
     static std::string serializeSchema(const TableSchema& s);
