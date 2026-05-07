@@ -2,8 +2,17 @@
 #include <stdexcept>
 #include <algorithm>
 #include <functional>
+#include <map>
+#include <iomanip>
+#include <sstream>
 
 namespace db {
+
+static std::string formatFloat(double val) {
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(3) << val;
+    return out.str();
+}
 
 using json = nlohmann::json;
 
@@ -22,1106 +31,468 @@ void Executor::requireDB() const {
         throw std::runtime_error("No database selected. Use: USE <database>;");
 }
 
-int Executor::colIndex(const TableSchema& s, const std::string& name) const {
-    // Exact match first (handles "table.col" and bare names)
-    for (size_t i = 0; i < s.columns.size(); ++i)
-        if (s.columns[i].name == name) return static_cast<int>(i);
-    // Bare-name fallback: match schema column whose name ends with ".name"
+int Executor::colIndex(const TableSchema& s, const std::string& table, const std::string& name) const {
     for (size_t i = 0; i < s.columns.size(); ++i) {
-        const auto& cn = s.columns[i].name;
-        auto dot = cn.rfind('.');
-        if (dot != std::string::npos && cn.substr(dot + 1) == name)
-            return static_cast<int>(i);
+        if (!table.empty() && s.columns[i].name == table + "." + name) return static_cast<int>(i);
+        if (table.empty() && s.columns[i].name == name) return static_cast<int>(i);
     }
-    // Qualified-name fallback: if name is "table.col" and schema is "table" with column "col"
-    auto dot = name.find('.');
-    if (dot != std::string::npos && !s.table_name.empty()) {
-        std::string tname = name.substr(0, dot);
-        std::string cname = name.substr(dot + 1);
-        if (tname == s.table_name) {
-            for (size_t i = 0; i < s.columns.size(); ++i)
-                if (s.columns[i].name == cname) return static_cast<int>(i);
+    for (size_t i = 0; i < s.columns.size(); ++i) {
+        auto dot = s.columns[i].name.rfind('.');
+        std::string bare = (dot != std::string::npos) ? s.columns[i].name.substr(dot + 1) : s.columns[i].name;
+        if (bare == name) {
+            if (table.empty() || (!s.table_name.empty() && table == s.table_name)) return static_cast<int>(i);
+            std::string tbl = (dot != std::string::npos) ? s.columns[i].name.substr(0, dot) : "";
+            if (tbl == table) return static_cast<int>(i);
         }
     }
     return -1;
 }
 
-int Executor::compareValues(const std::string& a, const std::string& b,
-                             const std::string& type) const {
-    if (type == "INT") {
-        long la = std::stol(a), lb = std::stol(b);
-        return (la < lb) ? -1 : (la > lb) ? 1 : 0;
+int Executor::compareValues(const Value& a, const Value& b) const {
+    if (a.type == "NULL" || b.type == "NULL") {
+        if (a.type == "NULL" && b.type == "NULL") return 0;
+        return (a.type == "NULL") ? -1 : 1;
     }
-    if (type == "FLOAT") {
-        double da = std::stod(a), db = std::stod(b);
-        return (da < db) ? -1 : (da > db) ? 1 : 0;
+    std::string t = (a.type == "FLOAT" || b.type == "FLOAT") ? "FLOAT" :
+                    (a.type == "INT" || b.type == "INT") ? "INT" : "TEXT";
+    if (t == "INT") {
+        try {
+            long la = a.val.empty() ? 0 : std::stol(a.val);
+            long lb = b.val.empty() ? 0 : std::stol(b.val);
+            return (la < lb) ? -1 : (la > lb) ? 1 : 0;
+        } catch (...) { return a.val.compare(b.val); }
     }
-    return a.compare(b);
+    if (t == "FLOAT") {
+        try {
+            double da = a.val.empty() ? 0.0 : std::stod(a.val);
+            double db = b.val.empty() ? 0.0 : std::stod(b.val);
+            return (da < db) ? -1 : (da > db) ? 1 : 0;
+        } catch (...) { return a.val.compare(b.val); }
+    }
+    return a.val.compare(b.val);
 }
 
-bool Executor::evalWhere(const WhereExpr& expr, const Row& row,
-                          const TableSchema& schema,
-                          const TableSchema* outer_schema,
-                          const Row* outer_row) const {
-    switch (expr.kind) {
-    case WhereExpr::CMP: {
-        int idx = colIndex(schema, expr.column);
-        std::string val;
-        std::string type;
-        if (idx >= 0) {
-            val = row[idx];
-            type = schema.columns[idx].type;
-        } else if (outer_schema && (idx = colIndex(*outer_schema, expr.column)) >= 0) {
-            val = (*outer_row)[idx];
-            type = outer_schema->columns[idx].type;
-        } else {
-            throw std::runtime_error("Unknown column: " + expr.column);
+Value Executor::evaluateExpression(const Expression* expr, const Row& row, const TableSchema& schema,
+                                   const std::map<std::pair<AggrFunc, std::string>, AggrState>* aggrs,
+                                   const TableSchema* outer_schema, const Row* outer_row) {
+    if (!expr) return {"", "NULL"};
+    if (auto lit = dynamic_cast<const LiteralExpression*>(expr)) {
+        if (lit->type == TokenType::NUMBER_LITERAL) return {lit->value, lit->value.find('.') != std::string::npos ? "FLOAT" : "INT"};
+        if (lit->type == TokenType::BOOL_LITERAL) return {lit->value == "TRUE" ? "1" : "0", "BOOL"};
+        if (lit->type == TokenType::KW_NULL) return {"", "NULL"};
+        return {lit->value, "TEXT"};
+    }
+    if (auto col = dynamic_cast<const ColumnExpression*>(expr)) {
+        int idx = colIndex(schema, col->table, col->column);
+        if (idx >= 0) return {row[idx], schema.columns[idx].type};
+        if (outer_schema && outer_row) {
+            idx = colIndex(*outer_schema, col->table, col->column);
+            if (idx >= 0) return {(*outer_row)[idx], outer_schema->columns[idx].type};
         }
-
-        // Determine right hand side: either a column value or a literal
-        std::string right_val = expr.value;
-        if (!expr.is_literal) {
-            int right_idx = colIndex(schema, expr.value);
-            if (right_idx >= 0) {
-                right_val = row[right_idx];
-            } else if (outer_schema && (right_idx = colIndex(*outer_schema, expr.value)) >= 0) {
-                right_val = (*outer_row)[right_idx];
-            } else if (expr.value.find('.') != std::string::npos) {
-                std::string debug = "Failed to resolve RHS: " + expr.value;
-                if (outer_schema) {
-                    debug += " | outer_schema cols:";
-                    for (const auto& c : outer_schema->columns) debug += " " + c.name;
-                } else {
-                    debug += " | NO outer_schema";
-                }
-                throw std::runtime_error(debug);
+        throw std::runtime_error("Unknown column: " + (col->table.empty() ? "" : col->table + ".") + col->column);
+    }
+    if (auto aggr = dynamic_cast<const AggregateExpression*>(expr)) {
+        if (aggrs) {
+            auto it = aggrs->find({aggr->func, aggr->column});
+            if (it != aggrs->end()) {
+                if (aggr->func == AggrFunc::COUNT) return {std::to_string(it->second.count), "INT"};
+                if (aggr->func == AggrFunc::SUM) return {formatFloat(it->second.sum), "FLOAT"};
+                if (aggr->func == AggrFunc::AVG) return {formatFloat(it->second.count ? it->second.sum / it->second.count : 0), "FLOAT"};
+                if (aggr->func == AggrFunc::MIN) return {formatFloat(it->second.min_val), "FLOAT"};
+                if (aggr->func == AggrFunc::MAX) return {formatFloat(it->second.max_val), "FLOAT"};
             }
         }
-
-        int cmp = compareValues(val, right_val, type);
-        if (expr.op == "=")  return cmp == 0;
-        if (expr.op == "!=") return cmp != 0;
-        if (expr.op == "<")  return cmp < 0;
-        if (expr.op == ">")  return cmp > 0;
-        if (expr.op == "<=") return cmp <= 0;
-        if (expr.op == ">=") return cmp >= 0;
-        return false;
+        return {"0", "FLOAT"};
     }
-    case WhereExpr::AND_OP:
-        return evalWhere(*expr.left, row, schema, outer_schema, outer_row) &&
-               evalWhere(*expr.right, row, schema, outer_schema, outer_row);
-    case WhereExpr::OR_OP:
-        return evalWhere(*expr.left, row, schema, outer_schema, outer_row) ||
-               evalWhere(*expr.right, row, schema, outer_schema, outer_row);
-    case WhereExpr::NOT_OP:
-        return !evalWhere(*expr.left, row, schema, outer_schema, outer_row);
-    case WhereExpr::IN_OP: {
-        int idx = colIndex(schema, expr.column);
-        std::string val;
-        if (idx >= 0) val = row[idx];
-        else if (outer_schema && (idx = colIndex(*outer_schema, expr.column)) >= 0) val = (*outer_row)[idx];
-        else throw std::runtime_error("Unknown column: " + expr.column);
-
-        bool found = false;
-        if (expr.subquery) {
-            // IN (SELECT ...)
-            auto sub_result = const_cast<Executor*>(this)->execute_subquery(*expr.subquery, &schema, &row);
-            for (const auto& srow : sub_result)
-                if (!srow.empty() && srow[0] == val) { found = true; break; }
-        } else {
-            for (const auto& v : expr.in_values)
-                if (v == val) { found = true; break; }
+    if (auto un = dynamic_cast<const UnaryExpression*>(expr)) {
+        if (un->op == TokenType::KW_NOT) return {evalCondition(un->operand.get(), row, schema, aggrs, outer_schema, outer_row) ? "0" : "1", "BOOL"};
+        if (un->op == TokenType::OP_MINUS) {
+            Value v = evaluateExpression(un->operand.get(), row, schema, aggrs, outer_schema, outer_row);
+            double d = v.val.empty() ? 0 : std::stod(v.val);
+            return {formatFloat(-d), "FLOAT"};
         }
-        return expr.negated ? !found : found;
     }
-    case WhereExpr::EXISTS_OP: {
-        if (!expr.subquery) return false;
-        auto sub_result = const_cast<Executor*>(this)->execute_subquery(*expr.subquery, &schema, &row);
-        bool exists = !sub_result.empty();
-        return expr.negated ? !exists : exists;
-    }
-    }
-    return false;
-}
-
-bool Executor::evalHaving(const WhereExpr& expr, const Row& row, const TableSchema& schema,
-                          const std::map<std::pair<AggrFunc, std::string>, AggrState>& aggrs) const {
-    switch (expr.kind) {
-    case WhereExpr::CMP: {
-        std::string val;
-        std::string type = "FLOAT"; // Default to float for aggregates
-        if (expr.aggr != AggrFunc::NONE) {
-            auto it = aggrs.find({expr.aggr, expr.column});
-            if (it != aggrs.end()) {
-                if (expr.aggr == AggrFunc::COUNT) val = std::to_string(it->second.count);
-                else if (expr.aggr == AggrFunc::SUM) val = std::to_string(it->second.sum);
-                else if (expr.aggr == AggrFunc::AVG) val = std::to_string(it->second.count ? it->second.sum / it->second.count : 0);
-                else if (expr.aggr == AggrFunc::MIN) val = std::to_string(it->second.min_val);
-                else if (expr.aggr == AggrFunc::MAX) val = std::to_string(it->second.max_val);
-            } else {
-                val = "0"; // Default
+    if (auto bin = dynamic_cast<const BinaryExpression*>(expr)) {
+        if (bin->op == TokenType::KW_AND) {
+            if (!evalCondition(bin->left.get(), row, schema, aggrs, outer_schema, outer_row)) return {"0", "BOOL"};
+            return {evalCondition(bin->right.get(), row, schema, aggrs, outer_schema, outer_row) ? "1" : "0", "BOOL"};
+        }
+        if (bin->op == TokenType::KW_OR) {
+            if (evalCondition(bin->left.get(), row, schema, aggrs, outer_schema, outer_row)) return {"1", "BOOL"};
+            return {evalCondition(bin->right.get(), row, schema, aggrs, outer_schema, outer_row) ? "1" : "0", "BOOL"};
+        }
+        Value left = evaluateExpression(bin->left.get(), row, schema, aggrs, outer_schema, outer_row);
+        if (bin->op == TokenType::KW_IN) {
+            if (auto sub = dynamic_cast<const SubqueryExpression*>(bin->right.get())) {
+                auto sub_res = const_cast<Executor*>(this)->execute_subquery(sub->subquery.get(), &schema, &row);
+                bool found = false;
+                for (const auto& sr : sub_res) if (!sr.empty() && sr[0] == left.val) { found = true; break; }
+                return {(sub->negated ? !found : found) ? "1" : "0", "BOOL"};
             }
-        } else {
-            int idx = colIndex(schema, expr.column);
-            if (idx < 0) throw std::runtime_error("Unknown column in HAVING: " + expr.column);
-            val = row[idx];
-            type = schema.columns[idx].type;
         }
-
-        int cmp = compareValues(val, expr.value, type);
-
-        if (expr.op == "=")  return cmp == 0;
-        if (expr.op == "!=") return cmp != 0;
-        if (expr.op == "<")  return cmp < 0;
-        if (expr.op == ">")  return cmp > 0;
-        if (expr.op == "<=") return cmp <= 0;
-        if (expr.op == ">=") return cmp >= 0;
-        return false;
+        Value right = evaluateExpression(bin->right.get(), row, schema, aggrs, outer_schema, outer_row);
+        if (bin->op == TokenType::OP_PLUS || bin->op == TokenType::OP_MINUS || bin->op == TokenType::STAR || bin->op == TokenType::OP_DIV) {
+            double lv = left.val.empty() ? 0 : std::stod(left.val);
+            double rv = right.val.empty() ? 0 : std::stod(right.val);
+            double res = 0;
+            if (bin->op == TokenType::OP_PLUS) res = lv + rv;
+            else if (bin->op == TokenType::OP_MINUS) res = lv - rv;
+            else if (bin->op == TokenType::STAR) res = lv * rv;
+            else if (bin->op == TokenType::OP_DIV) res = (rv != 0) ? lv / rv : 0;
+            return {formatFloat(res), "FLOAT"};
+        }
+        int cmp = compareValues(left, right);
+        bool res = false;
+        switch (bin->op) {
+            case TokenType::OP_EQ: res = (cmp == 0); break;
+            case TokenType::OP_NEQ: res = (cmp != 0); break;
+            case TokenType::OP_LT: res = (cmp < 0); break;
+            case TokenType::OP_GT: res = (cmp > 0); break;
+            case TokenType::OP_LTE: res = (cmp <= 0); break;
+            case TokenType::OP_GTE: res = (cmp >= 0); break;
+            default: break;
+        }
+        return {res ? "1" : "0", "BOOL"};
     }
-    case WhereExpr::AND_OP:
-        return evalHaving(*expr.left, row, schema, aggrs) &&
-               evalHaving(*expr.right, row, schema, aggrs);
-    case WhereExpr::OR_OP:
-        return evalHaving(*expr.left, row, schema, aggrs) ||
-               evalHaving(*expr.right, row, schema, aggrs);
-    case WhereExpr::NOT_OP:
-        return !evalHaving(*expr.left, row, schema, aggrs);
+    if (auto in_list = dynamic_cast<const InListExpression*>(expr)) {
+        Value left = evaluateExpression(in_list->left.get(), row, schema, aggrs, outer_schema, outer_row);
+        bool found = std::find(in_list->values.begin(), in_list->values.end(), left.val) != in_list->values.end();
+        return {(in_list->negated ? !found : found) ? "1" : "0", "BOOL"};
     }
-    return false;
+    if (auto sub = dynamic_cast<const SubqueryExpression*>(expr)) {
+        if (sub->is_exists) {
+            auto res = const_cast<Executor*>(this)->execute_subquery(sub->subquery.get(), &schema, &row);
+            return {(sub->negated ? res.empty() : !res.empty()) ? "1" : "0", "BOOL"};
+        }
+    }
+    return {"", "NULL"};
 }
 
-// ── Main entry point ───────────────────────────────────────────────────
+bool Executor::evalCondition(const Expression* expr, const Row& row, const TableSchema& schema,
+                             const std::map<std::pair<AggrFunc, std::string>, AggrState>* aggrs,
+                             const TableSchema* outer_schema, const Row* outer_row) {
+    if (!expr) return true;
+    return evaluateExpression(expr, row, schema, aggrs, outer_schema, outer_row).val == "1";
+}
 
 json Executor::execute(const std::string& sql) {
     try {
-        Lexer lexer(sql);
-        auto tokens = lexer.tokenize();
-        Parser parser(tokens);
-        auto query = parser.parse();
+        Lexer l(sql); auto tokens = l.tokenize();
 
-        switch (query.type) {
-        case QueryType::CREATE_DATABASE: return execCreateDB(query);
-        case QueryType::DROP_DATABASE:   return execDropDB(query);
-        case QueryType::USE_DATABASE:    return execUse(query);
-        default:
-            requireDB();
-            switch (query.type) {
-            case QueryType::CREATE_TABLE:    return execCreateTable(query);
-            case QueryType::DROP_TABLE:      return execDropTable(query);
-            case QueryType::ALTER_TABLE:     return execAlterTable(query);
-            case QueryType::CREATE_INDEX:    return execCreateIndex(query);
-            case QueryType::DROP_INDEX:      return execDropIndex(query);
-            case QueryType::SELECT:          return execSelect(query);
-            case QueryType::INSERT:          return execInsert(query);
-            case QueryType::UPDATE:          return execUpdate(query);
-            case QueryType::DELETE_Q:        return execDelete(query);
-            default: return err("Unknown query type");
+        // Check for database requirement before parsing to provide better error messages
+        if (!tokens.empty() && tokens[0].type != TokenType::END_OF_INPUT) {
+            bool needs_db = true;
+            TokenType t0 = tokens[0].type;
+
+            if (t0 == TokenType::KW_USE) {
+                needs_db = false;
+            } else if (t0 == TokenType::KW_CREATE || t0 == TokenType::KW_DROP) {
+                if (tokens.size() > 1 && tokens[1].type == TokenType::KW_DATABASE) {
+                    needs_db = false;
+                }
+            }
+
+            if (needs_db && current_db_.empty()) {
+                return err("No database selected. Use: USE <database>;");
             }
         }
-    } catch (const std::exception& e) {
-        return err(e.what());
+
+        Parser p(tokens); auto query = p.parse();
+        if (auto q = dynamic_cast<CreateDatabaseStatement*>(query.get())) return execCreateDB(q);
+        if (auto q = dynamic_cast<DropDatabaseStatement*>(query.get())) return execDropDB(q);
+        if (auto q = dynamic_cast<UseDatabaseStatement*>(query.get())) return execUse(q);
+
+        if (auto q = dynamic_cast<CreateTableStatement*>(query.get())) return execCreateTable(q);
+        if (auto q = dynamic_cast<DropTableStatement*>(query.get())) return execDropTable(q);
+        if (auto q = dynamic_cast<AlterTableStatement*>(query.get())) return execAlterTable(q);
+        if (auto q = dynamic_cast<CreateIndexStatement*>(query.get())) return execCreateIndex(q);
+        if (auto q = dynamic_cast<DropIndexStatement*>(query.get())) return execDropIndex(q);
+        if (auto q = dynamic_cast<SelectStatement*>(query.get())) return execSelect(q);
+        if (auto q = dynamic_cast<InsertStatement*>(query.get())) return execInsert(q);
+        if (auto q = dynamic_cast<UpdateStatement*>(query.get())) return execUpdate(q);
+        if (auto q = dynamic_cast<DeleteStatement*>(query.get())) return execDelete(q);
+        return err("Unknown query type");
+    } catch (const std::exception& e) { return err(e.what()); }
+}
+
+json Executor::execCreateDB(const CreateDatabaseStatement* q) {
+    if (storage_.databaseExists(q->database_name)) return err("Database '" + q->database_name + "' already exists.");
+    if (storage_.createDatabase(q->database_name)) return ok("Database '" + q->database_name + "' created.");
+    return err("Failed to create database.");
+}
+json Executor::execDropDB(const DropDatabaseStatement* q) {
+    if (!storage_.databaseExists(q->database_name)) {
+        if (q->if_exists) return ok("Dropped database '" + q->database_name + "' (if existed).");
+        return err("Database '" + q->database_name + "' does not exist.");
     }
-}
-
-// ── DDL ────────────────────────────────────────────────────────────────
-
-json Executor::execCreateDB(const ParsedQuery& q) {
-    if (storage_.createDatabase(q.database_name))
-        return ok("Database '" + q.database_name + "' created.");
-    return err("Database '" + q.database_name + "' already exists.");
-}
-
-json Executor::execDropDB(const ParsedQuery& q) {
-    if (storage_.dropDatabase(q.database_name)) {
-        if (current_db_ == q.database_name) current_db_.clear();
-        return ok("Database '" + q.database_name + "' dropped.");
+    if (storage_.dropDatabase(q->database_name)) {
+        if (current_db_ == q->database_name) current_db_.clear();
+        return ok("Dropped database '" + q->database_name + "'.");
     }
-    return err("Database '" + q.database_name + "' does not exist.");
+    return err("Failed to drop database.");
 }
-
-json Executor::execUse(const ParsedQuery& q) {
-    if (!storage_.databaseExists(q.database_name))
-        return err("Database '" + q.database_name + "' does not exist.");
-    current_db_ = q.database_name;
-    return ok("Using database '" + q.database_name + "'.");
-}
-
-json Executor::execCreateTable(const ParsedQuery& q) {
-    requireDB();
-    TableSchema schema;
-    schema.table_name = q.table_name;
-    for (const auto& cd : q.column_defs) {
-        ColumnDef col;
-        col.name = cd.name;
-        col.type = cd.type;
-        col.not_null = cd.not_null;
-        col.unique = cd.unique;
-        col.has_default = cd.has_default;
-        col.default_value = cd.default_value;
-        col.fk_ref_table = cd.fk_ref_table;
-        col.fk_ref_column = cd.fk_ref_column;
-        col.on_delete = cd.on_delete;
-        schema.columns.push_back(col);
+json Executor::execUse(const UseDatabaseStatement* q) {
+    if (storage_.databaseExists(q->database_name)) {
+        current_db_ = q->database_name;
+        return ok("Using database '" + q->database_name + "'.");
     }
-    // PRIMARY KEY: use specified index, or default to 0 (first column)
-    schema.primary_key_index = (q.primary_key_index >= 0) ? q.primary_key_index : 0;
-
-    if (storage_.createTable(current_db_, schema))
-        return ok("Table '" + q.table_name + "' created.");
-    return err("Table '" + q.table_name + "' already exists or DB not found.");
+    return err("Database '" + q->database_name + "' does not exist.");
 }
-
-json Executor::execDropTable(const ParsedQuery& q) {
-    requireDB();
-    if (storage_.dropTable(current_db_, q.table_name))
-        return ok("Table '" + q.table_name + "' dropped.");
-    return err("Table '" + q.table_name + "' does not exist.");
+json Executor::execCreateTable(const CreateTableStatement* q) {
+    TableSchema s; s.table_name = q->table_name;
+    for (auto& cd : q->column_defs) { ColumnDef c; c.name = cd.name; c.type = cd.type; c.not_null = cd.not_null; c.unique = cd.unique; c.has_default = cd.has_default; c.default_value = cd.default_value; c.fk_ref_table = cd.fk_ref_table; c.fk_ref_column = cd.fk_ref_column; c.on_delete = cd.on_delete; s.columns.push_back(c); }
+    s.primary_key_index = q->primary_key_index >= 0 ? q->primary_key_index : 0;
+    if (storage_.createTable(current_db_, s)) return ok("Table created."); return err("Failed.");
 }
+json Executor::execDropTable(const DropTableStatement* q) {
+    if (storage_.dropTable(current_db_, q->table_name)) return ok("Dropped.");
+    if (q->if_exists) return ok("Dropped.");
+    return err("Failed.");
+}
+json Executor::execAlterTable(const AlterTableStatement* q) {
+    if (q->alter_action == AlterAction::ADD_COL) { if (storage_.alterTableAddColumn(current_db_, q->table_name, {q->alter_col_name, q->alter_col_type})) return ok("Added."); }
+    else { if (storage_.alterTableDropColumn(current_db_, q->table_name, q->alter_col_name)) return ok("Dropped."); }
+    return err("Failed.");
+}
+json Executor::execCreateIndex(const CreateIndexStatement* q) { if (storage_.createIndex(current_db_, q->table_name, q->index_name, q->column_name)) return ok("Created."); return err("Failed."); }
+json Executor::execDropIndex(const DropIndexStatement* q) { if (storage_.dropIndex(current_db_, q->table_name, q->index_name)) return ok("Dropped."); return err("Failed."); }
 
-// ── ALTER TABLE ────────────────────────────────────────────────────
-
-json Executor::execAlterTable(const ParsedQuery& q) {
-    requireDB();
-    if (!storage_.tableExists(current_db_, q.table_name))
-        return err("Table '" + q.table_name + "' does not exist.");
-
-    if (q.alter_action == AlterAction::ADD_COL) {
-        ColumnDef cd{ q.alter_col_name, q.alter_col_type };
-        if (storage_.alterTableAddColumn(current_db_, q.table_name, cd))
-            return ok("Column '" + q.alter_col_name + "' added to '" + q.table_name + "'.");
-        return err("Column '" + q.alter_col_name + "' already exists or alter failed.");
-    } else {
-        // DROP COLUMN
-        if (storage_.alterTableDropColumn(current_db_, q.table_name, q.alter_col_name))
-            return ok("Column '" + q.alter_col_name + "' dropped from '" + q.table_name + "'.");
-        return err("Cannot drop column '" + q.alter_col_name + "' (not found or is primary key).");
+json Executor::execInsert(const InsertStatement* q) {
+    auto s = storage_.getTableSchema(current_db_, q->table_name); std::vector<Row> rows;
+    for (auto& ivs : q->insert_values) { Row r(s.columns.size(), ""); for (size_t i = 0; i < ivs.size() && i < r.size(); ++i) r[i] = evaluateExpression(ivs[i].get(), Row(), s).val; rows.push_back(r); }
+    int c = 0; for (auto& r : rows) if (storage_.appendRows(current_db_, q->table_name, {r}) > 0) { storage_.indexInsertRow(current_db_, q->table_name, s, r); c++; }
+    return ok(std::to_string(c) + " inserted.");
+}
+json Executor::execUpdate(const UpdateStatement* q) {
+    auto s = storage_.getTableSchema(current_db_, q->table_name); auto rows = storage_.readAllRows(current_db_, q->table_name); int u = 0;
+    for (auto& row : rows) {
+        if (q->where && !evalCondition(q->where.get(), row, s, nullptr, outer_schema_, outer_row_)) continue;
+        Row old = row; bool mod = false;
+        for (auto& sc : q->set_clauses) { int idx = colIndex(s, "", sc.column); if (idx >= 0) { row[idx] = evaluateExpression(sc.value.get(), row, s, nullptr, outer_schema_, outer_row_).val; mod = true; } }
+        if (mod) { storage_.indexRemoveRow(current_db_, q->table_name, s, old); storage_.indexInsertRow(current_db_, q->table_name, s, row); u++; }
     }
+    if (u > 0) storage_.writeAllRows(current_db_, q->table_name, rows); return ok(std::to_string(u) + " updated.");
+}
+json Executor::execDelete(const DeleteStatement* q) {
+    auto s = storage_.getTableSchema(current_db_, q->table_name); auto rows = storage_.readAllRows(current_db_, q->table_name); std::vector<Row> kept; int d = 0;
+    for (auto& row : rows) if (!q->where || evalCondition(q->where.get(), row, s, nullptr, outer_schema_, outer_row_)) { storage_.indexRemoveRow(current_db_, q->table_name, s, row); d++; } else kept.push_back(row);
+    if (d > 0) storage_.writeAllRows(current_db_, q->table_name, kept); return ok(std::to_string(d) + " deleted.");
 }
 
-// ── SELECT ───────────────────────────────────────────────────────
-
-json Executor::execSelect(const ParsedQuery& q) {
-    requireDB();
-    auto schema = storage_.getTableSchema(current_db_, q.table_name);
-
-    // Try secondary index optimization for simple WHERE col = value
-    std::vector<Row> rows;
-    bool used_index = tryIndexScan(q, schema, rows);
-    if (!used_index) {
-        rows = storage_.readAllRows(current_db_, q.table_name);
+bool Executor::tryIndexScan(const SelectStatement* q, const TableSchema& s, std::vector<Row>& o) {
+    auto b = dynamic_cast<BinaryExpression*>(q->where.get()); if (!b || b->op != TokenType::OP_EQ) return false;
+    auto l = dynamic_cast<ColumnExpression*>(b->left.get()); auto r = dynamic_cast<LiteralExpression*>(b->right.get());
+    if (l && r && storage_.hasIndex(current_db_, q->table_name, l->column)) {
+        for (auto& pk : storage_.indexLookup(current_db_, q->table_name, l->column, r->value)) { Row row = storage_.findRow(current_db_, q->table_name, pk); if (!row.empty()) o.push_back(row); }
+        return true;
     }
+    return false;
+}
 
-    // ───────────────────────────────────────────────────────────────
-    // JOIN processing
-    // ───────────────────────────────────────────────────────────────
-    // Add table prefix to all column names so we can resolve table.col
-    // merged_schema holds all columns with names prefixed as "table.col"
-    // but also keeps bare column name for backward compat (first owner wins).
-    TableSchema merged = schema;
-    // prefix left table columns with table_name
-    for (auto& col : merged.columns)
-        col.name = q.table_name + "." + col.name;
+json Executor::execSelect(const SelectStatement* q) {
+    auto s = storage_.getTableSchema(current_db_, q->table_name); std::vector<Row> rows;
+    if (!tryIndexScan(q, s, rows)) rows = storage_.readAllRows(current_db_, q->table_name);
+    TableSchema m = s; for (auto& c : m.columns) c.name = q->table_name + "." + c.name;
+    for (auto& jc : q->joins) {
+        auto rs = storage_.getTableSchema(current_db_, jc.table_name);
+        std::vector<Row> res;
 
-    for (const auto& jc : q.joins) {
-        if (!storage_.tableExists(current_db_, jc.table_name))
-            return err("JOIN table '" + jc.table_name + "' does not exist.");
-
-        auto rschema = storage_.getTableSchema(current_db_, jc.table_name);
-
-        // Determine which column is the PK of right table and if join is by PK
-        // ON left_col = right_col  — detect which side is PK of right table
-        // left_col / right_col have .table and .column fields
-        // We figure out: for each left row, what key to look up in right table
-        // Case 1: right_col.table == jc.table_name (or empty) && right_col.column is PK of right
-        // Case 2: left_col.table  == jc.table_name                     — swapped
-
-        auto colName = [](const QualifiedCol& qc){ return qc.column; };
-
-        bool fast_path = false;
-        bool swapped   = false; // true means lookup key comes from right row, scan right
-
-        auto isRightPK = [&](const std::string& colname) {
-            return rschema.columns[rschema.primary_key_index].name == colname;
-        };
-
-        // Check: right_col refers to right table PK => fast lookup in right
-        if ((jc.right_col.table.empty() || jc.right_col.table == jc.table_name) &&
-             isRightPK(jc.right_col.column)) {
-            fast_path = true; swapped = false;
-        } else if ((jc.left_col.table.empty() || jc.left_col.table == jc.table_name) &&
-                    isRightPK(jc.left_col.column)) {
-            fast_path = true; swapped = true;
+        int li = -1, ri = -1;
+        if (jc.join_type != JoinClause::CROSS) {
+            li = colIndex(m, jc.left_col.table, jc.left_col.column);
+            ri = colIndex(rs, jc.right_col.table.empty() ? jc.table_name : jc.right_col.table, jc.right_col.column);
+            if (li < 0 || ri < 0) throw std::runtime_error("Invalid JOIN column(s)");
         }
 
-        // Find index of the join column in the left (merged) rows
-        // left col name (unqualified)
-        std::string left_join_col  = swapped ? colName(jc.right_col) : colName(jc.left_col);
-        std::string left_join_tbl  = swapped ? jc.right_col.table    : jc.left_col.table;
-        std::string right_join_col = swapped ? colName(jc.left_col)  : colName(jc.right_col);
+        bool is_pk = false;
+        bool has_sec_idx = false;
+        if (jc.join_type != JoinClause::CROSS) {
+            is_pk = (ri == rs.primary_key_index);
+            has_sec_idx = storage_.hasIndex(current_db_, jc.table_name, rs.columns[ri].name);
+        }
+        bool use_index_join = (is_pk || has_sec_idx) && (jc.join_type == JoinClause::INNER || jc.join_type == JoinClause::LEFT);
 
-        // Find left column index in merged schema
-        auto findMergedIdx = [&](const std::string& tbl, const std::string& col) -> int {
-            // Try qualified name first
-            for (int i = 0; i < (int)merged.columns.size(); ++i) {
-                const std::string& cn = merged.columns[i].name;
-                // cn is like "tablename.col"
-                auto dot = cn.find('.');
-                std::string ctbl = (dot != std::string::npos) ? cn.substr(0, dot) : "";
-                std::string ccol = (dot != std::string::npos) ? cn.substr(dot+1) : cn;
-                if (!tbl.empty() && ctbl == tbl && ccol == col) return i;
-                if (tbl.empty() && ccol == col) return i;
+        constexpr bool USE_HASH_JOIN = true;
+
+        if (jc.join_type == JoinClause::CROSS) {
+            auto rr = storage_.readAllRows(current_db_, jc.table_name);
+            for (auto& lr : rows) {
+                for (size_t i = 0; i < rr.size(); ++i) {
+                    Row c = lr; c.insert(c.end(), rr[i].begin(), rr[i].end()); res.push_back(std::move(c));
+                }
             }
-            return -1;
-        };
+        } else if (use_index_join) {
+            for (auto& lr : rows) {
+                std::string key = lr[li];
+                bool matched = false;
 
-        int left_idx = findMergedIdx(left_join_tbl, left_join_col);
-        if (left_idx < 0)
-            return err("JOIN ON: unknown column '" + left_join_col + "'");
-
-        // null row for right table (used in LEFT JOIN)
-        Row null_right(rschema.columns.size(), "");
-
-        std::vector<Row> right_rows;
-        if (!fast_path)
-            right_rows = storage_.readAllRows(current_db_, jc.table_name);
-
-        // For RIGHT JOIN we need to track which right rows were matched
-        std::vector<bool> right_matched;
-        if (jc.join_type == JoinClause::RIGHT) {
-            if (fast_path)
-                right_rows = storage_.readAllRows(current_db_, jc.table_name);
-            right_matched.assign(right_rows.size(), false);
-        }
-
-        // Find right column index in rschema (for fallback scan)
-        int right_idx = -1;
-        if (!fast_path) {
-            for (int i = 0; i < (int)rschema.columns.size(); ++i)
-                if (rschema.columns[i].name == right_join_col) { right_idx = i; break; }
-            if (right_idx < 0)
-                return err("JOIN ON: unknown column '" + right_join_col + "' in '" + jc.table_name + "'");
-        }
-
-        std::vector<Row> joined_rows;
-
-        for (size_t li = 0; li < rows.size(); ++li) {
-            const Row& lrow = rows[li];
-            const std::string& key = lrow[left_idx];
-
-            std::vector<Row> matches;
-
-            if (fast_path) {
-                // O(log N) B+ lookup
-                Row found = storage_.findRow(current_db_, jc.table_name, key);
-                if (!found.empty()) {
-                    if (jc.join_type == JoinClause::RIGHT) {
-                        // Mark matched right row
-                        for (size_t ri = 0; ri < right_rows.size(); ++ri)
-                            if (right_rows[ri][rschema.primary_key_index] == key) {
-                                right_matched[ri] = true; break;
-                            }
+                if (is_pk) {
+                    Row rr = storage_.findRow(current_db_, jc.table_name, key);
+                    if (!rr.empty()) {
+                        Row c = lr; c.insert(c.end(), rr.begin(), rr.end()); res.push_back(std::move(c));
+                        matched = true;
                     }
-                    matches.push_back(std::move(found));
-                }
-            } else {
-                // Full scan fallback
-                for (size_t ri = 0; ri < right_rows.size(); ++ri) {
-                    if (right_rows[ri][right_idx] == key) {
-                        if (jc.join_type == JoinClause::RIGHT)
-                            right_matched[ri] = true;
-                        matches.push_back(right_rows[ri]);
-                    }
-                }
-            }
-
-            if (matches.empty()) {
-                if (jc.join_type == JoinClause::LEFT) {
-                    // LEFT JOIN: emit left row + null right
-                    Row combined = lrow;
-                    combined.insert(combined.end(), null_right.begin(), null_right.end());
-                    joined_rows.push_back(std::move(combined));
-                }
-                // INNER / RIGHT: skip unmatched left rows here
-            } else {
-                for (const auto& rrow : matches) {
-                    Row combined = lrow;
-                    combined.insert(combined.end(), rrow.begin(), rrow.end());
-                    joined_rows.push_back(std::move(combined));
-                }
-            }
-        }
-
-        // RIGHT JOIN: emit unmatched right rows
-        if (jc.join_type == JoinClause::RIGHT) {
-            Row null_left(merged.columns.size(), "");
-            for (size_t ri = 0; ri < right_rows.size(); ++ri) {
-                if (!right_matched[ri]) {
-                    Row combined = null_left;
-                    combined.insert(combined.end(), right_rows[ri].begin(), right_rows[ri].end());
-                    joined_rows.push_back(std::move(combined));
-                }
-            }
-        }
-
-        // Extend merged schema with right table columns (prefixed)
-        for (const auto& col : rschema.columns) {
-            ColumnDef cd;
-            cd.name = jc.table_name + "." + col.name;
-            cd.type = col.type;
-            merged.columns.push_back(cd);
-        }
-
-        rows = std::move(joined_rows);
-    }
-    // End JOIN processing
-
-    // Helper: resolve column name (possibly "tbl.col") in merged schema
-    // Returns index in merged.columns, or -1 if not found
-    auto resolveCol = [&](const std::string& name) -> int {
-        // Try exact match (e.g., "users.id")
-        for (int i = 0; i < (int)merged.columns.size(); ++i)
-            if (merged.columns[i].name == name) return i;
-        // Try bare column name (last part after dot in schema)
-        for (int i = 0; i < (int)merged.columns.size(); ++i) {
-            auto dot = merged.columns[i].name.rfind('.');
-            std::string bare = (dot != std::string::npos)
-                               ? merged.columns[i].name.substr(dot+1)
-                               : merged.columns[i].name;
-            if (bare == name) return i;
-        }
-        return -1;
-    };
-
-
-    // 1. Filter by WHERE
-    if (q.where) {
-        std::vector<Row> filtered;
-        for (const auto& row : rows)
-            if (evalWhere(*q.where, row, merged, outer_schema_, outer_row_))
-                filtered.push_back(row);
-        rows = std::move(filtered);
-    }
-
-    // Determine if we need to group (GROUP BY clause or presence of aggregates in SELECT)
-    bool needs_grouping = !q.group_by.empty();
-    if (!needs_grouping) {
-        for (const auto& sc : q.select_columns) {
-            if (sc.aggr != AggrFunc::NONE) { needs_grouping = true; break; }
-        }
-    }
-
-    struct GroupData {
-        Row rep_row;
-        std::map<std::pair<AggrFunc, std::string>, AggrState> aggrs;
-    };
-    std::vector<GroupData> groups;
-
-    if (needs_grouping) {
-        std::map<std::string, GroupData> group_map;
-        // Collect necessary aggregates from select_columns and having
-        std::vector<std::pair<AggrFunc, std::string>> needed_aggrs;
-        for (const auto& sc : q.select_columns) {
-            if (sc.aggr != AggrFunc::NONE) needed_aggrs.push_back(std::make_pair(sc.aggr, sc.name));
-        }
-        std::function<void(const WhereExpr*)> extractHavingAggrs = [&](const WhereExpr* expr) {
-            if (!expr) return;
-            if (expr->kind == WhereExpr::CMP) {
-                if (expr->aggr != AggrFunc::NONE) needed_aggrs.push_back(std::make_pair(expr->aggr, expr->column));
-            } else {
-                extractHavingAggrs(expr->left.get());
-                extractHavingAggrs(expr->right.get());
-            }
-        };
-        if (q.having) extractHavingAggrs(q.having.get());
-
-        for (const auto& row : rows) {
-            // Compute group key
-            std::string key;
-            for (const auto& gb : q.group_by) {
-                int idx = resolveCol(gb);
-                if (idx < 0) return err("Unknown column in GROUP BY: " + gb);
-                key += row[idx] + "|";
-            }
-
-            auto& gd = group_map[key];
-            if (!gd.rep_row.size()) gd.rep_row = row;
-
-            for (const auto& ag : needed_aggrs) {
-                AggrFunc func = ag.first;
-                std::string col = ag.second;
-                auto& state = gd.aggrs[{func, col}];
-                state.count++;
-                if (col == "*") continue; // COUNT(*) handled by state.count
-
-                int idx = resolveCol(col);
-                if (idx < 0) {
-                    throw std::runtime_error("Unknown column in aggregate: " + col);
-                }
-                std::string val = row[idx];
-                double dval = 0;
-                if (!val.empty()) {
-                    try { dval = std::stod(val); } catch (...) {}
-                }
-
-                if (!state.initialized) {
-                    state.sum = state.min_val = state.max_val = dval;
-                    state.initialized = true;
                 } else {
-                    state.sum += dval;
-                    if (dval < state.min_val) state.min_val = dval;
-                    if (dval > state.max_val) state.max_val = dval;
+                    auto pks = storage_.indexLookup(current_db_, jc.table_name, rs.columns[ri].name, key);
+                    for (const auto& pk : pks) {
+                        Row rr = storage_.findRow(current_db_, jc.table_name, pk);
+                        if (!rr.empty()) {
+                            Row c = lr; c.insert(c.end(), rr.begin(), rr.end()); res.push_back(std::move(c));
+                            matched = true;
+                        }
+                    }
+                }
+
+                if (!matched && jc.join_type == JoinClause::LEFT) {
+                    Row c = lr; c.insert(c.end(), rs.columns.size(), ""); res.push_back(std::move(c));
                 }
             }
-        }
+        } else if (USE_HASH_JOIN) {
+            // Hash Join implementation for all remaining JOIN types (INNER, LEFT, RIGHT, FULL)
+            auto rr = storage_.readAllRows(current_db_, jc.table_name);
+            std::unordered_map<std::string, std::vector<size_t>> hash_map;
+            for (size_t i = 0; i < rows.size(); ++i) {
+                hash_map[rows[i][li]].push_back(i);
+            }
+            std::vector<bool> left_matched(rows.size(), false);
+            std::vector<bool> right_matched(rr.size(), false);
 
-        // Output groups
-        if (group_map.empty() && q.group_by.empty()) {
-             // Handle queries like SELECT COUNT(*) FROM empty_table
-             GroupData empty_gd;
-             empty_gd.rep_row = Row(merged.columns.size(), "");
-             for (const auto& ag : needed_aggrs) {
-                 empty_gd.aggrs[ag] = AggrState();
-             }
-             groups.push_back(empty_gd);
+            for (size_t i = 0; i < rr.size(); ++i) {
+                std::string r_key = rr[i][ri];
+                auto it = hash_map.find(r_key);
+                if (it != hash_map.end()) {
+                    for (size_t l_idx : it->second) {
+                        Row c = rows[l_idx]; c.insert(c.end(), rr[i].begin(), rr[i].end());
+                        res.push_back(std::move(c));
+                        left_matched[l_idx] = true;
+                        right_matched[i] = true;
+                    }
+                }
+            }
+
+            if (jc.join_type == JoinClause::LEFT || jc.join_type == JoinClause::FULL) {
+                for (size_t i = 0; i < rows.size(); ++i) {
+                    if (!left_matched[i]) {
+                        Row c = rows[i]; c.insert(c.end(), rs.columns.size(), ""); res.push_back(std::move(c));
+                    }
+                }
+            }
+            if (jc.join_type == JoinClause::RIGHT || jc.join_type == JoinClause::FULL) {
+                for (size_t i = 0; i < rr.size(); ++i) {
+                    if (!right_matched[i]) {
+                        Row c(m.columns.size(), ""); c.insert(c.end(), rr[i].begin(), rr[i].end()); res.push_back(std::move(c));
+                    }
+                }
+            }
         } else {
-            for (auto& kv : group_map) groups.push_back(std::move(kv.second));
-        }
-    } else {
-        // No grouping, each row is its own group
-        for (const auto& row : rows) {
-            GroupData gd; gd.rep_row = row;
-            groups.push_back(std::move(gd));
-        }
-    }
-
-    // 2. Filter by HAVING
-    if (q.having && needs_grouping) {
-        std::vector<GroupData> filtered;
-        for (const auto& gd : groups) {
-            try {
-                if (evalHaving(*q.having, gd.rep_row, merged, gd.aggrs))
-                    filtered.push_back(gd);
-            } catch (const std::exception& e) {
-                return err(e.what());
-            }
-        }
-        groups = std::move(filtered);
-    }
-
-    // 3. Evaluate projections into a tabular format
-    std::vector<std::string> colNames;
-    std::vector<SelectColumn> final_select;
-    if (q.select_all) {
-        for (const auto& col : merged.columns) {
-            SelectColumn sc; sc.name = col.name;
-            final_select.push_back(sc);
-            // Display name: strip table prefix for readability
-            auto dot = col.name.rfind('.');
-            colNames.push_back(dot != std::string::npos ? col.name.substr(dot+1) : col.name);
-        }
-    } else {
-        for (const auto& sc : q.select_columns) {
-            final_select.push_back(sc);
-            std::string colName = sc.name;
-            if (!sc.alias.empty()) {
-                colName = sc.alias;
-            } else if (sc.aggr != AggrFunc::NONE) {
-                std::string funcName;
-                switch (sc.aggr) {
-                    case AggrFunc::COUNT: funcName = "COUNT"; break;
-                    case AggrFunc::SUM: funcName = "SUM"; break;
-                    case AggrFunc::AVG: funcName = "AVG"; break;
-                    case AggrFunc::MIN: funcName = "MIN"; break;
-                    case AggrFunc::MAX: funcName = "MAX"; break;
-                    default: funcName = "AGGR"; break;
-                }
-                colName = funcName + "(" + sc.name + ")";
-            }
-            colNames.push_back(colName);
-        }
-    }
-
-    // 4. ORDER BY
-    if (!q.order_by.empty()) {
-        // Pre-validate ORDER BY columns
-        for (const auto& ob : q.order_by) {
-            if (ob.aggr != AggrFunc::NONE) continue;
-            int proj_idx = -1;
-            for (size_t i = 0; i < final_select.size(); ++i) {
-                if ((!final_select[i].alias.empty() && final_select[i].alias == ob.column) ||
-                    final_select[i].name == ob.column ||
-                    colNames[i] == ob.column) {
-                    proj_idx = static_cast<int>(i);
-                    break;
-                }
-            }
-            if (proj_idx < 0) {
-                int sidx = resolveCol(ob.column);
-                if (sidx < 0) return err("ORDER BY column not found: " + ob.column);
-            }
-        }
-
-        std::sort(groups.begin(), groups.end(), [&](const GroupData& a, const GroupData& b) {
-            for (const auto& ob : q.order_by) {
-                std::string valA, valB, type = "TEXT";
-                if (ob.aggr != AggrFunc::NONE) {
-                    type = "FLOAT";
-                    auto getAggr = [&](const GroupData& g) -> std::string {
-                        auto it = g.aggrs.find({ob.aggr, ob.column});
-                        if (it == g.aggrs.end()) return "0";
-                        if (ob.aggr == AggrFunc::COUNT) return std::to_string(it->second.count);
-                        if (ob.aggr == AggrFunc::SUM) return std::to_string(it->second.sum);
-                        if (ob.aggr == AggrFunc::AVG) return std::to_string(it->second.count ? it->second.sum / it->second.count : 0);
-                        if (ob.aggr == AggrFunc::MIN) return std::to_string(it->second.min_val);
-                        if (ob.aggr == AggrFunc::MAX) return std::to_string(it->second.max_val);
-                        return "0";
-                    };
-                    valA = getAggr(a); valB = getAggr(b);
-                } else {
-                    int proj_idx = -1;
-                    for (size_t i = 0; i < final_select.size(); ++i) {
-                        if ((!final_select[i].alias.empty() && final_select[i].alias == ob.column) ||
-                            final_select[i].name == ob.column ||
-                            colNames[i] == ob.column) {
-                            proj_idx = static_cast<int>(i); break;
-                        }
-                    }
-                    if (proj_idx >= 0) {
-                        auto evalProj = [&](const GroupData& g) -> std::string {
-                            const auto& sc = final_select[proj_idx];
-                            if (sc.aggr != AggrFunc::NONE) {
-                                auto it = g.aggrs.find({sc.aggr, sc.name});
-                                if (it != g.aggrs.end()) {
-                                    if (sc.aggr == AggrFunc::COUNT) return std::to_string(it->second.count);
-                                    if (sc.aggr == AggrFunc::SUM) return std::to_string(it->second.sum);
-                                    if (sc.aggr == AggrFunc::AVG) return std::to_string(it->second.count ? it->second.sum / it->second.count : 0);
-                                    if (sc.aggr == AggrFunc::MIN) return std::to_string(it->second.min_val);
-                                    if (sc.aggr == AggrFunc::MAX) return std::to_string(it->second.max_val);
-                                }
-                                return "0";
-                            } else {
-                                int sidx = resolveCol(sc.name);
-                                if (sidx >= 0) return g.rep_row[sidx];
-                                return "";
-                            }
-                        };
-                        valA = evalProj(a); valB = evalProj(b);
-                        const auto& sc = final_select[proj_idx];
-                        if (sc.aggr != AggrFunc::NONE) type = "FLOAT";
-                        else {
-                            int sidx = resolveCol(sc.name);
-                            if (sidx >= 0) type = merged.columns[sidx].type;
-                        }
-                    } else {
-                        int sidx = resolveCol(ob.column);
-                        if (sidx >= 0) {
-                            valA = a.rep_row[sidx]; valB = b.rep_row[sidx];
-                            type = merged.columns[sidx].type;
-                        }
+            // Classic Nested Loop Join (kept as a disabled fallback)
+            auto rr = storage_.readAllRows(current_db_, jc.table_name);
+            std::vector<bool> rm(rr.size(), false);
+            for (auto& lr : rows) {
+                bool matched = false;
+                for (size_t i = 0; i < rr.size(); ++i) {
+                    if (lr[li] == rr[i][ri]) {
+                        Row c = lr; c.insert(c.end(), rr[i].begin(), rr[i].end());
+                        res.push_back(std::move(c)); matched = true; rm[i] = true;
                     }
                 }
-                
-                int cmp = compareValues(valA, valB, type);
-                if (cmp != 0) {
-                    return ob.asc ? (cmp < 0) : (cmp > 0);
+                if (!matched && (jc.join_type == JoinClause::LEFT || jc.join_type == JoinClause::FULL)) {
+                    Row c = lr; c.insert(c.end(), rs.columns.size(), ""); res.push_back(std::move(c));
                 }
+            }
+            if (jc.join_type == JoinClause::RIGHT || jc.join_type == JoinClause::FULL) {
+                for (size_t i = 0; i < rr.size(); ++i) {
+                    if (!rm[i]) {
+                        Row c(m.columns.size(), ""); c.insert(c.end(), rr[i].begin(), rr[i].end());
+                        res.push_back(std::move(c));
+                    }
+                }
+            }
+        }
+
+        for (auto& c : rs.columns) { ColumnDef cd = c; cd.name = jc.table_name + "." + c.name; m.columns.push_back(std::move(cd)); }
+        rows = std::move(res);
+    }
+    if (q->where) { std::vector<Row> f; for (auto& r : rows) if (evalCondition(q->where.get(), r, m, nullptr, outer_schema_, outer_row_)) f.push_back(r); rows = std::move(f); }
+
+    struct Group { Row rep; std::map<std::pair<AggrFunc, std::string>, AggrState> st; };
+    std::vector<Group> groups; bool is_aggr = !q->group_by.empty();
+    std::function<void(const Expression*)> check_aggr = [&](const Expression* e) {
+        if (!e) return;
+        if (dynamic_cast<const AggregateExpression*>(e)) is_aggr = true;
+        else if (auto b = dynamic_cast<const BinaryExpression*>(e)) { check_aggr(b->left.get()); check_aggr(b->right.get()); }
+        else if (auto u = dynamic_cast<const UnaryExpression*>(e)) check_aggr(u->operand.get());
+        else if (auto in_list = dynamic_cast<const InListExpression*>(e)) check_aggr(in_list->left.get());
+    };
+    for (auto& sc : q->select_columns) check_aggr(sc.expr.get());
+    check_aggr(q->having.get());
+    for (auto& ob : q->order_by) check_aggr(ob.expr.get());
+
+    if (is_aggr) {
+        std::map<std::string, Group> g_map;
+        for (auto& row : rows) {
+            std::string k; for (auto& gb : q->group_by) { int i = colIndex(m, "", gb); k += (i >= 0 ? row[i] : "") + "|"; }
+            auto& g = g_map[k]; if (g.rep.empty()) g.rep = row;
+            auto upd = [&](AggrFunc f, const std::string& c) {
+                auto& st = g.st[{f, c}]; st.count++; if (c == "*") return;
+                int i = colIndex(m, "", c); if (i >= 0) { try { double v = std::stod(row[i]); if (!st.initialized) { st.sum = st.min_val = st.max_val = v; st.initialized = true; } else { st.sum += v; st.min_val = std::min(st.min_val, v); st.max_val = std::max(st.max_val, v); } } catch(...) {} }
+            };
+            std::function<void(const Expression*)> coll = [&](const Expression* e) {
+                if (!e) return;
+                if (auto a = dynamic_cast<const AggregateExpression*>(e)) upd(a->func, a->column);
+                else if (auto b = dynamic_cast<const BinaryExpression*>(e)) { coll(b->left.get()); coll(b->right.get()); }
+                else if (auto u = dynamic_cast<const UnaryExpression*>(e)) coll(u->operand.get());
+                else if (auto in_list = dynamic_cast<const InListExpression*>(e)) coll(in_list->left.get());
+            };
+            for (auto& sc : q->select_columns) coll(sc.expr.get());
+            coll(q->having.get());
+            for (auto& ob : q->order_by) coll(ob.expr.get());
+        }
+        for (auto& kv : g_map) if (!q->having || evalCondition(q->having.get(), kv.second.rep, m, &kv.second.st, outer_schema_, outer_row_)) groups.push_back(std::move(kv.second));
+    } else {
+        for (auto& r : rows) { Group g; g.rep = r; groups.push_back(std::move(g)); }
+    }
+
+    if (!q->order_by.empty()) {
+        std::sort(groups.begin(), groups.end(), [&](const Group& a, const Group& b) {
+            for (auto& ob : q->order_by) {
+                Value va = evaluateExpression(ob.expr.get(), a.rep, m, &a.st, outer_schema_, outer_row_);
+                Value vb = evaluateExpression(ob.expr.get(), b.rep, m, &b.st, outer_schema_, outer_row_);
+                int cmp = compareValues(va, vb);
+                if (cmp != 0) return ob.asc ? cmp < 0 : cmp > 0;
             }
             return false;
         });
     }
 
-    std::vector<Row> result_rows;
-    for (const auto& gd : groups) {
-        Row res_row;
-        for (const auto& sc : final_select) {
-            if (sc.aggr != AggrFunc::NONE) {
-                auto it = gd.aggrs.find({sc.aggr, sc.name});
-                if (it != gd.aggrs.end()) {
-                    if (sc.aggr == AggrFunc::COUNT) res_row.push_back(std::to_string(it->second.count));
-                    else if (sc.aggr == AggrFunc::SUM) res_row.push_back(std::to_string(it->second.sum));
-                    else if (sc.aggr == AggrFunc::AVG) res_row.push_back(std::to_string(it->second.count ? it->second.sum / it->second.count : 0));
-                    else if (sc.aggr == AggrFunc::MIN) res_row.push_back(std::to_string(it->second.min_val));
-                    else if (sc.aggr == AggrFunc::MAX) res_row.push_back(std::to_string(it->second.max_val));
-                } else {
-                    res_row.push_back("0");
-                }
-            } else {
-                int idx = resolveCol(sc.name);
-                if (idx < 0) return err("Unknown column: " + sc.name);
-                res_row.push_back(gd.rep_row[idx]);
-            }
+    std::vector<Row> res_r; std::vector<std::string> cn;
+    if (q->select_all) for (auto& c : m.columns) cn.push_back(c.name);
+    else for (auto& sc : q->select_columns) {
+        if (!sc.alias.empty()) cn.push_back(sc.alias);
+        else if (auto ce = dynamic_cast<ColumnExpression*>(sc.expr.get())) cn.push_back(ce->column);
+        else if (dynamic_cast<AggregateExpression*>(sc.expr.get())) cn.push_back("aggr");
+        else cn.push_back("expr");
+    }
+
+    for (auto& g : groups) {
+        Row r; if (q->select_all) r = g.rep;
+        else for (auto& sc : q->select_columns) {
+            r.push_back(evaluateExpression(sc.expr.get(), g.rep, m, &g.st, outer_schema_, outer_row_).val);
         }
-        result_rows.push_back(std::move(res_row));
+        res_r.push_back(std::move(r));
     }
 
-    // 5. Build result
-    json result;
-    result["success"] = true;
-    result["type"] = "select";
-    result["columns"] = colNames;
-    result["rows"] = json::array();
-
-    for (const auto& row : result_rows) {
-        json jr = json::array();
-        for (const auto& val : row) jr.push_back(val);
-        result["rows"].push_back(jr);
-    }
-    result["message"] = std::to_string(result_rows.size()) + " row(s) returned.";
-
-    // 6. Apply LIMIT / OFFSET
-    if (q.limit >= 0) {
-        int start = q.offset;
-        int end = std::min(start + q.limit, (int)result_rows.size());
-        if (start >= (int)result_rows.size()) {
-            result["rows"] = json::array();
-            result["message"] = "0 row(s) returned.";
-        } else {
-            json limited = json::array();
-            for (int i = start; i < end; ++i) {
-                json jr = json::array();
-                for (const auto& val : result_rows[i]) jr.push_back(val);
-                limited.push_back(jr);
-            }
-            result["rows"] = limited;
-            result["message"] = std::to_string(end - start) + " row(s) returned.";
-        }
-    }
-
-    return result;
+    json res; res["success"] = true; res["type"] = "select"; res["columns"] = cn; res["rows"] = json::array();
+    int s_i = std::max(0, q->offset), count = q->limit >= 0 ? q->limit : (int)res_r.size(), e_i = std::min((int)res_r.size(), s_i + count);
+    for (int i = s_i; i < e_i; ++i) { json jr = json::array(); for (auto& v : res_r[i]) jr.push_back(v); res["rows"].push_back(jr); }
+    return res;
 }
 
-// ── Subquery execution ────────────────────────────────────────────────
-
-std::vector<Row> Executor::execute_subquery(const ParsedQuery& q,
-                                            const TableSchema* outer_schema,
-                                            const Row* outer_row) {
-    // Save current outer context
-    const TableSchema* old_schema = outer_schema_;
-    const Row* old_row = outer_row_;
-    outer_schema_ = outer_schema;
-    outer_row_ = outer_row;
-
-    auto result = execSelect(q);
-
-    // Restore context
-    outer_schema_ = old_schema;
-    outer_row_ = old_row;
-
-    std::vector<Row> rows;
-    if (result.contains("rows") && result["rows"].is_array()) {
-        for (const auto& jr : result["rows"]) {
-            Row row;
-            for (const auto& val : jr) row.push_back(val.get<std::string>());
-            rows.push_back(std::move(row));
-        }
-    }
-    return rows;
-}
-
-// ── INSERT ─────────────────────────────────────────────────────────────
-
-json Executor::execInsert(const ParsedQuery& q) {
-    requireDB();
-    auto schema = storage_.getTableSchema(current_db_, q.table_name);
-
-    std::vector<Row> rows;
-    for (const auto& vals : q.insert_values) {
-        if (!q.insert_columns.empty()) {
-            // Map named columns to row positions, apply defaults
-            Row row(schema.columns.size(), "");
-            // Fill defaults first
-            for (size_t c = 0; c < schema.columns.size(); ++c)
-                if (schema.columns[c].has_default)
-                    row[c] = schema.columns[c].default_value;
-            for (size_t i = 0; i < q.insert_columns.size(); ++i) {
-                int idx = colIndex(schema, q.insert_columns[i]);
-                if (idx < 0) return err("Unknown column: " + q.insert_columns[i]);
-                row[idx] = vals[i];
-            }
-            rows.push_back(std::move(row));
-        } else {
-            if (vals.size() != schema.columns.size())
-                return err("Column count mismatch: expected " +
-                           std::to_string(schema.columns.size()) +
-                           ", got " + std::to_string(vals.size()));
-            Row row = vals;
-            // Apply defaults for empty values
-            for (size_t c = 0; c < schema.columns.size(); ++c)
-                if (row[c].empty() && schema.columns[c].has_default)
-                    row[c] = schema.columns[c].default_value;
-            rows.push_back(std::move(row));
-        }
-    }
-
-    // Constraint checks
-    auto existing = storage_.readAllRows(current_db_, q.table_name);
-
-    for (const auto& row : rows) {
-        for (size_t c = 0; c < schema.columns.size(); ++c) {
-            const auto& col = schema.columns[c];
-            // NOT NULL
-            if (col.not_null && row[c].empty())
-                return err("NOT NULL constraint violated for column '" + col.name + "'.");
-            // UNIQUE
-            if (col.unique && !row[c].empty()) {
-                for (const auto& er : existing)
-                    if (c < er.size() && er[c] == row[c])
-                        return err("UNIQUE constraint violated for column '" + col.name + "': value '" + row[c] + "'.");
-            }
-            // FOREIGN KEY
-            if (!col.fk_ref_table.empty()) {
-                if (!storage_.tableExists(current_db_, col.fk_ref_table))
-                    return err("FK: referenced table '" + col.fk_ref_table + "' does not exist.");
-                auto ref_schema = storage_.getTableSchema(current_db_, col.fk_ref_table);
-                int ref_idx = -1;
-                for (size_t r = 0; r < ref_schema.columns.size(); ++r)
-                    if (ref_schema.columns[r].name == col.fk_ref_column) { ref_idx = (int)r; break; }
-                if (ref_idx < 0)
-                    return err("FK: referenced column '" + col.fk_ref_column + "' not found.");
-                // Check value exists in referenced table (use B+ if PK, else scan)
-                bool found = false;
-                if (ref_idx == ref_schema.primary_key_index) {
-                    Row fr = storage_.findRow(current_db_, col.fk_ref_table, row[c]);
-                    found = !fr.empty();
-                } else {
-                    auto ref_rows = storage_.readAllRows(current_db_, col.fk_ref_table);
-                    for (const auto& rr : ref_rows)
-                        if (ref_idx < (int)rr.size() && rr[ref_idx] == row[c]) { found = true; break; }
-                }
-                if (!found && !row[c].empty())
-                    return err("FK constraint violated: value '" + row[c] + "' not found in " +
-                               col.fk_ref_table + "(" + col.fk_ref_column + ").");
-            }
-        }
-    }
-
-    int n = storage_.appendRows(current_db_, q.table_name, rows);
-
-    // Maintain secondary indexes
-    for (const auto& row : rows) {
-        storage_.indexInsertRow(current_db_, q.table_name, schema, row);
-    }
-
-    json result;
-    result["success"] = true;
-    result["type"] = "modify";
-    result["affected_rows"] = n;
-    result["message"] = std::to_string(n) + " row(s) inserted.";
-    return result;
-}
-
-// ── UPDATE ─────────────────────────────────────────────────────────────
-
-json Executor::execUpdate(const ParsedQuery& q) {
-    requireDB();
-    auto schema = storage_.getTableSchema(current_db_, q.table_name);
-    auto rows = storage_.readAllRows(current_db_, q.table_name);
-
-    int affected = 0;
-    for (auto& row : rows) {
-        bool match = !q.where || evalWhere(*q.where, row, schema);
-        if (match) {
-            // Remove old index entries
-            storage_.indexRemoveRow(current_db_, q.table_name, schema, row);
-
-            for (const auto& sc : q.set_clauses) {
-                int idx = colIndex(schema, sc.column);
-                if (idx < 0) return err("Unknown column: " + sc.column);
-                row[idx] = sc.value;
-            }
-
-            // Add new index entries
-            storage_.indexInsertRow(current_db_, q.table_name, schema, row);
-
-            ++affected;
-        }
-    }
-
-    storage_.writeAllRows(current_db_, q.table_name, rows);
-
-    json result;
-    result["success"] = true;
-    result["type"] = "modify";
-    result["affected_rows"] = affected;
-    result["message"] = std::to_string(affected) + " row(s) updated.";
-    return result;
-}
-
-// ── DELETE ─────────────────────────────────────────────────────────────
-
-void Executor::performDelete(const std::string& db_name, const std::string& table_name, const std::vector<Row>& rows_to_delete, int& total_deleted) {
-    if (rows_to_delete.empty()) return;
-    
-    total_deleted += rows_to_delete.size();
-
-    auto schema = storage_.getTableSchema(db_name, table_name);
-
-    // Find dependencies
-    struct Dependency {
-        std::string dep_table_name;
-        int dep_col_index;
-        int ref_col_index;
-        OnDeleteAction on_delete;
-    };
-    std::vector<Dependency> dependencies;
-
-    auto tables = storage_.listTables(db_name);
-    for (const auto& t : tables) {
-        auto t_schema = storage_.getTableSchema(db_name, t);
-        for (size_t c = 0; c < t_schema.columns.size(); ++c) {
-            const auto& col = t_schema.columns[c];
-            if (col.fk_ref_table == table_name) {
-                int ref_idx = colIndex(schema, col.fk_ref_column);
-                if (ref_idx >= 0) {
-                    dependencies.push_back({t, (int)c, ref_idx, col.on_delete});
-                }
-            }
-        }
-    }
-
-    for (const auto& dep : dependencies) {
-        auto dep_rows = storage_.readAllRows(db_name, dep.dep_table_name);
-        std::vector<Row> dep_kept;
-        std::vector<Row> dep_to_delete;
-        bool needs_write = false;
-
-        for (auto& d_row : dep_rows) {
-            bool matches = false;
-            if (dep.dep_col_index < (int)d_row.size() && !d_row[dep.dep_col_index].empty()) {
-                for (const auto& r_del : rows_to_delete) {
-                    if (dep.ref_col_index < (int)r_del.size() && 
-                        d_row[dep.dep_col_index] == r_del[dep.ref_col_index]) {
-                        matches = true;
-                        break;
-                    }
-                }
-            }
-            if (matches) {
-                if (dep.on_delete == OnDeleteAction::NO_ACTION) {
-                    throw std::runtime_error("Cannot delete: foreign key constraint violation from table '" + dep.dep_table_name + "'");
-                } else if (dep.on_delete == OnDeleteAction::SET_NULL) {
-                    d_row[dep.dep_col_index] = "";
-                    dep_kept.push_back(d_row);
-                    needs_write = true;
-                } else if (dep.on_delete == OnDeleteAction::CASCADE) {
-                    dep_to_delete.push_back(d_row);
-                    needs_write = true;
-                }
-            } else {
-                dep_kept.push_back(d_row);
-            }
-        }
-
-        if (needs_write) {
-            // Write dependent table modifications first
-            storage_.writeAllRows(db_name, dep.dep_table_name, dep_kept);
-            // Then cascade delete if necessary
-            if (!dep_to_delete.empty()) {
-                performDelete(db_name, dep.dep_table_name, dep_to_delete, total_deleted);
-            }
-        }
-    }
-}
-
-json Executor::execDelete(const ParsedQuery& q) {
-    requireDB();
-    auto schema = storage_.getTableSchema(current_db_, q.table_name);
-    auto rows = storage_.readAllRows(current_db_, q.table_name);
-
-    std::vector<Row> kept;
-    std::vector<Row> deleted_rows;
-    for (const auto& row : rows) {
-        bool match = !q.where || evalWhere(*q.where, row, schema);
-        if (match) deleted_rows.push_back(row);
-        else kept.push_back(row);
-    }
-
-    if (deleted_rows.empty()) {
-        json result;
-        result["success"] = true;
-        result["type"] = "modify";
-        result["affected_rows"] = 0;
-        result["message"] = "0 row(s) deleted.";
-        return result;
-    }
-
-    int total_deleted = 0;
-    
-    // Remove deleted rows from secondary indexes
-    for (const auto& row : deleted_rows) {
-        storage_.indexRemoveRow(current_db_, q.table_name, schema, row);
-    }
-
-    // Process foreign key constraints (RESTRICT, CASCADE, SET NULL)
-    performDelete(current_db_, q.table_name, deleted_rows, total_deleted);
-    
-    // Write back the main table
-    storage_.writeAllRows(current_db_, q.table_name, kept);
-
-    json result;
-    result["success"] = true;
-    result["type"] = "modify";
-    result["affected_rows"] = total_deleted;
-    result["message"] = std::to_string(total_deleted) + " row(s) deleted (including cascades).";
-    return result;
-}
-
-// ── CREATE INDEX ──────────────────────────────────────────────────────
-
-json Executor::execCreateIndex(const ParsedQuery& q) {
-    requireDB();
-    if (storage_.createIndex(current_db_, q.table_name, q.index_name, q.alter_col_name))
-        return ok("Index '" + q.index_name + "' created on " + q.table_name + "(" + q.alter_col_name + ").");
-    return err("Failed to create index '" + q.index_name + "'. Column may not exist or index already exists.");
-}
-
-// ── DROP INDEX ────────────────────────────────────────────────────────
-
-json Executor::execDropIndex(const ParsedQuery& q) {
-    requireDB();
-    if (storage_.dropIndex(current_db_, q.table_name, q.index_name))
-        return ok("Index '" + q.index_name + "' dropped.");
-    return err("Index '" + q.index_name + "' not found.");
-}
-
-// ── tryIndexScan ──────────────────────────────────────────────────────
-// Attempt to optimize a simple WHERE col = value query using a secondary index.
-// Returns true and fills out_rows if optimization was applied.
-
-bool Executor::tryIndexScan(const ParsedQuery& q, const TableSchema& schema,
-                             std::vector<Row>& out_rows) const {
-    // Only optimize simple equality conditions without JOINs
-    if (!q.joins.empty()) return false;
-    if (!q.where) return false;
-
-    // Only handle simple CMP with '='
-    const WhereExpr& w = *q.where;
-    if (w.kind != WhereExpr::CMP || w.op != "=") return false;
-
-    // Find the column
-    std::string col_name = w.column;
-    int col_idx = colIndex(schema, col_name);
-    if (col_idx < 0) return false;
-
-    // Don't use secondary index if it's the primary key (already fast)
-    if (col_idx == schema.primary_key_index) return false;
-
-    // Check if index exists
-    if (!storage_.hasIndex(current_db_, q.table_name, schema.columns[col_idx].name))
-        return false;
-
-    // Use the index to find primary keys
-    auto pks = storage_.indexLookup(current_db_, q.table_name,
-                                     schema.columns[col_idx].name, w.value);
-    
-    // Fetch each row by primary key
-    for (const auto& pk : pks) {
-        Row row = storage_.findRow(current_db_, q.table_name, pk);
-        if (!row.empty()) {
-            out_rows.push_back(std::move(row));
-        }
-    }
-    return true;
+std::vector<Row> Executor::execute_subquery(const SelectStatement* q, const TableSchema* os, const Row* orow) {
+    const TableSchema* ps = outer_schema_; const Row* pr = outer_row_; outer_schema_ = os; outer_row_ = orow;
+    auto r = execSelect(q); outer_schema_ = ps; outer_row_ = pr; std::vector<Row> rws;
+    if (r["success"]) for (auto& rr : r["rows"]) { Row row; for (auto& v : rr) row.push_back(v.get<std::string>()); rws.push_back(row); }
+    return rws;
 }
 
 } // namespace db

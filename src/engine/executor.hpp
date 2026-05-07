@@ -4,8 +4,14 @@
 #include <nlohmann/json.hpp>
 #include <string>
 #include <map>
+#include <vector>
 
 namespace db {
+
+struct Value {
+    std::string val;
+    std::string type; // INT, FLOAT, TEXT, BOOL, NULL
+};
 
 class Executor {
 public:
@@ -19,29 +25,20 @@ private:
     const TableSchema* outer_schema_ = nullptr;
     const Row* outer_row_ = nullptr;
 
-    nlohmann::json execCreateDB(const ParsedQuery& q);
-    nlohmann::json execDropDB(const ParsedQuery& q);
-    nlohmann::json execCreateTable(const ParsedQuery& q);
-    nlohmann::json execDropTable(const ParsedQuery& q);
-    nlohmann::json execSelect(const ParsedQuery& q);
-    nlohmann::json execInsert(const ParsedQuery& q);
-    nlohmann::json execUpdate(const ParsedQuery& q);
-    nlohmann::json execDelete(const ParsedQuery& q);
-    nlohmann::json execUse(const ParsedQuery& q);
-    nlohmann::json execAlterTable(const ParsedQuery& q);
-    nlohmann::json execCreateIndex(const ParsedQuery& q);
-    nlohmann::json execDropIndex(const ParsedQuery& q);
+    nlohmann::json execCreateDB(const CreateDatabaseStatement* q);
+    nlohmann::json execDropDB(const DropDatabaseStatement* q);
+    nlohmann::json execCreateTable(const CreateTableStatement* q);
+    nlohmann::json execDropTable(const DropTableStatement* q);
+    nlohmann::json execSelect(const SelectStatement* q);
+    nlohmann::json execInsert(const InsertStatement* q);
+    nlohmann::json execUpdate(const UpdateStatement* q);
+    nlohmann::json execDelete(const DeleteStatement* q);
+    nlohmann::json execUse(const UseDatabaseStatement* q);
+    nlohmann::json execAlterTable(const AlterTableStatement* q);
+    nlohmann::json execCreateIndex(const CreateIndexStatement* q);
+    nlohmann::json execDropIndex(const DropIndexStatement* q);
 
     void requireDB() const;
-    bool evalWhere(const WhereExpr& expr, const Row& row,
-                   const TableSchema& schema,
-                   const TableSchema* outer_schema = nullptr,
-                   const Row* outer_row = nullptr) const;
-    std::vector<Row> execute_subquery(const ParsedQuery& q,
-                                      const TableSchema* outer_schema = nullptr,
-                                      const Row* outer_row = nullptr);
-
-    void performDelete(const std::string& db_name, const std::string& table_name, const std::vector<Row>& rows_to_delete, int& total_deleted);
 
     struct AggrState {
         int count = 0;
@@ -51,18 +48,29 @@ private:
         bool initialized = false;
     };
     
-    // Evaluate HAVING condition using the representative row of a group and its aggregate states
-    bool evalHaving(const WhereExpr& expr, const Row& row, const TableSchema& schema,
-                    const std::map<std::pair<AggrFunc, std::string>, AggrState>& aggrs) const;
+    // Core expression evaluation method
+    Value evaluateExpression(const Expression* expr, 
+                             const Row& row, 
+                             const TableSchema& schema,
+                             const std::map<std::pair<AggrFunc, std::string>, AggrState>* aggrs = nullptr,
+                             const TableSchema* outer_schema = nullptr,
+                             const Row* outer_row = nullptr);
 
-    int colIndex(const TableSchema& s, const std::string& name) const;
-    int compareValues(const std::string& a, const std::string& b,
-                      const std::string& type) const;
+    bool evalCondition(const Expression* expr, const Row& row, const TableSchema& schema,
+                       const std::map<std::pair<AggrFunc, std::string>, AggrState>* aggrs = nullptr,
+                       const TableSchema* outer_schema = nullptr,
+                       const Row* outer_row = nullptr);
 
-    // Try to use secondary index for simple WHERE col = value
-    // Returns true if optimization was applied, false to fall back to full scan
-    bool tryIndexScan(const ParsedQuery& q, const TableSchema& schema,
-                      std::vector<Row>& out_rows) const;
+    std::vector<Row> execute_subquery(const SelectStatement* q,
+                                      const TableSchema* outer_schema = nullptr,
+                                      const Row* outer_row = nullptr);
+
+    void performDelete(const std::string& db_name, const std::string& table_name, const std::vector<Row>& rows_to_delete, int& total_deleted);
+
+    int colIndex(const TableSchema& s, const std::string& table, const std::string& name) const;
+    int compareValues(const Value& a, const Value& b) const;
+
+    bool tryIndexScan(const SelectStatement* q, const TableSchema& schema, std::vector<Row>& out_rows);
 
     static nlohmann::json ok(const std::string& msg);
     static nlohmann::json err(const std::string& msg);

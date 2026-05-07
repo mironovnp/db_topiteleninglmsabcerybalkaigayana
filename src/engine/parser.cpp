@@ -27,16 +27,16 @@ static const std::unordered_map<std::string, TokenType> KEYWORDS = {
     {"ALTER",TokenType::KW_ALTER},{"ADD",TokenType::KW_ADD},{"COLUMN",TokenType::KW_COLUMN},
     {"JOIN",TokenType::KW_JOIN},{"INNER",TokenType::KW_INNER},
     {"LEFT",TokenType::KW_LEFT},{"RIGHT",TokenType::KW_RIGHT},{"OUTER",TokenType::KW_OUTER},
+    {"FULL",TokenType::KW_FULL},{"CROSS",TokenType::KW_CROSS},
     {"ON",TokenType::KW_ON},
     {"LIMIT",TokenType::KW_LIMIT},{"OFFSET",TokenType::KW_OFFSET},
     {"IN",TokenType::KW_IN},{"EXISTS",TokenType::KW_EXISTS},{"NULL",TokenType::KW_NULL},
     {"UNIQUE",TokenType::KW_UNIQUE},{"DEFAULT",TokenType::KW_DEFAULT},
-    {"FOREIGN",TokenType::KW_FOREIGN},{"REFERENCES",TokenType::KW_REFERENCES},
     {"CASCADE",TokenType::KW_CASCADE},
     {"INDEX",TokenType::KW_INDEX},
+    {"IF",TokenType::KW_IF},
 };
 
-// Bring enum values into scope for readability
 using enum TokenType;
 
 Lexer::Lexer(const std::string& input) : input_(input) {}
@@ -101,6 +101,9 @@ Token Lexer::readOp() {
     if (c == ';') return {SEMICOLON, ";"};
     if (c == '*') return {STAR, "*"};
     if (c == '.') return {DOT, "."};
+    if (c == '+') return {OP_PLUS, "+"};
+    if (c == '-') return {OP_MINUS, "-"};
+    if (c == '/') return {OP_DIV, "/"};
     throw std::runtime_error(std::string("Unexpected character: ") + c);
 }
 
@@ -153,7 +156,7 @@ bool Parser::check(TokenType t) const { return cur().type == t; }
 
 // ── Main dispatch ──────────────────────────────────────────────────────
 
-ParsedQuery Parser::parse() {
+std::unique_ptr<Statement> Parser::parse() {
     if (check(KW_CREATE)) {
         consume();
         if (check(KW_DATABASE)) return parseCreateDB();
@@ -179,26 +182,27 @@ ParsedQuery Parser::parse() {
 
 // ── DDL ────────────────────────────────────────────────────────────────
 
-ParsedQuery Parser::parseCreateDB() {
+std::unique_ptr<CreateDatabaseStatement> Parser::parseCreateDB() {
     expect(KW_DATABASE);
-    ParsedQuery q; q.type = QueryType::CREATE_DATABASE;
-    q.database_name = expect(IDENTIFIER).value;
+    auto q = std::make_unique<CreateDatabaseStatement>();
+    q->database_name = expect(IDENTIFIER).value;
     match(SEMICOLON);
     return q;
 }
 
-ParsedQuery Parser::parseDropDB() {
+std::unique_ptr<DropDatabaseStatement> Parser::parseDropDB() {
     expect(KW_DATABASE);
-    ParsedQuery q; q.type = QueryType::DROP_DATABASE;
-    q.database_name = expect(IDENTIFIER).value;
+    auto q = std::make_unique<DropDatabaseStatement>();
+    if (match(KW_IF)) { expect(KW_EXISTS); q->if_exists = true; }
+    q->database_name = expect(IDENTIFIER).value;
     match(SEMICOLON);
     return q;
 }
 
-ParsedQuery Parser::parseCreateTable() {
+std::unique_ptr<CreateTableStatement> Parser::parseCreateTable() {
     expect(KW_TABLE);
-    ParsedQuery q; q.type = QueryType::CREATE_TABLE;
-    q.table_name = expect(IDENTIFIER).value;
+    auto q = std::make_unique<CreateTableStatement>();
+    q->table_name = expect(IDENTIFIER).value;
     expect(LPAREN);
 
     int col_idx = 0;
@@ -206,7 +210,6 @@ ParsedQuery Parser::parseCreateTable() {
         ColDef col;
         col.name = expect(IDENTIFIER).value;
 
-        // Type keyword
         Token tt = consume();
         std::string tp = tt.value;
         if (tp == "VARCHAR") {
@@ -216,12 +219,11 @@ ParsedQuery Parser::parseCreateTable() {
         }
         col.type = tp;
 
-        // Optional constraints (can appear in any order)
         while (true) {
             if (check(KW_PRIMARY)) {
                 consume(); expect(KW_KEY);
                 col.is_primary_key = true;
-                q.primary_key_index = col_idx;
+                q->primary_key_index = col_idx;
             } else if (check(KW_NOT)) {
                 consume(); expect(KW_NULL);
                 col.not_null = true;
@@ -253,7 +255,7 @@ ParsedQuery Parser::parseCreateTable() {
             }
         }
 
-        q.column_defs.push_back(col);
+        q->column_defs.push_back(col);
         ++col_idx;
     } while (match(COMMA));
 
@@ -262,38 +264,33 @@ ParsedQuery Parser::parseCreateTable() {
     return q;
 }
 
-ParsedQuery Parser::parseDropTable() {
+std::unique_ptr<DropTableStatement> Parser::parseDropTable() {
     expect(KW_TABLE);
-    ParsedQuery q; q.type = QueryType::DROP_TABLE;
-    q.table_name = expect(IDENTIFIER).value;
+    auto q = std::make_unique<DropTableStatement>();
+    if (match(KW_IF)) { expect(KW_EXISTS); q->if_exists = true; }
+    q->table_name = expect(IDENTIFIER).value;
     match(SEMICOLON);
     return q;
 }
 
-// ── USE ────────────────────────────────────────────────────────────────
-
-ParsedQuery Parser::parseUse() {
-    ParsedQuery q; q.type = QueryType::USE_DATABASE;
-    // Allow optional DATABASE keyword
+std::unique_ptr<UseDatabaseStatement> Parser::parseUse() {
+    auto q = std::make_unique<UseDatabaseStatement>();
     if (check(KW_DATABASE)) consume();
-    q.database_name = expect(IDENTIFIER).value;
+    q->database_name = expect(IDENTIFIER).value;
     match(SEMICOLON);
     return q;
 }
 
-// ── ALTER TABLE ─────────────────────────────────────────────────────────
-
-ParsedQuery Parser::parseAlterTable() {
+std::unique_ptr<AlterTableStatement> Parser::parseAlterTable() {
     expect(KW_TABLE);
-    ParsedQuery q; q.type = QueryType::ALTER_TABLE;
-    q.table_name = expect(IDENTIFIER).value;
+    auto q = std::make_unique<AlterTableStatement>();
+    q->table_name = expect(IDENTIFIER).value;
 
     if (check(KW_ADD)) {
         consume();
-        match(KW_COLUMN); // optional COLUMN keyword
-        q.alter_action = AlterAction::ADD_COL;
-        q.alter_col_name = expect(IDENTIFIER).value;
-        // Type keyword
+        match(KW_COLUMN);
+        q->alter_action = AlterAction::ADD_COL;
+        q->alter_col_name = expect(IDENTIFIER).value;
         Token tt = consume();
         std::string tp = tt.value;
         if (tp == "VARCHAR") {
@@ -301,10 +298,9 @@ ParsedQuery Parser::parseAlterTable() {
             tp += "(" + expect(NUMBER_LITERAL).value + ")";
             expect(RPAREN);
         }
-        q.alter_col_type = tp;
-        // Parse optional constraints for ADD COLUMN
+        q->alter_col_type = tp;
         ColDef cd;
-        cd.name = q.alter_col_name;
+        cd.name = q->alter_col_name;
         cd.type = tp;
         while (true) {
             if (check(KW_NOT)) { consume(); expect(KW_NULL); cd.not_null = true; }
@@ -317,12 +313,12 @@ ParsedQuery Parser::parseAlterTable() {
             }
             else break;
         }
-        q.alter_col_def = cd;
+        q->alter_col_def = cd;
     } else if (check(KW_DROP)) {
         consume();
-        match(KW_COLUMN); // optional COLUMN keyword
-        q.alter_action = AlterAction::DROP_COL;
-        q.alter_col_name = expect(IDENTIFIER).value;
+        match(KW_COLUMN);
+        q->alter_action = AlterAction::DROP_COL;
+        q->alter_col_name = expect(IDENTIFIER).value;
     } else {
         throw std::runtime_error("Expected ADD or DROP after ALTER TABLE, got: " + cur().value);
     }
@@ -337,7 +333,7 @@ QualifiedCol Parser::parseQualifiedCol() {
     QualifiedCol qc;
     qc.column = expect(IDENTIFIER).value;
     if (check(DOT)) {
-        consume(); // eat '.'
+        consume();
         qc.table = qc.column;
         qc.column = expect(IDENTIFIER).value;
     }
@@ -346,317 +342,323 @@ QualifiedCol Parser::parseQualifiedCol() {
 
 // ── SELECT ─────────────────────────────────────────────────────────────
 
-ParsedQuery Parser::parseSelect() {
-    ParsedQuery q; q.type = QueryType::SELECT;
+std::unique_ptr<SelectStatement> Parser::parseSelect() {
+    auto q = std::make_unique<SelectStatement>();
     if (match(STAR)) {
-        q.select_all = true;
+        q->select_all = true;
     } else {
         do {
             SelectColumn sc;
-            if (match(KW_COUNT)) { sc.aggr = AggrFunc::COUNT; expect(LPAREN); if(match(STAR)) sc.name = "*"; else sc.name = expect(IDENTIFIER).value; expect(RPAREN); }
-            else if (match(KW_SUM)) { sc.aggr = AggrFunc::SUM; expect(LPAREN); sc.name = expect(IDENTIFIER).value; expect(RPAREN); }
-            else if (match(KW_AVG)) { sc.aggr = AggrFunc::AVG; expect(LPAREN); sc.name = expect(IDENTIFIER).value; expect(RPAREN); }
-            else if (match(KW_MIN)) { sc.aggr = AggrFunc::MIN; expect(LPAREN); sc.name = expect(IDENTIFIER).value; expect(RPAREN); }
-            else if (match(KW_MAX)) { sc.aggr = AggrFunc::MAX; expect(LPAREN); sc.name = expect(IDENTIFIER).value; expect(RPAREN); }
-            else {
-                // Support qualified name: table.column
-                sc.name = expect(IDENTIFIER).value;
-                if (check(DOT)) {
-                    consume();
-                    sc.name = sc.name + "." + expect(IDENTIFIER).value;
-                }
-            }
+            sc.expr = parseExprOr();
             if (match(KW_AS)) sc.alias = expect(IDENTIFIER).value;
-            q.select_columns.push_back(sc);
+            q->select_columns.push_back(std::move(sc));
         } while (match(COMMA));
     }
     expect(KW_FROM);
-    q.table_name = expect(IDENTIFIER).value;
+    q->table_name = expect(IDENTIFIER).value;
 
-    // ── JOIN clauses ────────────────────────────────────────────────────
     while (true) {
+        bool is_cross = false;
         JoinClause::Type jtype = JoinClause::INNER;
         if (check(KW_INNER)) {
             consume();
             expect(KW_JOIN);
         } else if (check(KW_LEFT)) {
             consume();
-            match(KW_OUTER); // optional OUTER
+            match(KW_OUTER);
             expect(KW_JOIN);
             jtype = JoinClause::LEFT;
         } else if (check(KW_RIGHT)) {
             consume();
-            match(KW_OUTER); // optional OUTER
+            match(KW_OUTER);
             expect(KW_JOIN);
             jtype = JoinClause::RIGHT;
+        } else if (check(KW_FULL)) {
+            consume();
+            match(KW_OUTER);
+            expect(KW_JOIN);
+            jtype = JoinClause::FULL;
+        } else if (check(KW_CROSS)) {
+            consume();
+            expect(KW_JOIN);
+            jtype = JoinClause::CROSS;
+            is_cross = true;
         } else if (check(KW_JOIN)) {
-            consume(); // bare JOIN = INNER JOIN
+            consume();
         } else {
             break;
         }
         JoinClause jc;
         jc.join_type = jtype;
         jc.table_name = expect(IDENTIFIER).value;
-        expect(KW_ON);
-        jc.left_col  = parseQualifiedCol();
-        expect(OP_EQ);
-        jc.right_col = parseQualifiedCol();
-        q.joins.push_back(std::move(jc));
+        if (!is_cross) {
+            expect(KW_ON);
+            jc.left_col  = parseQualifiedCol();
+            expect(OP_EQ);
+            jc.right_col = parseQualifiedCol();
+        }
+        q->joins.push_back(std::move(jc));
     }
-    // ── End JOIN ─────────────────────────────────────────────────────────
 
-    if (match(KW_WHERE)) q.where = parseExprOr();
+    if (match(KW_WHERE)) q->where = parseExprOr();
     if (match(KW_GROUP)) {
         expect(KW_BY);
         do {
-            q.group_by.push_back(expect(IDENTIFIER).value);
+            q->group_by.push_back(expect(IDENTIFIER).value);
         } while (match(COMMA));
     }
-    if (match(KW_HAVING)) q.having = parseExprOr();
+    if (match(KW_HAVING)) q->having = parseExprOr();
     if (match(KW_ORDER)) {
         expect(KW_BY);
         do {
             OrderByClause ob;
-            if (match(KW_COUNT)) { ob.aggr = AggrFunc::COUNT; expect(LPAREN); if(match(STAR)) ob.column = "*"; else ob.column = expect(IDENTIFIER).value; expect(RPAREN); }
-            else if (match(KW_SUM)) { ob.aggr = AggrFunc::SUM; expect(LPAREN); ob.column = expect(IDENTIFIER).value; expect(RPAREN); }
-            else if (match(KW_AVG)) { ob.aggr = AggrFunc::AVG; expect(LPAREN); ob.column = expect(IDENTIFIER).value; expect(RPAREN); }
-            else if (match(KW_MIN)) { ob.aggr = AggrFunc::MIN; expect(LPAREN); ob.column = expect(IDENTIFIER).value; expect(RPAREN); }
-            else if (match(KW_MAX)) { ob.aggr = AggrFunc::MAX; expect(LPAREN); ob.column = expect(IDENTIFIER).value; expect(RPAREN); }
-            else { ob.column = expect(IDENTIFIER).value; }
+            ob.expr = parseExprOr();
             if (match(KW_DESC)) ob.asc = false;
-            else match(KW_ASC); // optional ASC
-            q.order_by.push_back(ob);
+            else match(KW_ASC);
+            q->order_by.push_back(std::move(ob));
         } while (match(COMMA));
     }
-    // LIMIT / OFFSET
     if (match(KW_LIMIT)) {
-        q.limit = std::stoi(expect(NUMBER_LITERAL).value);
+        q->limit = std::stoi(expect(NUMBER_LITERAL).value);
         if (match(KW_OFFSET))
-            q.offset = std::stoi(expect(NUMBER_LITERAL).value);
+            q->offset = std::stoi(expect(NUMBER_LITERAL).value);
     }
     match(SEMICOLON);
     return q;
 }
 
-// ── INSERT ─────────────────────────────────────────────────────────────
+// ── INSERT, UPDATE, DELETE ─────────────────────────────────────────────
 
-ParsedQuery Parser::parseInsert() {
-    ParsedQuery q; q.type = QueryType::INSERT;
+std::unique_ptr<InsertStatement> Parser::parseInsert() {
+    auto q = std::make_unique<InsertStatement>();
     expect(KW_INTO);
-    q.table_name = expect(IDENTIFIER).value;
-
-    // Optional column list
+    q->table_name = expect(IDENTIFIER).value;
     if (check(LPAREN)) {
         consume();
         do {
-            q.insert_columns.push_back(expect(IDENTIFIER).value);
+            q->insert_columns.push_back(expect(IDENTIFIER).value);
         } while (match(COMMA));
         expect(RPAREN);
     }
-
     expect(KW_VALUES);
-
-    // Multiple value rows
     do {
         expect(LPAREN);
-        std::vector<std::string> vals;
+        std::vector<std::unique_ptr<Expression>> vals;
         do {
-            Token v = consume();
-            vals.push_back(v.value);
+            vals.push_back(parseExprOr());
         } while (match(COMMA));
         expect(RPAREN);
-        q.insert_values.push_back(std::move(vals));
+        q->insert_values.push_back(std::move(vals));
     } while (match(COMMA));
-
     match(SEMICOLON);
     return q;
 }
 
-// ── UPDATE ─────────────────────────────────────────────────────────────
-
-ParsedQuery Parser::parseUpdate() {
-    ParsedQuery q; q.type = QueryType::UPDATE;
-    q.table_name = expect(IDENTIFIER).value;
+std::unique_ptr<UpdateStatement> Parser::parseUpdate() {
+    auto q = std::make_unique<UpdateStatement>();
+    q->table_name = expect(IDENTIFIER).value;
     expect(KW_SET);
-
     do {
         SetClause sc;
         sc.column = expect(IDENTIFIER).value;
         expect(OP_EQ);
-        sc.value = consume().value;
-        q.set_clauses.push_back(sc);
+        sc.value = parseExprOr();
+        q->set_clauses.push_back(std::move(sc));
     } while (match(COMMA));
-
-    if (match(KW_WHERE)) q.where = parseExprOr();
+    if (match(KW_WHERE)) q->where = parseExprOr();
     match(SEMICOLON);
     return q;
 }
 
-// ── DELETE ─────────────────────────────────────────────────────────────
-
-ParsedQuery Parser::parseDelete() {
-    ParsedQuery q; q.type = QueryType::DELETE_Q;
+std::unique_ptr<DeleteStatement> Parser::parseDelete() {
+    auto q = std::make_unique<DeleteStatement>();
     expect(KW_FROM);
-    q.table_name = expect(IDENTIFIER).value;
-    if (match(KW_WHERE)) q.where = parseExprOr();
+    q->table_name = expect(IDENTIFIER).value;
+    if (match(KW_WHERE)) q->where = parseExprOr();
     match(SEMICOLON);
     return q;
 }
 
-// ── WHERE recursive descent (OR < AND < NOT < atom) ────────────────────
+// ── EXPRESSIONS (Precedence Climbing / Recursive Descent) ──────────────
 
-std::shared_ptr<WhereExpr> Parser::parseExprOr() {
+std::unique_ptr<Expression> Parser::parseExprOr() {
     auto left = parseExprAnd();
     while (match(KW_OR)) {
-        auto node = std::make_shared<WhereExpr>();
-        node->kind = WhereExpr::OR_OP;
-        node->left = left;
-        node->right = parseExprAnd();
-        left = node;
+        auto right = parseExprAnd();
+        left = std::make_unique<BinaryExpression>(KW_OR, std::move(left), std::move(right));
     }
     return left;
 }
 
-std::shared_ptr<WhereExpr> Parser::parseExprAnd() {
+std::unique_ptr<Expression> Parser::parseExprAnd() {
     auto left = parseExprNot();
     while (match(KW_AND)) {
-        auto node = std::make_shared<WhereExpr>();
-        node->kind = WhereExpr::AND_OP;
-        node->left = left;
-        node->right = parseExprNot();
-        left = node;
+        auto right = parseExprNot();
+        left = std::make_unique<BinaryExpression>(KW_AND, std::move(left), std::move(right));
     }
     return left;
 }
 
-std::shared_ptr<WhereExpr> Parser::parseExprNot() {
+std::unique_ptr<Expression> Parser::parseExprNot() {
     if (match(KW_NOT)) {
-        auto node = std::make_shared<WhereExpr>();
-        node->kind = WhereExpr::NOT_OP;
-        node->left = parseExprNot();
-        return node;
+        return std::make_unique<UnaryExpression>(KW_NOT, parseExprNot());
     }
-    return parseExprAtom();
+    return parseExprCmp();
 }
 
-std::shared_ptr<WhereExpr> Parser::parseExprAtom() {
+std::unique_ptr<Expression> Parser::parseExprCmp() {
+    auto left = parseExprAddSub();
+
+    if (match(KW_IN)) {
+        expect(LPAREN);
+        if (check(KW_SELECT)) {
+            consume();
+            auto subq = std::make_unique<SubqueryExpression>(parseSelect(), false, false);
+            expect(RPAREN);
+            return std::make_unique<BinaryExpression>(KW_IN, std::move(left), std::move(subq));
+        } else {
+            std::vector<std::string> vals;
+            do {
+                vals.push_back(consume().value);
+            } while (match(COMMA));
+            expect(RPAREN);
+            return std::make_unique<InListExpression>(std::move(left), std::move(vals), false);
+        }
+    }
+
+    if (check(KW_NOT)) {
+        size_t saved = pos_;
+        consume();
+        if (match(KW_IN)) {
+            expect(LPAREN);
+            if (check(KW_SELECT)) {
+                consume();
+                auto subq = std::make_unique<SubqueryExpression>(parseSelect(), false, true);
+                expect(RPAREN);
+                return std::make_unique<BinaryExpression>(KW_IN, std::move(left), std::move(subq)); // negation is inside subquery/inlist for now
+            } else {
+                std::vector<std::string> vals;
+                do {
+                    vals.push_back(consume().value);
+                } while (match(COMMA));
+                expect(RPAREN);
+                return std::make_unique<InListExpression>(std::move(left), std::move(vals), true);
+            }
+        }
+        pos_ = saved;
+    }
+
+    TokenType opTok = cur().type;
+    if (opTok == OP_EQ || opTok == OP_NEQ || opTok == OP_LT || opTok == OP_GT || opTok == OP_LTE || opTok == OP_GTE) {
+        consume();
+        auto right = parseExprAddSub();
+        left = std::make_unique<BinaryExpression>(opTok, std::move(left), std::move(right));
+    }
+    return left;
+}
+
+std::unique_ptr<Expression> Parser::parseExprAddSub() {
+    auto left = parseExprMulDiv();
+    while (check(OP_PLUS) || check(OP_MINUS)) {
+        TokenType op = consume().type;
+        auto right = parseExprMulDiv();
+        left = std::make_unique<BinaryExpression>(op, std::move(left), std::move(right));
+    }
+    return left;
+}
+
+std::unique_ptr<Expression> Parser::parseExprMulDiv() {
+    auto left = parseExprAtom();
+    while (check(STAR) || check(OP_DIV)) {
+        TokenType op = consume().type;
+        auto right = parseExprAtom();
+        left = std::make_unique<BinaryExpression>(op, std::move(left), std::move(right));
+    }
+    return left;
+}
+
+std::unique_ptr<Expression> Parser::parseExprAtom() {
+    if (match(OP_MINUS)) {
+        return std::make_unique<UnaryExpression>(OP_MINUS, parseExprAtom());
+    }
+
     if (match(LPAREN)) {
         auto expr = parseExprOr();
         expect(RPAREN);
         return expr;
     }
 
-    // EXISTS (SELECT ...)
     if (check(KW_EXISTS)) {
         consume();
-        auto node = std::make_shared<WhereExpr>();
-        node->kind = WhereExpr::EXISTS_OP;
         expect(LPAREN);
         expect(KW_SELECT);
-        auto subq = std::make_shared<ParsedQuery>(parseSelect());
-        node->subquery = subq;
+        auto subq = std::make_unique<SubqueryExpression>(parseSelect(), true, false);
         expect(RPAREN);
-        return node;
+        return subq;
     }
 
-    // comparison: column op value, or column IN (...), or column IN (SELECT ...)
-    auto node = std::make_shared<WhereExpr>();
-    node->kind = WhereExpr::CMP;
+    if (check(KW_NOT) && pos_ + 1 < tokens_.size() && tokens_[pos_ + 1].type == KW_EXISTS) {
+        consume(); // NOT
+        consume(); // EXISTS
+        expect(LPAREN);
+        expect(KW_SELECT);
+        auto subq = std::make_unique<SubqueryExpression>(parseSelect(), true, true);
+        expect(RPAREN);
+        return subq;
+    }
 
-    if (match(KW_COUNT)) { node->aggr = AggrFunc::COUNT; expect(LPAREN); if(match(STAR)) node->column = "*"; else node->column = expect(IDENTIFIER).value; expect(RPAREN); }
-    else if (match(KW_SUM)) { node->aggr = AggrFunc::SUM; expect(LPAREN); node->column = expect(IDENTIFIER).value; expect(RPAREN); }
-    else if (match(KW_AVG)) { node->aggr = AggrFunc::AVG; expect(LPAREN); node->column = expect(IDENTIFIER).value; expect(RPAREN); }
-    else if (match(KW_MIN)) { node->aggr = AggrFunc::MIN; expect(LPAREN); node->column = expect(IDENTIFIER).value; expect(RPAREN); }
-    else if (match(KW_MAX)) { node->aggr = AggrFunc::MAX; expect(LPAREN); node->column = expect(IDENTIFIER).value; expect(RPAREN); }
-    else {
-        node->column = expect(IDENTIFIER).value;
+    if (match(KW_COUNT)) { expect(LPAREN); std::string col = match(STAR) ? "*" : expect(IDENTIFIER).value; expect(RPAREN); return std::make_unique<AggregateExpression>(AggrFunc::COUNT, col); }
+    if (match(KW_SUM)) { expect(LPAREN); std::string col = expect(IDENTIFIER).value; expect(RPAREN); return std::make_unique<AggregateExpression>(AggrFunc::SUM, col); }
+    if (match(KW_AVG)) { expect(LPAREN); std::string col = expect(IDENTIFIER).value; expect(RPAREN); return std::make_unique<AggregateExpression>(AggrFunc::AVG, col); }
+    if (match(KW_MIN)) { expect(LPAREN); std::string col = expect(IDENTIFIER).value; expect(RPAREN); return std::make_unique<AggregateExpression>(AggrFunc::MIN, col); }
+    if (match(KW_MAX)) { expect(LPAREN); std::string col = expect(IDENTIFIER).value; expect(RPAREN); return std::make_unique<AggregateExpression>(AggrFunc::MAX, col); }
+
+    Token t = cur();
+    if (t.type == STRING_LITERAL || t.type == NUMBER_LITERAL || t.type == BOOL_LITERAL) {
+        consume();
+        return std::make_unique<LiteralExpression>(t.value, t.type);
+    }
+    
+    if (t.type == KW_NULL) {
+        consume();
+        return std::make_unique<LiteralExpression>("NULL", KW_NULL);
+    }
+
+    if (t.type == IDENTIFIER) {
+        std::string col = consume().value;
+        std::string tbl = "";
         if (check(DOT)) {
             consume();
-            node->column += "." + expect(IDENTIFIER).value;
+            tbl = col;
+            col = expect(IDENTIFIER).value;
         }
+        return std::make_unique<ColumnExpression>(tbl, col);
     }
 
-    // Check for [NOT] IN
-    bool is_not = false;
-    if (check(KW_NOT)) {
-        // peek ahead: NOT IN?
-        size_t saved = pos_;
-        consume();
-        if (check(KW_IN)) {
-            is_not = true;
-            // fall through to IN parsing below
-        } else {
-            pos_ = saved; // backtrack
-        }
-    }
-    if (match(KW_IN)) {
-        node->kind = WhereExpr::IN_OP;
-        node->negated = is_not;
-        expect(LPAREN);
-        if (check(KW_SELECT)) {
-            // Subquery: IN (SELECT ...)
-            consume();
-            auto subq = std::make_shared<ParsedQuery>(parseSelect());
-            node->subquery = subq;
-        } else {
-            // Value list: IN (val1, val2, ...)
-            do {
-                node->in_values.push_back(consume().value);
-            } while (match(COMMA));
-        }
-        expect(RPAREN);
-        return node;
-    }
-
-    Token opTok = consume();
-    switch (opTok.type) {
-        case OP_EQ:  node->op = "=";  break;
-        case OP_NEQ: node->op = "!="; break;
-        case OP_LT:  node->op = "<";  break;
-        case OP_GT:  node->op = ">";  break;
-        case OP_LTE: node->op = "<="; break;
-        case OP_GTE: node->op = ">="; break;
-        default: throw std::runtime_error("Expected comparison operator, got: " + opTok.value);
-    }
-
-    // Support right side as table.column or string literal or number
-    Token rhs = consume();
-    node->value = rhs.value;
-    if (rhs.type == STRING_LITERAL || rhs.type == NUMBER_LITERAL || rhs.type == BOOL_LITERAL) {
-        node->is_literal = true;
-    } else if (check(DOT)) {
-        consume();
-        node->value += "." + expect(IDENTIFIER).value;
-    }
-    return node;
+    throw std::runtime_error("Unexpected token in expression: " + t.value);
 }
 
-// ── CREATE INDEX ──────────────────────────────────────────────────────
+// ── INDEXES ────────────────────────────────────────────────────────
 
-ParsedQuery Parser::parseCreateIndex() {
+std::unique_ptr<CreateIndexStatement> Parser::parseCreateIndex() {
     expect(KW_INDEX);
-    ParsedQuery q;
-    q.type = QueryType::CREATE_INDEX;
-    q.index_name = expect(IDENTIFIER).value;
+    auto q = std::make_unique<CreateIndexStatement>();
+    q->index_name = expect(IDENTIFIER).value;
     expect(KW_ON);
-    q.table_name = expect(IDENTIFIER).value;
+    q->table_name = expect(IDENTIFIER).value;
     expect(LPAREN);
-    // Column name for the index
-    q.alter_col_name = expect(IDENTIFIER).value;
+    q->column_name = expect(IDENTIFIER).value;
     expect(RPAREN);
     match(SEMICOLON);
     return q;
 }
 
-// ── DROP INDEX ────────────────────────────────────────────────────────
-
-ParsedQuery Parser::parseDropIndex() {
+std::unique_ptr<DropIndexStatement> Parser::parseDropIndex() {
     expect(KW_INDEX);
-    ParsedQuery q;
-    q.type = QueryType::DROP_INDEX;
-    q.index_name = expect(IDENTIFIER).value;
+    auto q = std::make_unique<DropIndexStatement>();
+    q->index_name = expect(IDENTIFIER).value;
     expect(KW_ON);
-    q.table_name = expect(IDENTIFIER).value;
+    q->table_name = expect(IDENTIFIER).value;
     match(SEMICOLON);
     return q;
 }

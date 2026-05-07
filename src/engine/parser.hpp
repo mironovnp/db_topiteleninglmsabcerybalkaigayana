@@ -19,12 +19,13 @@ enum class TokenType {
     KW_ORDER, KW_BY, KW_GROUP, KW_HAVING, KW_ASC, KW_DESC, KW_AS,
     KW_COUNT, KW_SUM, KW_AVG, KW_MIN, KW_MAX,
     KW_ALTER, KW_ADD, KW_COLUMN,
-    KW_JOIN, KW_INNER, KW_LEFT, KW_RIGHT, KW_OUTER, KW_ON,
+    KW_JOIN, KW_INNER, KW_LEFT, KW_RIGHT, KW_FULL, KW_CROSS, KW_OUTER, KW_ON,
     KW_LIMIT, KW_OFFSET,
     KW_IN, KW_EXISTS, KW_NULL, KW_UNIQUE, KW_DEFAULT, KW_FOREIGN, KW_REFERENCES, KW_CASCADE,
-    KW_INDEX,
+    KW_INDEX, KW_IF,
     IDENTIFIER, STRING_LITERAL, NUMBER_LITERAL, BOOL_LITERAL,
     OP_EQ, OP_NEQ, OP_LT, OP_GT, OP_LTE, OP_GTE,
+    OP_PLUS, OP_MINUS, OP_DIV, // OP_STAR is handled by STAR
     LPAREN, RPAREN, COMMA, SEMICOLON, STAR, DOT,
     END_OF_INPUT
 };
@@ -35,33 +36,91 @@ struct Token { TokenType type; std::string value; };
 
 enum class AggrFunc { NONE, COUNT, SUM, AVG, MIN, MAX };
 
-// ── Forward declaration ────────────────────────────────────────────────
-struct ParsedQuery;
+// ── AST Base Classes ───────────────────────────────────────────────────
 
-// ── WHERE expression tree ──────────────────────────────────────────────
-
-struct WhereExpr {
-    enum Kind { CMP, AND_OP, OR_OP, NOT_OP, IN_OP, EXISTS_OP };
-    Kind kind;
-    std::string column, op, value;                   // CMP
-    AggrFunc aggr = AggrFunc::NONE;                  // For HAVING
-    std::shared_ptr<WhereExpr> left, right;          // AND/OR/NOT(left only)
-    std::vector<std::string> in_values;              // IN (val1, val2, ...)
-    std::shared_ptr<ParsedQuery> subquery;           // IN (SELECT ...) / EXISTS (SELECT ...)
-    bool negated = false;                            // NOT IN / NOT EXISTS
-    bool is_literal = false;                         // True if value is a string/number literal
+class ASTNode {
+public:
+    virtual ~ASTNode() = default;
 };
 
-// ── Query representation ───────────────────────────────────────────────
-
-enum class QueryType {
-    CREATE_DATABASE, DROP_DATABASE,
-    CREATE_TABLE, DROP_TABLE,
-    SELECT, INSERT, UPDATE, DELETE_Q,
-    USE_DATABASE,
-    ALTER_TABLE, ALTER_DROP_COL,
-    CREATE_INDEX, DROP_INDEX
+class Expression : public ASTNode {
+public:
+    virtual ~Expression() = default;
 };
+
+class Statement : public ASTNode {
+public:
+    virtual ~Statement() = default;
+};
+
+// ── Expressions ────────────────────────────────────────────────────────
+
+class BinaryExpression : public Expression {
+public:
+    TokenType op;
+    std::unique_ptr<Expression> left;
+    std::unique_ptr<Expression> right;
+
+    BinaryExpression(TokenType o, std::unique_ptr<Expression> l, std::unique_ptr<Expression> r)
+        : op(o), left(std::move(l)), right(std::move(r)) {}
+};
+
+class UnaryExpression : public Expression {
+public:
+    TokenType op;
+    std::unique_ptr<Expression> operand;
+
+    UnaryExpression(TokenType o, std::unique_ptr<Expression> opnd)
+        : op(o), operand(std::move(opnd)) {}
+};
+
+class LiteralExpression : public Expression {
+public:
+    std::string value;
+    TokenType type;
+
+    LiteralExpression(std::string v, TokenType t) : value(std::move(v)), type(t) {}
+};
+
+class ColumnExpression : public Expression {
+public:
+    std::string table;
+    std::string column;
+
+    ColumnExpression(std::string t, std::string c) : table(std::move(t)), column(std::move(c)) {}
+};
+
+class AggregateExpression : public Expression {
+public:
+    AggrFunc func;
+    std::string column;
+
+    AggregateExpression(AggrFunc f, std::string c) : func(f), column(std::move(c)) {}
+};
+
+class SelectStatement; // Forward declaration
+
+class SubqueryExpression : public Expression {
+public:
+    std::unique_ptr<SelectStatement> subquery;
+    bool is_exists;
+    bool negated;
+
+    SubqueryExpression(std::unique_ptr<SelectStatement> sq, bool exists, bool neg)
+        : subquery(std::move(sq)), is_exists(exists), negated(neg) {}
+};
+
+class InListExpression : public Expression {
+public:
+    std::unique_ptr<Expression> left;
+    std::vector<std::string> values;
+    bool negated;
+
+    InListExpression(std::unique_ptr<Expression> l, std::vector<std::string> vals, bool neg)
+        : left(std::move(l)), values(std::move(vals)), negated(neg) {}
+};
+
+// ── Common Structures for Statements ───────────────────────────────────
 
 enum class AlterAction { ADD_COL, DROP_COL };
 
@@ -72,66 +131,121 @@ struct ColDef {
     bool unique = false;
     bool has_default = false;
     std::string default_value;
-    // FOREIGN KEY
     std::string fk_ref_table;
     std::string fk_ref_column;
     OnDeleteAction on_delete = OnDeleteAction::NO_ACTION;
 };
-struct SetClause { std::string column, value; };
+
+struct SetClause { std::string column; std::unique_ptr<Expression> value; };
 
 struct SelectColumn {
-    std::string name; // column name or "*"
-    AggrFunc aggr = AggrFunc::NONE;
+    std::unique_ptr<Expression> expr;
     std::string alias; // optional alias for AS
 };
 
 struct OrderByClause {
-    std::string column;
-    AggrFunc aggr = AggrFunc::NONE;
+    std::unique_ptr<Expression> expr;
     bool asc = true;
 };
 
-// JOIN clause: table alias for qualified column names (tbl.col)
 struct QualifiedCol {
-    std::string table;  // empty = unqualified
+    std::string table;
     std::string column;
 };
 
 struct JoinClause {
-    enum Type { INNER, LEFT, RIGHT };
+    enum Type { INNER, LEFT, RIGHT, FULL, CROSS };
     Type join_type = INNER;
     std::string table_name;
-    QualifiedCol left_col;   // ON left_col = right_col
+    QualifiedCol left_col;
     QualifiedCol right_col;
 };
 
-struct ParsedQuery {
-    QueryType type;
+// ── Statements ─────────────────────────────────────────────────────────
+
+class CreateDatabaseStatement : public Statement {
+public:
     std::string database_name;
+};
+
+class DropDatabaseStatement : public Statement {
+public:
+    std::string database_name;
+    bool if_exists = false;
+};
+
+class CreateTableStatement : public Statement {
+public:
     std::string table_name;
     std::vector<ColDef> column_defs;
-    int primary_key_index = -1;     // -1 = not specified (defaults to 0)
-    std::vector<SelectColumn> select_columns;
-    bool select_all = false;
-    std::vector<std::string> insert_columns;
-    std::vector<std::vector<std::string>> insert_values;
-    std::vector<SetClause> set_clauses;
-    std::shared_ptr<WhereExpr> where;
-    std::vector<std::string> group_by;
-    std::shared_ptr<WhereExpr> having;
-    std::vector<OrderByClause> order_by;
-    // JOIN
-    std::vector<JoinClause> joins;
-    // ALTER TABLE
+    int primary_key_index = -1;
+};
+
+class DropTableStatement : public Statement {
+public:
+    std::string table_name;
+    bool if_exists = false;
+};
+
+class UseDatabaseStatement : public Statement {
+public:
+    std::string database_name;
+};
+
+class AlterTableStatement : public Statement {
+public:
+    std::string table_name;
     AlterAction alter_action = AlterAction::ADD_COL;
     std::string alter_col_name;
     std::string alter_col_type;
-    ColDef alter_col_def;           // full col def with constraints
-    // LIMIT / OFFSET
-    int limit = -1;                 // -1 = no limit
-    int offset = 0;
-    // CREATE INDEX / DROP INDEX
+    ColDef alter_col_def;
+};
+
+class CreateIndexStatement : public Statement {
+public:
     std::string index_name;
+    std::string table_name;
+    std::string column_name;
+};
+
+class DropIndexStatement : public Statement {
+public:
+    std::string index_name;
+    std::string table_name;
+};
+
+class SelectStatement : public Statement {
+public:
+    bool select_all = false;
+    std::vector<SelectColumn> select_columns;
+    std::string table_name;
+    std::vector<JoinClause> joins;
+    std::unique_ptr<Expression> where;
+    std::vector<std::string> group_by;
+    std::unique_ptr<Expression> having;
+    std::vector<OrderByClause> order_by;
+    int limit = -1;
+    int offset = 0;
+};
+
+class InsertStatement : public Statement {
+public:
+    std::string table_name;
+    std::vector<std::string> insert_columns;
+    std::vector<std::vector<std::unique_ptr<Expression>>> insert_values;
+};
+
+class UpdateStatement : public Statement {
+public:
+    std::string table_name;
+    std::vector<SetClause> set_clauses;
+    std::unique_ptr<Expression> where;
+};
+
+class DeleteStatement : public Statement {
+public:
+    std::string table_name;
+    std::unique_ptr<Expression> where;
 };
 
 // ── Lexer ──────────────────────────────────────────────────────────────
@@ -155,7 +269,7 @@ private:
 class Parser {
 public:
     explicit Parser(const std::vector<Token>& tokens);
-    ParsedQuery parse();
+    std::unique_ptr<Statement> parse();
 private:
     std::vector<Token> tokens_;
     size_t pos_ = 0;
@@ -165,25 +279,28 @@ private:
     bool match(TokenType t);
     bool check(TokenType t) const;
 
-    ParsedQuery parseCreateDB();
-    ParsedQuery parseDropDB();
-    ParsedQuery parseCreateTable();
-    ParsedQuery parseDropTable();
-    ParsedQuery parseSelect();
-    ParsedQuery parseInsert();
-    ParsedQuery parseUpdate();
-    ParsedQuery parseDelete();
-    ParsedQuery parseUse();
-    ParsedQuery parseAlterTable();
-    ParsedQuery parseCreateIndex();
-    ParsedQuery parseDropIndex();
+    std::unique_ptr<CreateDatabaseStatement> parseCreateDB();
+    std::unique_ptr<DropDatabaseStatement> parseDropDB();
+    std::unique_ptr<CreateTableStatement> parseCreateTable();
+    std::unique_ptr<DropTableStatement> parseDropTable();
+    std::unique_ptr<SelectStatement> parseSelect();
+    std::unique_ptr<InsertStatement> parseInsert();
+    std::unique_ptr<UpdateStatement> parseUpdate();
+    std::unique_ptr<DeleteStatement> parseDelete();
+    std::unique_ptr<UseDatabaseStatement> parseUse();
+    std::unique_ptr<AlterTableStatement> parseAlterTable();
+    std::unique_ptr<CreateIndexStatement> parseCreateIndex();
+    std::unique_ptr<DropIndexStatement> parseDropIndex();
 
     QualifiedCol parseQualifiedCol();
 
-    std::shared_ptr<WhereExpr> parseExprOr();
-    std::shared_ptr<WhereExpr> parseExprAnd();
-    std::shared_ptr<WhereExpr> parseExprNot();
-    std::shared_ptr<WhereExpr> parseExprAtom();
+    std::unique_ptr<Expression> parseExprOr();
+    std::unique_ptr<Expression> parseExprAnd();
+    std::unique_ptr<Expression> parseExprNot();
+    std::unique_ptr<Expression> parseExprCmp();
+    std::unique_ptr<Expression> parseExprAddSub();
+    std::unique_ptr<Expression> parseExprMulDiv();
+    std::unique_ptr<Expression> parseExprAtom();
 };
 
 } // namespace db
