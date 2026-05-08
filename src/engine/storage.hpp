@@ -1,8 +1,10 @@
 #pragma once
 #include "engine/page.hpp"      // Row lives here now
+#include "engine/wal.hpp"
 #include <string>
 #include <vector>
 #include <filesystem>
+#include <memory>
 
 namespace db {
 
@@ -110,6 +112,7 @@ public:
 
 private:
     std::filesystem::path data_dir_;
+    std::unique_ptr<WALManager> wal_mgr_;
     std::filesystem::path dbPath(const std::string& db) const;
     std::filesystem::path tablePath(const std::string& db, const std::string& tbl) const;
     std::filesystem::path indexPath(const std::string& db, const std::string& tbl,

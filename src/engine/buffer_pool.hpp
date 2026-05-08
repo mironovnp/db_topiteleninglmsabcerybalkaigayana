@@ -1,5 +1,6 @@
 #pragma once
 #include "engine/page.hpp"
+#include "engine/wal.hpp"
 #include <string>
 #include <vector>
 #include <list>
@@ -20,7 +21,8 @@ namespace db {
 class BufferPool {
 public:
     explicit BufferPool(const std::string& file_path,
-                        uint32_t pool_size = POOL_SIZE);
+                        uint32_t pool_size = POOL_SIZE,
+                        WALManager* wal_mgr = nullptr);
     ~BufferPool();
 
     /// Fetch existing page into pool. Returns pinned page (pin_count++).
@@ -40,6 +42,8 @@ public:
 
     /// Number of pages currently in the file.
     uint32_t filePageCount() const { return next_page_id_; }
+
+    WALManager* getWALManager() const { return wal_mgr_; }
 
 private:
     struct Frame {
@@ -67,6 +71,7 @@ private:
     // Disk
     mutable std::fstream    file_;
     uint32_t                next_page_id_ = 0;
+    WALManager*             wal_mgr_ = nullptr;
 
     void     openFile();
     void     readFromDisk(PageId id, Page& pg);

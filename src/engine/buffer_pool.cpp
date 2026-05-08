@@ -8,8 +8,8 @@ namespace db {
 //  Construction / destruction
 // ════════════════════════════════════════════════════════════════════════
 
-BufferPool::BufferPool(const std::string& file_path, uint32_t pool_size)
-    : file_path_(file_path), pool_size_(pool_size), frames_(pool_size)
+BufferPool::BufferPool(const std::string& file_path, uint32_t pool_size, WALManager* wal_mgr)
+    : file_path_(file_path), pool_size_(pool_size), frames_(pool_size), wal_mgr_(wal_mgr)
 {
     for (uint32_t i = 0; i < pool_size_; ++i)
         free_list_.push_back(i);
@@ -149,6 +149,12 @@ Page* BufferPool::newPage(PageId* out_id) {
     f.in_use    = true;
     page_table_[id] = idx;
 
+    if (wal_mgr_) {
+        LogRecord rec(0, 0, LogRecordType::INIT_PAGE, id);
+        LSN lsn = wal_mgr_->appendRecord(rec);
+        f.page.setLSN(lsn);
+    }
+
     // Write an empty page to extend the file
     writeToDisk(id, f.page);
     return &f.page;
@@ -176,6 +182,7 @@ void BufferPool::flushPage(PageId page_id) {
     if (it == page_table_.end()) return;
     Frame& f = frames_[it->second];
     if (f.dirty) {
+        if (wal_mgr_) wal_mgr_->flushTo(f.page.getLSN());
         writeToDisk(f.page_id, f.page);
         f.dirty = false;
     }
@@ -184,6 +191,7 @@ void BufferPool::flushPage(PageId page_id) {
 void BufferPool::flushAll() {
     for (auto& f : frames_) {
         if (f.in_use && f.dirty) {
+            if (wal_mgr_) wal_mgr_->flushTo(f.page.getLSN());
             writeToDisk(f.page_id, f.page);
             f.dirty = false;
         }

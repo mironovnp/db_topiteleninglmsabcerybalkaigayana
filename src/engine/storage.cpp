@@ -11,6 +11,7 @@ namespace db {
 
 Storage::Storage(const std::string& data_dir) : data_dir_(data_dir) {
     std::filesystem::create_directories(data_dir_);
+    wal_mgr_ = std::make_unique<WALManager>((data_dir_ / "wal.log").string());
 }
 
 std::filesystem::path Storage::dbPath(const std::string& db) const {
@@ -208,7 +209,7 @@ bool Storage::createTable(const std::string& db_name,
     if (std::filesystem::exists(p)) return false;
 
     // Create the .db file with a meta page (page 0) and an empty root leaf (page 1)
-    BufferPool pool(p.string());
+    BufferPool pool(p.string(), POOL_SIZE, wal_mgr_.get());
 
     // Page 0: Meta
     PageId meta_id;
@@ -271,7 +272,7 @@ TableSchema Storage::getTableSchema(const std::string& db_name,
     if (!std::filesystem::exists(p))
         throw std::runtime_error("Table '" + table_name + "' does not exist");
 
-    BufferPool pool(p.string());
+    BufferPool pool(p.string(), POOL_SIZE, wal_mgr_.get());
 
     Page* meta = pool.fetchPage(0);
     TableSchema s = deserializeSchema(meta->data + 16, PAGE_SIZE - 16);
@@ -285,7 +286,7 @@ TableSchema Storage::getTableSchema(const std::string& db_name,
 std::vector<Row> Storage::readAllRows(const std::string& db_name,
                                        const std::string& table_name) const {
     auto p = tablePath(db_name, table_name);
-    BufferPool pool(p.string());
+    BufferPool pool(p.string(), POOL_SIZE, wal_mgr_.get());
 
     // Read root_page_id and key type from meta
     Page* meta = pool.fetchPage(0);
@@ -307,7 +308,7 @@ int Storage::appendRows(const std::string& db_name,
                         const std::string& table_name,
                         const std::vector<Row>& rows) {
     auto p = tablePath(db_name, table_name);
-    BufferPool pool(p.string());
+    BufferPool pool(p.string(), POOL_SIZE, wal_mgr_.get());
 
     // Read meta
     Page* meta = pool.fetchPage(0);
@@ -347,7 +348,7 @@ bool Storage::writeAllRows(const std::string& db_name,
     // Read current schema from existing file
     TableSchema schema;
     {
-        BufferPool pool(p.string());
+        BufferPool pool(p.string(), POOL_SIZE, wal_mgr_.get());
         Page* meta = pool.fetchPage(0);
         uint32_t payload_len = meta->getNumRecords();
         schema = deserializeSchema(meta->data + 16, payload_len);
@@ -390,7 +391,7 @@ bool Storage::writeAllRows(const std::string& db_name,
               });
 
     // Create new file with meta page
-    BufferPool pool(p.string());
+    BufferPool pool(p.string(), POOL_SIZE, wal_mgr_.get());
 
     PageId meta_id;
     Page* meta = pool.newPage(&meta_id);
@@ -419,7 +420,7 @@ Row Storage::findRow(const std::string& db_name,
                      const std::string& table_name,
                      const std::string& key) const {
     auto p = tablePath(db_name, table_name);
-    BufferPool pool(p.string());
+    BufferPool pool(p.string(), POOL_SIZE, wal_mgr_.get());
 
     Page* meta = pool.fetchPage(0);
     PageId root_id;
@@ -581,7 +582,7 @@ bool Storage::createIndex(const std::string& db_name, const std::string& table_n
               });
 
     // Create the .idx file with meta page + bulk-loaded tree
-    BufferPool pool(ip.string());
+    BufferPool pool(ip.string(), POOL_SIZE, wal_mgr_.get());
 
     PageId meta_id;
     Page* meta = pool.newPage(&meta_id);
@@ -599,7 +600,7 @@ bool Storage::createIndex(const std::string& db_name, const std::string& table_n
     // Update table schema to include the new index
     schema.indexes.push_back({index_name, column_name});
     auto tp = tablePath(db_name, table_name);
-    BufferPool tpool(tp.string());
+    BufferPool tpool(tp.string(), POOL_SIZE, wal_mgr_.get());
     Page* tmeta = tpool.fetchPage(0);
     PageId troot;
     memcpy(&troot, tmeta->data + 16, 4);
@@ -631,7 +632,7 @@ bool Storage::dropIndex(const std::string& db_name, const std::string& table_nam
     // Update schema
     schema.indexes.erase(schema.indexes.begin() + idx_pos);
     auto tp = tablePath(db_name, table_name);
-    BufferPool tpool(tp.string());
+    BufferPool tpool(tp.string(), POOL_SIZE, wal_mgr_.get());
     Page* tmeta = tpool.fetchPage(0);
     PageId troot;
     memcpy(&troot, tmeta->data + 16, 4);
@@ -654,7 +655,7 @@ std::vector<std::string> Storage::indexLookup(const std::string& db_name,
     for (const auto& col : schema.columns)
         if (col.name == column_name) { col_type = col.type; break; }
 
-    BufferPool pool(ip.string());
+    BufferPool pool(ip.string(), POOL_SIZE, wal_mgr_.get());
     Page* meta = pool.fetchPage(0);
     PageId root_id;
     memcpy(&root_id, meta->data + 16, 4);
@@ -685,7 +686,7 @@ std::vector<std::string> Storage::indexScan(const std::string& db_name,
     for (const auto& col : schema.columns)
         if (col.name == column_name) { col_type = col.type; break; }
 
-    BufferPool pool(ip.string());
+    BufferPool pool(ip.string(), POOL_SIZE, wal_mgr_.get());
     Page* meta = pool.fetchPage(0);
     PageId root_id; memcpy(&root_id, meta->data + 16, 4);
     pool.unpinPage(0, false);
@@ -716,7 +717,7 @@ void Storage::indexInsertRow(const std::string& db_name, const std::string& tabl
 
         std::string col_type = schema.columns[col_idx].type;
 
-        BufferPool pool(ip.string());
+        BufferPool pool(ip.string(), POOL_SIZE, wal_mgr_.get());
         Page* meta = pool.fetchPage(0);
         PageId root_id;
         memcpy(&root_id, meta->data + 16, 4);
@@ -754,7 +755,7 @@ void Storage::indexRemoveRow(const std::string& db_name, const std::string& tabl
 
         std::string col_type = schema.columns[col_idx].type;
 
-        BufferPool pool(ip.string());
+        BufferPool pool(ip.string(), POOL_SIZE, wal_mgr_.get());
         Page* meta = pool.fetchPage(0);
         PageId root_id;
         memcpy(&root_id, meta->data + 16, 4);

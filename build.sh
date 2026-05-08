@@ -40,3 +40,14 @@ echo "[*] Building..."
 cmake --build . --parallel "$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"
 
 echo "[✓] Build complete. Binaries in $BUILD_DIR"
+
+# echo "=== Building C# GUI ==="
+# if command -v dotnet &>/dev/null; then
+#     echo "[*] Building CaseChampGui..."
+#     cd "$SCRIPT_DIR/CaseChampGui"
+#     dotnet build
+#     echo "[✓] GUI Build complete."
+# else
+#     echo "[!] 'dotnet' command not found. Skipping C# GUI build."
+#     echo "    To build the GUI, please install the .NET SDK (https://dotnet.microsoft.com/download)."
+# fi

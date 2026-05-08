@@ -568,6 +568,12 @@ bool BPlusTree::remove(const std::string& key) {
         leafInsertCell(*pg, kept[i].key, kept[i].data,
                        static_cast<int>(i));
 
+    if (pool_.getWALManager()) {
+        LogRecord rec(0, pg->getLSN(), LogRecordType::DELETE_CELL, lid, key);
+        LSN lsn = pool_.getWALManager()->appendRecord(rec);
+        pg->setLSN(lsn);
+    }
+
     pool_.unpinPage(lid, true);
     return true;
 }

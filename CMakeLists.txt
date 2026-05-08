@@ -30,6 +30,7 @@ add_library(dbengine STATIC
     src/engine/executor.cpp
     src/engine/buffer_pool.cpp
     src/engine/btree.cpp
+    src/engine/wal.cpp
 )
 target_include_directories(dbengine PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(dbengine PUBLIC nlohmann_json::nlohmann_json)

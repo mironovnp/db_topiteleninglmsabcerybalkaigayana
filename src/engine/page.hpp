@@ -39,10 +39,12 @@ struct Page {
     uint32_t getPageType()   const { uint32_t v; memcpy(&v, data,     4); return v; }
     uint32_t getNumRecords() const { uint32_t v; memcpy(&v, data + 4, 4); return v; }
     PageId   getPageId()     const { PageId   v; memcpy(&v, data + 8, 4); return v; }
+    uint32_t getLSN()        const { uint32_t v; memcpy(&v, data + 12, 4); return v; }
 
     void setPageType(uint32_t t)   { memcpy(data,     &t, 4); }
     void setNumRecords(uint32_t n) { memcpy(data + 4, &n, 4); }
     void setPageId(PageId id)      { memcpy(data + 8, &id, 4); }
+    void setLSN(uint32_t lsn)      { memcpy(data + 12, &lsn, 4); }
 
     void reset() { memset(data, 0, PAGE_SIZE); }
 };
