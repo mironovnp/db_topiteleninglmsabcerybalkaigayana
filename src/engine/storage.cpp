@@ -268,6 +268,9 @@ bool Storage::tableExists(const std::string& db_name,
 TableSchema Storage::getTableSchema(const std::string& db_name,
                                      const std::string& table_name) const {
     auto p = tablePath(db_name, table_name);
+    if (!std::filesystem::exists(p))
+        throw std::runtime_error("Table '" + table_name + "' does not exist");
+
     BufferPool pool(p.string());
 
     Page* meta = pool.fetchPage(0);

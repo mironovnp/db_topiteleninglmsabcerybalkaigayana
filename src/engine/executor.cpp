@@ -282,12 +282,13 @@ json Executor::execCreateTable(const CreateTableStatement* q) {
     TableSchema s; s.table_name = q->table_name;
     for (auto& cd : q->column_defs) { ColumnDef c; c.name = cd.name; c.type = cd.type; c.not_null = cd.not_null; c.unique = cd.unique; c.has_default = cd.has_default; c.is_autoincrement = cd.is_autoincrement; c.default_value = cd.default_value; c.fk_ref_table = cd.fk_ref_table; c.fk_ref_column = cd.fk_ref_column; c.on_delete = cd.on_delete; c.on_update = cd.on_update; s.columns.push_back(c); }
     s.primary_key_index = q->primary_key_index >= 0 ? q->primary_key_index : 0;
-    if (storage_.createTable(current_db_, s)) return ok("Table created."); return err("Failed.");
+    if (storage_.createTable(current_db_, s)) return ok("Table created.");
+    throw std::runtime_error("Table '" + q->table_name + "' already exists");
 }
 json Executor::execDropTable(const DropTableStatement* q) {
     if (storage_.dropTable(current_db_, q->table_name)) return ok("Dropped.");
     if (q->if_exists) return ok("Dropped.");
-    return err("Failed.");
+    throw std::runtime_error("Table '" + q->table_name + "' does not exist");
 }
 json Executor::execAlterTable(const AlterTableStatement* q) {
     if (q->alter_action == AlterAction::ADD_COL) { if (storage_.alterTableAddColumn(current_db_, q->table_name, {q->alter_col_name, q->alter_col_type})) return ok("Added."); }
@@ -312,7 +313,8 @@ json Executor::execInsert(const InsertStatement* q) {
         } else {
             for (size_t i = 0; i < ivs.size() && i < q->insert_columns.size(); ++i) {
                 int idx = colIndex(s, "", q->insert_columns[i]);
-                if (idx >= 0) r[idx] = evaluateExpression(ivs[i].get(), Row(), s).val;
+                if (idx < 0) throw std::runtime_error("Unknown column: " + q->insert_columns[i]);
+                r[idx] = evaluateExpression(ivs[i].get(), Row(), s).val;
             }
         }
 
@@ -431,10 +433,9 @@ json Executor::execUpdate(const UpdateStatement* q) {
         Row old = row; Row new_row = row; bool mod = false;
         for (auto& sc : q->set_clauses) {
             int idx = colIndex(s, "", sc.column);
-            if (idx >= 0) {
-                new_row[idx] = evaluateExpression(sc.value.get(), row, s, nullptr, outer_schema_, outer_row_).val;
-                mod = true;
-            }
+            if (idx < 0) throw std::runtime_error("Unknown column: " + sc.column);
+            new_row[idx] = evaluateExpression(sc.value.get(), row, s, nullptr, outer_schema_, outer_row_).val;
+            mod = true;
         }
         if (mod) {
             performUpdate(current_db_, q->table_name, s, old, new_row);
@@ -444,7 +445,7 @@ json Executor::execUpdate(const UpdateStatement* q) {
         }
     }
     if (u > 0) storage_.writeAllRows(current_db_, q->table_name, rows);
-    return ok(std::to_string(u) + " updated.");
+    return {{"success", true}, {"rows_affected", u}, {"message", std::to_string(u) + " updated."}};
 }
 
 void Executor::performUpdate(const std::string& db_name, const std::string& table_name, const TableSchema& s, const Row& old_row, const Row& new_row) {
@@ -456,15 +457,20 @@ void Executor::performUpdate(const std::string& db_name, const std::string& tabl
                 int parent_idx = colIndex(s, "", child_col.fk_ref_column);
                 int child_idx = colIndex(child_s, "", child_col.name);
                 if (parent_idx < 0 || child_idx < 0) continue;
+                
                 if (old_row[parent_idx] != new_row[parent_idx]) {
                     auto child_rows = storage_.readAllRows(db_name, child_table_name);
                     bool changed = false;
                     for (auto& cr : child_rows) {
                         if (cr[child_idx] == old_row[parent_idx]) {
                             Row old_cr = cr;
-                            if (child_col.on_update == OnUpdateAction::CASCADE) cr[child_idx] = new_row[parent_idx];
-                            else if (child_col.on_update == OnUpdateAction::SET_NULL) cr[child_idx] = "";
-                            else throw std::runtime_error("FOREIGN KEY violation");
+                            if (child_col.on_update == OnUpdateAction::CASCADE) {
+                                cr[child_idx] = new_row[parent_idx];
+                            } else if (child_col.on_update == OnUpdateAction::SET_NULL) {
+                                cr[child_idx] = "";
+                            } else {
+                                throw std::runtime_error("FOREIGN KEY violation: ON UPDATE RESTRICT/NO_ACTION");
+                            }
                             storage_.indexRemoveRow(db_name, child_table_name, child_s, old_cr);
                             storage_.indexInsertRow(db_name, child_table_name, child_s, cr);
                             performUpdate(db_name, child_table_name, child_s, old_cr, cr);
@@ -489,7 +495,7 @@ json Executor::execDelete(const DeleteStatement* q) {
     
     int total_deleted = 0;
     performDelete(current_db_, q->table_name, to_delete, total_deleted);
-    return ok(std::to_string(total_deleted) + " deleted.");
+    return {{"success", true}, {"rows_affected", total_deleted}, {"message", std::to_string(total_deleted) + " deleted."}};
 }
 
 void Executor::performDelete(const std::string& db_name, const std::string& table_name, const std::vector<Row>& rows_to_delete, int& total_deleted) {

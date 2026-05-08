@@ -69,7 +69,10 @@ public:
         std::cout << "\n>>> ФАЗА 14: Автоматизация и оптимизация индексов" << std::endl;
         test_auto_default_index_ranges();
 
-        std::cout << "\n>>> ФАЗА 15: Удаление БД" << std::endl;
+        std::cout << "\n>>> ФАЗА 15: Обработка ошибок и краевых случаев" << std::endl;
+        test_errors_and_edge_cases();
+
+        std::cout << "\n>>> ФАЗА 16: Удаление БД" << std::endl;
         test_drop_db();
 
         std::cout << "\n" << std::string(40, '=') << std::endl;
@@ -150,6 +153,22 @@ private:
             }
         }
 
+        std::cout << "  [OK] " << name << std::endl;
+        passed_count++;
+    }
+
+    void assert_affected(const std::string& name, const std::string& sql, int expected_count) {
+        total_count++;
+        json res = executor.execute(sql);
+        if (!res["success"].get<bool>()) {
+            std::cerr << "  [FAIL] " << name << " (Execute error: " << res["message"] << ")\n       SQL: " << sql << std::endl;
+            return;
+        }
+        int actual = res.contains("rows_affected") ? res["rows_affected"].get<int>() : 0;
+        if (actual != expected_count) {
+            std::cerr << "  [FAIL] " << name << " (Affected mismatch: got " << actual << ", expected " << expected_count << ")\n       SQL: " << sql << std::endl;
+            return;
+        }
         std::cout << "  [OK] " << name << std::endl;
         passed_count++;
     }
@@ -341,6 +360,9 @@ private:
         executor.execute("CREATE TABLE logs (id INT PRIMARY KEY, user_id INT REFERENCES users(id));"); // NO_ACTION by default
         executor.execute("INSERT INTO logs (id, user_id) VALUES (1, 201);");
         assert_error("RESTRICT блокировка удаления", "DELETE FROM users WHERE id = 201;", "FOREIGN KEY violation");
+        
+        executor.execute("DROP TABLE logs;");
+        executor.execute("DROP TABLE comments;"); // Also clean up comments
 
         // CASCADE UPDATE
         executor.execute("CREATE TABLE profiles (id INT PRIMARY KEY, u_id INT REFERENCES users(id) ON UPDATE CASCADE);");
@@ -408,6 +430,49 @@ private:
 
         executor.execute("USE test_db;");
         executor.execute("DROP DATABASE opt_db;");
+    }
+
+    void test_errors_and_edge_cases() {
+        // 1. Несуществующие объекты
+        assert_error("SELECT из несуществующей таблицы", "SELECT * FROM ghost_table;", "does not exist");
+        assert_error("INSERT в несуществующую таблицу", "INSERT INTO ghost_table (id) VALUES (1);", "does not exist");
+        assert_error("UPDATE несуществующей таблицы", "UPDATE ghost_table SET id = 1;", "does not exist");
+        assert_error("DELETE из несуществующей таблицы", "DELETE FROM ghost_table;", "does not exist");
+        assert_error("DROP TABLE без IF EXISTS", "DROP TABLE ghost_table;", "does not exist");
+        assert_success("DROP TABLE с IF EXISTS", "DROP TABLE IF EXISTS ghost_table;");
+        assert_error("DROP DATABASE без IF EXISTS", "DROP DATABASE ghost_db;", "does not exist");
+        assert_success("DROP DATABASE с IF EXISTS", "DROP DATABASE IF EXISTS ghost_db;");
+
+        // 2. Дубликаты
+        assert_error("Создание дубликата таблицы", "CREATE TABLE users (id INT);", "already exists");
+        executor.execute("CREATE DATABASE dup_db;");
+        assert_error("Создание дубликата БД", "CREATE DATABASE dup_db;", "already exists");
+        executor.execute("DROP DATABASE dup_db;");
+
+        // 3. Синтаксические и логические ошибки в DML
+        assert_error("INSERT: неизвестная колонка", "INSERT INTO users (unknown_col) VALUES (1);", "Unknown column");
+        assert_error("UPDATE: неизвестная колонка в SET", "UPDATE users SET unknown_col = 1;", "Unknown column");
+        assert_error("UPDATE: неизвестная колонка в WHERE", "UPDATE users SET age = 30 WHERE unknown_col = 1;", "Unknown column");
+        assert_error("DELETE: неизвестная колонка в WHERE", "DELETE FROM users WHERE unknown_col = 1;", "Unknown column");
+
+        // 4. Краевые случаи DML
+        executor.execute("CREATE TABLE empty_table (id INT PRIMARY KEY);");
+        assert_affected("DELETE из пустой таблицы", "DELETE FROM empty_table;", 0);
+        assert_affected("UPDATE в пустой таблице", "UPDATE empty_table SET id = 1;", 0);
+        executor.execute("DROP TABLE empty_table;");
+
+        executor.execute("CREATE TABLE mass_table (id INT PRIMARY KEY, val TEXT);");
+        executor.execute("INSERT INTO mass_table (id, val) VALUES (1, 'A'), (2, 'A'), (3, 'B');");
+        assert_affected("Массовый UPDATE (2 строки)", "UPDATE mass_table SET val = 'C' WHERE val = 'A';", 2);
+        assert_affected("Массовый DELETE (все)", "DELETE FROM mass_table;", 3);
+        executor.execute("DROP TABLE mass_table;");
+
+        // 5. Работа с типами
+        executor.execute("CREATE TABLE types_table (id INT PRIMARY KEY, f FLOAT, b BOOL);");
+        executor.execute("INSERT INTO types_table (id, f, b) VALUES (1, 10.5, TRUE);");
+        assert_rows("Сравнение FLOAT", "SELECT id FROM types_table WHERE f > 10.0;", 1, {{"1"}});
+        assert_rows("Поиск по BOOL", "SELECT id FROM types_table WHERE b = TRUE;", 1, {{"1"}});
+        executor.execute("DROP TABLE types_table;");
     }
 };
 
