@@ -356,6 +356,10 @@ std::unique_ptr<SelectStatement> Parser::parseSelect() {
     }
     expect(KW_FROM);
     q->table_name = expect(IDENTIFIER).value;
+    if (match(KW_AS)) q->alias = expect(IDENTIFIER).value;
+    else if (check(IDENTIFIER) && !check(KW_INNER) && !check(KW_LEFT) && !check(KW_RIGHT) && !check(KW_FULL) && !check(KW_CROSS) && !check(KW_JOIN) && !check(KW_WHERE) && !check(KW_GROUP) && !check(KW_ORDER) && !check(KW_LIMIT)) {
+        q->alias = consume().value;
+    }
 
     while (true) {
         bool is_cross = false;
@@ -391,6 +395,11 @@ std::unique_ptr<SelectStatement> Parser::parseSelect() {
         JoinClause jc;
         jc.join_type = jtype;
         jc.table_name = expect(IDENTIFIER).value;
+        if (match(KW_AS)) jc.alias = expect(IDENTIFIER).value;
+        else if (check(IDENTIFIER) && !check(KW_ON) && !check(KW_INNER) && !check(KW_LEFT) && !check(KW_RIGHT) && !check(KW_FULL) && !check(KW_CROSS) && !check(KW_JOIN) && !check(KW_WHERE)) {
+            jc.alias = consume().value;
+        }
+
         if (!is_cross) {
             expect(KW_ON);
             jc.left_col  = parseQualifiedCol();

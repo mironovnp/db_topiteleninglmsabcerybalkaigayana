@@ -55,3 +55,10 @@ add_executable(dbcli
 )
 target_link_libraries(dbcli PRIVATE dbclient)
 target_include_directories(dbcli PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+# ── Tests executable ──
+add_executable(db_tests
+    src/engine/executor_tests.cpp
+)
+target_link_libraries(db_tests PRIVATE dbengine)
+target_include_directories(db_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)

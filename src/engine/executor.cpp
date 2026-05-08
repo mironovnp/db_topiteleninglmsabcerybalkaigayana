@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <functional>
 #include <map>
+#include <set>
 #include <iomanip>
 #include <sstream>
 
@@ -292,15 +293,22 @@ bool Executor::tryIndexScan(const SelectStatement* q, const TableSchema& s, std:
 json Executor::execSelect(const SelectStatement* q) {
     auto s = storage_.getTableSchema(current_db_, q->table_name); std::vector<Row> rows;
     if (!tryIndexScan(q, s, rows)) rows = storage_.readAllRows(current_db_, q->table_name);
-    TableSchema m = s; for (auto& c : m.columns) c.name = q->table_name + "." + c.name;
+    
+    TableSchema m = s; 
+    std::string effective_root_table = q->alias.empty() ? q->table_name : q->alias;
+    m.table_name = effective_root_table;
+    for (auto& c : m.columns) c.name = effective_root_table + "." + c.name;
     for (auto& jc : q->joins) {
         auto rs = storage_.getTableSchema(current_db_, jc.table_name);
+        std::string rs_effective_name = jc.alias.empty() ? jc.table_name : jc.alias;
+        rs.table_name = rs_effective_name; // Set effective name for colIndex resolution
+
         std::vector<Row> res;
 
         int li = -1, ri = -1;
         if (jc.join_type != JoinClause::CROSS) {
             li = colIndex(m, jc.left_col.table, jc.left_col.column);
-            ri = colIndex(rs, jc.right_col.table.empty() ? jc.table_name : jc.right_col.table, jc.right_col.column);
+            ri = colIndex(rs, jc.right_col.table.empty() ? rs_effective_name : jc.right_col.table, jc.right_col.column);
             if (li < 0 || ri < 0) throw std::runtime_error("Invalid JOIN column(s)");
         }
 
@@ -410,7 +418,12 @@ json Executor::execSelect(const SelectStatement* q) {
             }
         }
 
-        for (auto& c : rs.columns) { ColumnDef cd = c; cd.name = jc.table_name + "." + c.name; m.columns.push_back(std::move(cd)); }
+        for (auto& c : rs.columns) { 
+            ColumnDef cd = c; 
+            std::string effective_join_table = jc.alias.empty() ? jc.table_name : jc.alias;
+            cd.name = effective_join_table + "." + c.name; 
+            m.columns.push_back(std::move(cd)); 
+        }
         rows = std::move(res);
     }
     if (q->where) { std::vector<Row> f; for (auto& r : rows) if (evalCondition(q->where.get(), r, m, nullptr, outer_schema_, outer_row_)) f.push_back(r); rows = std::move(f); }
@@ -429,24 +442,33 @@ json Executor::execSelect(const SelectStatement* q) {
     for (auto& ob : q->order_by) check_aggr(ob.expr.get());
 
     if (is_aggr) {
+        std::set<std::pair<AggrFunc, std::string>> unique_aggrs;
+        std::function<void(const Expression*)> find_aggrs = [&](const Expression* e) {
+            if (!e) return;
+            if (auto a = dynamic_cast<const AggregateExpression*>(e)) unique_aggrs.insert({a->func, a->column});
+            else if (auto b = dynamic_cast<const BinaryExpression*>(e)) { find_aggrs(b->left.get()); find_aggrs(b->right.get()); }
+            else if (auto u = dynamic_cast<const UnaryExpression*>(e)) find_aggrs(u->operand.get());
+            else if (auto in_list = dynamic_cast<const InListExpression*>(e)) find_aggrs(in_list->left.get());
+        };
+        for (auto& sc : q->select_columns) find_aggrs(sc.expr.get());
+        find_aggrs(q->having.get());
+        for (auto& ob : q->order_by) find_aggrs(ob.expr.get());
+
         std::map<std::string, Group> g_map;
         for (auto& row : rows) {
             std::string k; for (auto& gb : q->group_by) { int i = colIndex(m, "", gb); k += (i >= 0 ? row[i] : "") + "|"; }
             auto& g = g_map[k]; if (g.rep.empty()) g.rep = row;
-            auto upd = [&](AggrFunc f, const std::string& c) {
-                auto& st = g.st[{f, c}]; st.count++; if (c == "*") return;
-                int i = colIndex(m, "", c); if (i >= 0) { try { double v = std::stod(row[i]); if (!st.initialized) { st.sum = st.min_val = st.max_val = v; st.initialized = true; } else { st.sum += v; st.min_val = std::min(st.min_val, v); st.max_val = std::max(st.max_val, v); } } catch(...) {} }
-            };
-            std::function<void(const Expression*)> coll = [&](const Expression* e) {
-                if (!e) return;
-                if (auto a = dynamic_cast<const AggregateExpression*>(e)) upd(a->func, a->column);
-                else if (auto b = dynamic_cast<const BinaryExpression*>(e)) { coll(b->left.get()); coll(b->right.get()); }
-                else if (auto u = dynamic_cast<const UnaryExpression*>(e)) coll(u->operand.get());
-                else if (auto in_list = dynamic_cast<const InListExpression*>(e)) coll(in_list->left.get());
-            };
-            for (auto& sc : q->select_columns) coll(sc.expr.get());
-            coll(q->having.get());
-            for (auto& ob : q->order_by) coll(ob.expr.get());
+            for (auto& aggr : unique_aggrs) {
+                auto& st = g.st[aggr]; st.count++; if (aggr.second == "*") continue;
+                int i = colIndex(m, "", aggr.second);
+                if (i >= 0 && !row[i].empty()) {
+                    try {
+                        double v = std::stod(row[i]);
+                        if (!st.initialized) { st.sum = st.min_val = st.max_val = v; st.initialized = true; }
+                        else { st.sum += v; st.min_val = std::min(st.min_val, v); st.max_val = std::max(st.max_val, v); }
+                    } catch(...) {}
+                }
+            }
         }
         for (auto& kv : g_map) if (!q->having || evalCondition(q->having.get(), kv.second.rep, m, &kv.second.st, outer_schema_, outer_row_)) groups.push_back(std::move(kv.second));
     } else {

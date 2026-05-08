@@ -157,6 +157,7 @@ struct JoinClause {
     enum Type { INNER, LEFT, RIGHT, FULL, CROSS };
     Type join_type = INNER;
     std::string table_name;
+    std::string alias; // New: table alias
     QualifiedCol left_col;
     QualifiedCol right_col;
 };
@@ -219,6 +220,7 @@ public:
     bool select_all = false;
     std::vector<SelectColumn> select_columns;
     std::string table_name;
+    std::string alias; // New: table alias
     std::vector<JoinClause> joins;
     std::unique_ptr<Expression> where;
     std::vector<std::string> group_by;
