@@ -259,9 +259,78 @@ json Executor::execCreateIndex(const CreateIndexStatement* q) { if (storage_.cre
 json Executor::execDropIndex(const DropIndexStatement* q) { if (storage_.dropIndex(current_db_, q->table_name, q->index_name)) return ok("Dropped."); return err("Failed."); }
 
 json Executor::execInsert(const InsertStatement* q) {
-    auto s = storage_.getTableSchema(current_db_, q->table_name); std::vector<Row> rows;
-    for (auto& ivs : q->insert_values) { Row r(s.columns.size(), ""); for (size_t i = 0; i < ivs.size() && i < r.size(); ++i) r[i] = evaluateExpression(ivs[i].get(), Row(), s).val; rows.push_back(r); }
-    int c = 0; for (auto& r : rows) if (storage_.appendRows(current_db_, q->table_name, {r}) > 0) { storage_.indexInsertRow(current_db_, q->table_name, s, r); c++; }
+    auto s = storage_.getTableSchema(current_db_, q->table_name);
+    std::vector<Row> evaluated_rows;
+    
+    // 1. Сначала вычисляем все значения и проверяем NOT NULL
+    for (auto& ivs : q->insert_values) {
+        Row r(s.columns.size(), "");
+        for (size_t i = 0; i < ivs.size() && i < r.size(); ++i) {
+            r[i] = evaluateExpression(ivs[i].get(), Row(), s).val;
+        }
+
+        for (size_t i = 0; i < s.columns.size(); ++i) {
+            if (s.columns[i].not_null && r[i].empty()) {
+                return err("NOT NULL constraint violation: column '" + s.columns[i].name + "'");
+            }
+        }
+        evaluated_rows.push_back(std::move(r));
+    }
+
+    // 2. Проверяем UNIQUE и PRIMARY KEY
+    std::vector<Row> current_table_data; // Кэш для проверки без индексов
+    bool table_data_loaded = false;
+
+    for (size_t row_idx = 0; row_idx < evaluated_rows.size(); ++row_idx) {
+        const auto& r = evaluated_rows[row_idx];
+        
+        for (size_t i = 0; i < s.columns.size(); ++i) {
+            if (s.columns[i].unique || (int)i == s.primary_key_index) {
+                const std::string& val = r[i];
+                if (val.empty()) continue; // NULL значения обычно не нарушают UNIQUE (кроме PK)
+
+                // Проверка во вставляемых данных (в рамках одного запроса)
+                for (size_t prev_idx = 0; prev_idx < row_idx; ++prev_idx) {
+                    if (evaluated_rows[prev_idx][i] == val) {
+                        return err("UNIQUE constraint violation: duplicate value '" + val + "' in insert list");
+                    }
+                }
+
+                // Проверка в существующих данных
+                if ((int)i == s.primary_key_index) {
+                    // Первичный ключ проверяем быстро через findRow
+                    if (!storage_.findRow(current_db_, q->table_name, val).empty()) {
+                        return err("PRIMARY KEY violation: duplicate key '" + val + "'");
+                    }
+                } else if (storage_.hasIndex(current_db_, q->table_name, s.columns[i].name)) {
+                    // Вторичный индекс
+                    if (!storage_.indexLookup(current_db_, q->table_name, s.columns[i].name, val).empty()) {
+                        return err("UNIQUE constraint violation: duplicate value '" + val + "' in column '" + s.columns[i].name + "'");
+                    }
+                } else {
+                    // Медленная проверка через полный скан (если индекса нет)
+                    if (!table_data_loaded) {
+                        current_table_data = storage_.readAllRows(current_db_, q->table_name);
+                        table_data_loaded = true;
+                    }
+                    for (const auto& tr : current_table_data) {
+                        if (tr[i] == val) {
+                            return err("UNIQUE constraint violation: duplicate value '" + val + "' in column '" + s.columns[i].name + "'");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Если всё ок — вставляем
+    int c = 0;
+    for (auto& r : evaluated_rows) {
+        if (storage_.appendRows(current_db_, q->table_name, {r}) > 0) {
+            storage_.indexInsertRow(current_db_, q->table_name, s, r);
+            c++;
+        }
+    }
     return ok(std::to_string(c) + " inserted.");
 }
 json Executor::execUpdate(const UpdateStatement* q) {

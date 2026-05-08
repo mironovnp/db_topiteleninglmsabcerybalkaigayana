@@ -51,6 +51,9 @@ public:
         std::cout << "\n>>> ФАЗА 8: Индексы и ALTER TABLE" << std::endl;
         test_indexes_and_alter();
 
+        std::cout << "\n>>> ФАЗА 9: Ограничения (NOT NULL, UNIQUE, PK)" << std::endl;
+        test_constraints();
+
         std::cout << "\n" << std::string(40, '=') << std::endl;
         std::cout << "ИТОГО: " << passed_count << "/" << total_count << " тестов пройдено." << std::endl;
         if (passed_count < total_count) {
@@ -256,6 +259,32 @@ private:
         assert_success("ALTER TABLE DROP COLUMN", "ALTER TABLE users DROP COLUMN email;");
         executor.execute("INSERT INTO users (id, name) VALUES (10, 'Temp');");
         assert_error("Проверка удаления колонки", "SELECT email FROM users;", "Unknown column");
+    }
+    void test_constraints() {
+        assert_success("Создание таблицы с ограничениями", 
+            "CREATE TABLE employees (id INT PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE, salary FLOAT);");
+
+        assert_success("Корректная вставка", 
+            "INSERT INTO employees (id, name, email, salary) VALUES (1, 'John', 'john@test.com', 5000);");
+
+        // Тест NOT NULL
+        assert_error("Ошибка NOT NULL (name)", 
+            "INSERT INTO employees (id, name, email) VALUES (2, NULL, 'test@test.com');", "NOT NULL");
+
+        // Тест PRIMARY KEY
+        assert_error("Ошибка PRIMARY KEY (дубликат id)", 
+            "INSERT INTO employees (id, name, email) VALUES (1, 'Alice', 'alice@test.com');", "PRIMARY KEY");
+
+        // Тест UNIQUE
+        assert_error("Ошибка UNIQUE (дубликат email)", 
+            "INSERT INTO employees (id, name, email) VALUES (2, 'Bob', 'john@test.com');", "UNIQUE");
+
+        // Тест UNIQUE в рамках одного запроса
+        assert_error("Ошибка UNIQUE (дубликат в списке VALUES)", 
+            "INSERT INTO employees (id, name, email) VALUES (3, 'X', 'x@t.com'), (4, 'Y', 'x@t.com');", "insert list");
+
+        assert_rows("Проверка, что ошибочные данные не вставились", 
+            "SELECT count(*) FROM employees;", 1, {{"1"}});
     }
 };
 
