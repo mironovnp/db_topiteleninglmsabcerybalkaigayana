@@ -30,6 +30,7 @@ public:
     // ── Scans ──────────────────────────────────────────────────────────
     std::vector<Row> scanAll() const;
     std::vector<Row> scanPrefix(const std::string& prefix) const;
+    std::vector<Row> scanRange(const std::string* low, const std::string* high) const;
 
 
     // ── Bulk load (sorted rows, key_col_index) ─────────────────────────

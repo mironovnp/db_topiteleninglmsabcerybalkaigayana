@@ -45,10 +45,7 @@ int BPlusTree::compareKeys(const std::string& a, const std::string& b) const {
     if (null_a != std::string::npos && null_b != std::string::npos) {
         return a.substr(null_a + 1).compare(b.substr(null_b + 1));
     }
-    // "val" < "val\0pk"
-    if (null_a == std::string::npos && null_b != std::string::npos) return -1;
-    if (null_a != std::string::npos && null_b == std::string::npos) return 1;
-
+    // Prefix match: "val" == "val\0pk"
     return 0;
 }
 
@@ -260,6 +257,27 @@ std::vector<Row> BPlusTree::scanPrefix(const std::string& prefix) const {
             if (cmp < 0) continue;
             if (cmp > 0) { done = true; break; }
             
+            result.push_back(deserializeRow(cv.row_ptr, cv.row_len));
+        }
+        PageId next = leafGetNextId(*pg);
+        pool_.unpinPage(cur, false);
+        cur = next;
+    }
+    return result;
+}
+
+std::vector<Row> BPlusTree::scanRange(const std::string* low, const std::string* high) const {
+    std::vector<Row> result;
+    PageId cur = (low) ? findLeaf(*low) : findLeftmostLeaf();
+    
+    bool done = false;
+    while (cur != INVALID_PAGE_ID && !done) {
+        Page* pg = pool_.fetchPage(cur);
+        uint32_t n = pg->getNumRecords();
+        for (uint32_t i = 0; i < n; ++i) {
+            auto cv = readCell(*pg, i);
+            if (low && compareKeys(cv.key, *low) < 0) continue;
+            if (high && compareKeys(cv.key, *high) > 0) { done = true; break; }
             result.push_back(deserializeRow(cv.row_ptr, cv.row_len));
         }
         PageId next = leafGetNextId(*pg);

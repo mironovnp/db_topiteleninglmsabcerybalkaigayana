@@ -22,7 +22,7 @@ enum class TokenType {
     KW_JOIN, KW_INNER, KW_LEFT, KW_RIGHT, KW_FULL, KW_CROSS, KW_OUTER, KW_ON,
     KW_LIMIT, KW_OFFSET,
     KW_IN, KW_EXISTS, KW_NULL, KW_UNIQUE, KW_DEFAULT, KW_FOREIGN, KW_REFERENCES, KW_CASCADE,
-    KW_INDEX, KW_IF,
+    KW_INDEX, KW_IF, KW_DISTINCT, KW_IS, KW_LIKE, KW_BETWEEN, KW_AUTOINCREMENT,
     IDENTIFIER, STRING_LITERAL, NUMBER_LITERAL, BOOL_LITERAL,
     OP_EQ, OP_NEQ, OP_LT, OP_GT, OP_LTE, OP_GTE,
     OP_PLUS, OP_MINUS, OP_DIV, // OP_STAR is handled by STAR
@@ -46,6 +46,31 @@ public:
 class Expression : public ASTNode {
 public:
     virtual ~Expression() = default;
+};
+
+class IsNullExpression : public Expression {
+public:
+    std::unique_ptr<Expression> operand;
+    bool is_not;
+    IsNullExpression(std::unique_ptr<Expression> op, bool n) : operand(std::move(op)), is_not(n) {}
+};
+
+class LikeExpression : public Expression {
+public:
+    std::unique_ptr<Expression> left;
+    std::string pattern;
+    bool negated;
+    LikeExpression(std::unique_ptr<Expression> l, std::string p, bool n) : left(std::move(l)), pattern(std::move(p)), negated(n) {}
+};
+
+class BetweenExpression : public Expression {
+public:
+    std::unique_ptr<Expression> val;
+    std::unique_ptr<Expression> low;
+    std::unique_ptr<Expression> high;
+    bool negated;
+    BetweenExpression(std::unique_ptr<Expression> v, std::unique_ptr<Expression> l, std::unique_ptr<Expression> h, bool n)
+        : val(std::move(v)), low(std::move(l)), high(std::move(h)), negated(n) {}
 };
 
 class Statement : public ASTNode {
@@ -94,8 +119,9 @@ class AggregateExpression : public Expression {
 public:
     AggrFunc func;
     std::string column;
+    bool distinct = false;
 
-    AggregateExpression(AggrFunc f, std::string c) : func(f), column(std::move(c)) {}
+    AggregateExpression(AggrFunc f, std::string c, bool d = false) : func(f), column(std::move(c)), distinct(d) {}
 };
 
 class SelectStatement; // Forward declaration
@@ -130,10 +156,12 @@ struct ColDef {
     bool not_null = false;
     bool unique = false;
     bool has_default = false;
+    bool is_autoincrement = false;
     std::string default_value;
     std::string fk_ref_table;
     std::string fk_ref_column;
     OnDeleteAction on_delete = OnDeleteAction::NO_ACTION;
+    OnUpdateAction on_update = OnUpdateAction::NO_ACTION;
 };
 
 struct SetClause { std::string column; std::unique_ptr<Expression> value; };
@@ -217,10 +245,13 @@ public:
 
 class SelectStatement : public Statement {
 public:
+    bool distinct = false;
     bool select_all = false;
     std::vector<SelectColumn> select_columns;
     std::string table_name;
-    std::string alias; // New: table alias
+    std::string alias;
+    std::unique_ptr<SelectStatement> from_subquery;
+    std::string from_alias;
     std::vector<JoinClause> joins;
     std::unique_ptr<Expression> where;
     std::vector<std::string> group_by;

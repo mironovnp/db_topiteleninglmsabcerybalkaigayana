@@ -4,6 +4,7 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <iostream>
 #include <stdexcept>
 
 namespace db {
@@ -73,15 +74,17 @@ std::string Storage::serializeSchema(const TableSchema& s) {
         uint16_t tl = static_cast<uint16_t>(col.type.size());
         buf.append(reinterpret_cast<const char*>(&tl), 2);
         buf.append(col.type);
-        // Constraint flags: 1 byte
-        uint8_t flags = 0;
-        if (col.not_null) flags |= 0x01;
-        if (col.unique) flags |= 0x02;
-        if (col.has_default) flags |= 0x04;
-        if (!col.fk_ref_table.empty()) flags |= 0x08;
-        if (col.on_delete == OnDeleteAction::CASCADE) flags |= 0x10;
-        else if (col.on_delete == OnDeleteAction::SET_NULL) flags |= 0x20;
-        buf.push_back(static_cast<char>(flags));
+        uint16_t flags = 0;
+        if (col.not_null) flags |= 0x0001;
+        if (col.unique) flags |= 0x0002;
+        if (col.has_default) flags |= 0x0004;
+        if (!col.fk_ref_table.empty()) flags |= 0x0008;
+        if (col.on_delete == OnDeleteAction::CASCADE) flags |= 0x0010;
+        else if (col.on_delete == OnDeleteAction::SET_NULL) flags |= 0x0020;
+        if (col.is_autoincrement) flags |= 0x0040;
+        if (col.on_update == OnUpdateAction::CASCADE) flags |= 0x0080;
+        else if (col.on_update == OnUpdateAction::SET_NULL) flags |= 0x0100;
+        buf.append(reinterpret_cast<const char*>(&flags), 2);
         // Default value (if any)
         if (col.has_default) {
             uint16_t dl = static_cast<uint16_t>(col.default_value.size());
@@ -135,27 +138,31 @@ TableSchema Storage::deserializeSchema(const char* data, uint32_t len) {
         uint16_t tl; memcpy(&tl, p, 2); p += 2;
         if (p + tl > end) break;
         cd.type.assign(p, tl); p += tl;
-        // Constraint flags (if data available)
-        if (p < end) {
-            uint8_t flags = static_cast<uint8_t>(*p); p++;
-            cd.not_null = (flags & 0x01) != 0;
-            cd.unique = (flags & 0x02) != 0;
-            cd.has_default = (flags & 0x04) != 0;
-            bool has_fk = (flags & 0x08) != 0;
-            if ((flags & 0x10) != 0) cd.on_delete = OnDeleteAction::CASCADE;
-            else if ((flags & 0x20) != 0) cd.on_delete = OnDeleteAction::SET_NULL;
+        bool has_fk = false;
+        if (p + 2 <= end) {
+            uint16_t flags; memcpy(&flags, p, 2); p += 2;
+            cd.not_null = (flags & 0x0001) != 0;
+            cd.unique = (flags & 0x0002) != 0;
+            cd.has_default = (flags & 0x0004) != 0;
+            has_fk = (flags & 0x0008) != 0;
+            if (flags & 0x0010) cd.on_delete = OnDeleteAction::CASCADE;
+            else if (flags & 0x0020) cd.on_delete = OnDeleteAction::SET_NULL;
             else cd.on_delete = OnDeleteAction::NO_ACTION;
-            if (cd.has_default && p + 2 <= end) {
-                uint16_t dl; memcpy(&dl, p, 2); p += 2;
-                if (p + dl <= end) { cd.default_value.assign(p, dl); p += dl; }
-            }
-            if (has_fk && p + 2 <= end) {
-                uint16_t trl; memcpy(&trl, p, 2); p += 2;
-                if (p + trl <= end) { cd.fk_ref_table.assign(p, trl); p += trl; }
-                if (p + 2 <= end) {
-                    uint16_t crl; memcpy(&crl, p, 2); p += 2;
-                    if (p + crl <= end) { cd.fk_ref_column.assign(p, crl); p += crl; }
-                }
+            cd.is_autoincrement = (flags & 0x0040) != 0;
+            if (flags & 0x0080) cd.on_update = OnUpdateAction::CASCADE;
+            else if (flags & 0x0100) cd.on_update = OnUpdateAction::SET_NULL;
+            else cd.on_update = OnUpdateAction::NO_ACTION;
+        }
+        if (cd.has_default && p + 2 <= end) {
+            uint16_t dl; memcpy(&dl, p, 2); p += 2;
+            if (p + dl <= end) { cd.default_value.assign(p, dl); p += dl; }
+        }
+        if (has_fk && p + 2 <= end) {
+            uint16_t trl; memcpy(&trl, p, 2); p += 2;
+            if (p + trl <= end) { cd.fk_ref_table.assign(p, trl); p += trl; }
+            if (p + 2 <= end) {
+                uint16_t crl; memcpy(&crl, p, 2); p += 2;
+                if (p + crl <= end) { cd.fk_ref_column.assign(p, crl); p += crl; }
             }
         }
         s.columns.push_back(std::move(cd));
@@ -264,8 +271,7 @@ TableSchema Storage::getTableSchema(const std::string& db_name,
     BufferPool pool(p.string());
 
     Page* meta = pool.fetchPage(0);
-    uint32_t payload_len = meta->getNumRecords();  // we stored payload size here
-    TableSchema s = deserializeSchema(meta->data + 16, payload_len);
+    TableSchema s = deserializeSchema(meta->data + 16, PAGE_SIZE - 16);
     s.table_name = table_name;
     pool.unpinPage(0, false);
     return s;
@@ -659,6 +665,34 @@ std::vector<std::string> Storage::indexLookup(const std::string& db_name,
         if (row.size() >= 2) {
             pks.push_back(row[1]); // Row in index is [composite, pk]
         }
+    }
+    return pks;
+}
+
+std::vector<std::string> Storage::indexScan(const std::string& db_name,
+                                             const std::string& table_name,
+                                             const std::string& column_name,
+                                             const std::string* low,
+                                             const std::string* high) const {
+    auto ip = indexPath(db_name, table_name, column_name);
+    if (!std::filesystem::exists(ip)) return {};
+
+    TableSchema schema = getTableSchema(db_name, table_name);
+    std::string col_type = "TEXT";
+    for (const auto& col : schema.columns)
+        if (col.name == column_name) { col_type = col.type; break; }
+
+    BufferPool pool(ip.string());
+    Page* meta = pool.fetchPage(0);
+    PageId root_id; memcpy(&root_id, meta->data + 16, 4);
+    pool.unpinPage(0, false);
+
+    BPlusTree tree(pool, root_id, col_type);
+    auto matches = tree.scanRange(low, high);
+    
+    std::vector<std::string> pks;
+    for (const auto& row : matches) {
+        if (row.size() >= 2) pks.push_back(row[1]);
     }
     return pks;
 }

@@ -6,6 +6,8 @@
 #include <map>
 #include <vector>
 
+#include <set>
+
 namespace db {
 
 struct Value {
@@ -46,6 +48,7 @@ private:
         double min_val = 0.0;
         double max_val = 0.0;
         bool initialized = false;
+        std::set<std::string> seen_values;
     };
     
     // Core expression evaluation method
@@ -66,6 +69,7 @@ private:
                                       const Row* outer_row = nullptr);
 
     void performDelete(const std::string& db_name, const std::string& table_name, const std::vector<Row>& rows_to_delete, int& total_deleted);
+    void performUpdate(const std::string& db_name, const std::string& table_name, const TableSchema& s, const Row& old_row, const Row& new_row);
 
     int colIndex(const TableSchema& s, const std::string& table, const std::string& name) const;
     int compareValues(const Value& a, const Value& b) const;

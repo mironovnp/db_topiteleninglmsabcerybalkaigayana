@@ -12,16 +12,24 @@ enum class OnDeleteAction {
     SET_NULL = 2
 };
 
+enum class OnUpdateAction {
+    NO_ACTION = 0,
+    CASCADE = 1,
+    SET_NULL = 2
+};
+
 struct ColumnDef {
     std::string name;
     std::string type; // INT, FLOAT, BOOL, TEXT, VARCHAR(N)
     bool not_null = false;
     bool unique = false;
     bool has_default = false;
+    bool is_autoincrement = false;
     std::string default_value;
     std::string fk_ref_table;
     std::string fk_ref_column;
     OnDeleteAction on_delete = OnDeleteAction::NO_ACTION;
+    OnUpdateAction on_update = OnUpdateAction::NO_ACTION;
 };
 
 struct IndexDef {
@@ -83,6 +91,11 @@ public:
                                          const std::string& table_name,
                                          const std::string& column_name,
                                          const std::string& value) const;
+    std::vector<std::string> indexScan(const std::string& db_name,
+                                       const std::string& table_name,
+                                       const std::string& column_name,
+                                       const std::string* low,
+                                       const std::string* high) const;
     // Insert/remove entries from all secondary indexes of a table
     void indexInsertRow(const std::string& db_name, const std::string& table_name,
                         const TableSchema& schema, const Row& row);

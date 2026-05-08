@@ -54,6 +54,24 @@ public:
         std::cout << "\n>>> ФАЗА 9: Ограничения (NOT NULL, UNIQUE, PK)" << std::endl;
         test_constraints();
 
+        std::cout << "\n>>> ФАЗА 10: Продвинутые функции (DISTINCT, IS NULL, FK)" << std::endl;
+        test_advanced_features();
+
+        std::cout << "\n>>> ФАЗА 11: Каскады и сложная агрегация" << std::endl;
+        test_cascades_and_aggr_distinct();
+
+        std::cout << "\n>>> ФАЗА 12: Поиск и фильтрация (LIKE, BETWEEN)" << std::endl;
+        test_search_and_filter();
+
+        std::cout << "\n>>> ФАЗА 13: Продвинутые подзапросы" << std::endl;
+        test_advanced_subqueries();
+
+        std::cout << "\n>>> ФАЗА 14: Автоматизация и оптимизация индексов" << std::endl;
+        test_auto_default_index_ranges();
+
+        std::cout << "\n>>> ФАЗА 15: Удаление БД" << std::endl;
+        test_drop_db();
+
         std::cout << "\n" << std::string(40, '=') << std::endl;
         std::cout << "ИТОГО: " << passed_count << "/" << total_count << " тестов пройдено." << std::endl;
         if (passed_count < total_count) {
@@ -285,6 +303,111 @@ private:
 
         assert_rows("Проверка, что ошибочные данные не вставились", 
             "SELECT count(*) FROM employees;", 1, {{"1"}});
+    }
+    void test_advanced_features() {
+        // DISTINCT
+        executor.execute("INSERT INTO users (id, name, age) VALUES (100, 'User1', 20), (101, 'User2', 20);");
+        assert_rows("DISTINCT по возрасту", "SELECT DISTINCT age FROM users WHERE id >= 100;", 1, {{"20"}});
+
+        // IS NULL / IS NOT NULL
+        executor.execute("INSERT INTO employees (id, name, email) VALUES (50, 'NoEmail', NULL);");
+        assert_rows("IS NULL поиск", "SELECT name FROM employees WHERE email IS NULL;", 1, {{"NoEmail"}});
+        assert_rows("IS NOT NULL поиск", "SELECT name FROM employees WHERE id = 50 AND email IS NOT NULL;", 0);
+
+        // FOREIGN KEY
+        assert_success("Создание таблицы с FK", "CREATE TABLE posts (id INT PRIMARY KEY, author_id INT REFERENCES users(id), title TEXT);");
+        assert_success("FK вставка (существующий родитель)", "INSERT INTO posts (id, author_id, title) VALUES (1, 1, 'Hello');");
+        assert_error("FK ошибка (несуществующий родитель)", "INSERT INTO posts (id, author_id, title) VALUES (2, 999, 'Bad');", "FOREIGN KEY violation");
+    }
+
+    void test_drop_db() {
+        assert_success("Удаление БД", "DROP DATABASE test_db;");
+        assert_error("Проверка удаления БД", "USE test_db;", "does not exist");
+    }
+    void test_cascades_and_aggr_distinct() {
+        // COUNT DISTINCT
+        executor.execute("INSERT INTO users (id, name, age) VALUES (200, 'A', 30), (201, 'B', 30), (202, 'C', 40);");
+        assert_rows("COUNT(DISTINCT age)", "SELECT COUNT(DISTINCT age) FROM users WHERE id >= 200;", 1, {{"2"}});
+
+        // CASCADE DELETE
+        executor.execute("CREATE TABLE comments (id INT PRIMARY KEY, user_id INT REFERENCES users(id) ON DELETE CASCADE, body TEXT);");
+        executor.execute("INSERT INTO comments (id, user_id, body) VALUES (1, 200, 'Comm1'), (2, 200, 'Comm2'), (3, 201, 'Comm3');");
+        
+        executor.execute("DELETE FROM users WHERE id = 200;");
+        assert_rows("Проверка каскадного удаления", "SELECT count(*) FROM comments WHERE user_id = 200;", 1, {{"0"}});
+        assert_rows("Другие комментарии остались", "SELECT count(*) FROM comments WHERE user_id = 201;", 1, {{"1"}});
+
+        // RESTRICT
+        executor.execute("CREATE TABLE logs (id INT PRIMARY KEY, user_id INT REFERENCES users(id));"); // NO_ACTION by default
+        executor.execute("INSERT INTO logs (id, user_id) VALUES (1, 201);");
+        assert_error("RESTRICT блокировка удаления", "DELETE FROM users WHERE id = 201;", "FOREIGN KEY violation");
+
+        // CASCADE UPDATE
+        executor.execute("CREATE TABLE profiles (id INT PRIMARY KEY, u_id INT REFERENCES users(id) ON UPDATE CASCADE);");
+        executor.execute("INSERT INTO profiles (id, u_id) VALUES (1, 201);");
+        executor.execute("UPDATE users SET id = 222 WHERE id = 201;");
+        assert_rows("Проверка каскадного обновления", "SELECT u_id FROM profiles WHERE id = 1;", 1, {{"222"}});
+    }
+    void test_search_and_filter() {
+        // LIKE
+        executor.execute("INSERT INTO users (id, name, age) VALUES (300, 'Alexander', 25), (301, 'Alex', 22), (302, 'Boris', 30);");
+        assert_rows("LIKE поиск (% в конце)", "SELECT count(*) FROM users WHERE name LIKE 'Alex%';", 1, {{"2"}});
+        assert_rows("LIKE поиск (% в начале)", "SELECT count(*) FROM users WHERE name LIKE '%der';", 1, {{"1"}});
+        assert_rows("LIKE поиск (_ символ)", "SELECT count(*) FROM users WHERE name LIKE 'Al_x';", 1, {{"1"}});
+        assert_rows("NOT LIKE", "SELECT count(*) FROM users WHERE id >= 300 AND name NOT LIKE 'Alex%';", 1, {{"1"}});
+
+        // BETWEEN
+        assert_rows("BETWEEN для чисел", "SELECT count(*) FROM users WHERE id >= 300 AND age BETWEEN 25 AND 35;", 1, {{"2"}});
+        assert_rows("NOT BETWEEN", "SELECT count(*) FROM users WHERE id >= 300 AND age NOT BETWEEN 20 AND 25;", 1, {{"1"}});
+    }
+    void test_advanced_subqueries() {
+        executor.execute("CREATE DATABASE sub_db;");
+        executor.execute("USE sub_db;");
+        executor.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT, age INT);");
+        executor.execute("INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30), (2, 'Alexander', 22), (3, 'Boris', 35);");
+
+        // Scalar subquery in WHERE
+        assert_rows("Скалярный подзапрос в WHERE", 
+            "SELECT name FROM users WHERE age = (SELECT age FROM users WHERE name = 'Boris');", 1, {{"Boris"}});
+
+        // Scalar subquery in SELECT
+        assert_rows("Подзапрос в списке SELECT",
+            "SELECT name, (SELECT count(*) FROM users WHERE age < 30) as young_count FROM users WHERE name = 'Alexander';", 
+            1, {{"Alexander", "1"}});
+
+        // Subquery in FROM (Derived Table)
+        assert_rows("Подзапрос в FROM (Derived Table)",
+            "SELECT count(*) FROM (SELECT name FROM users WHERE age > 25) AS old_users;",
+            1, {{"2"}}); // Alice (30) and Boris (35)
+        
+        executor.execute("USE test_db;"); // Switch back
+        executor.execute("DROP DATABASE sub_db;");
+    }
+    void test_auto_default_index_ranges() {
+        executor.execute("CREATE DATABASE opt_db;");
+        executor.execute("USE opt_db;");
+        
+        // AUTOINCREMENT & DEFAULT
+        executor.execute("CREATE TABLE items (id INT PRIMARY KEY AUTOINCREMENT, name TEXT, category TEXT DEFAULT 'General');");
+        executor.execute("INSERT INTO items (name) VALUES ('Item A');"); // id should be 1, category General
+        executor.execute("INSERT INTO items (name, category) VALUES ('Item B', 'Tools');"); // id 2
+        executor.execute("INSERT INTO items (name) VALUES ('Item C');"); // id 3
+        
+        assert_rows("Проверка AUTOINCREMENT", "SELECT id FROM items WHERE name = 'Item C';", 1, {{"3"}});
+        assert_rows("Проверка DEFAULT", "SELECT category FROM items WHERE name = 'Item A';", 1, {{"General"}});
+
+        // Index Ranges
+        executor.execute("CREATE INDEX idx_id ON items(id);");
+        assert_rows("Index Range (>)", "SELECT count(*) FROM items WHERE id > 1;", 1, {{"2"}});
+        assert_rows("Index Range (BETWEEN)", "SELECT count(*) FROM items WHERE id BETWEEN 1 AND 2;", 1, {{"2"}});
+        assert_rows("Index Range (<=)", "SELECT count(*) FROM items WHERE id <= 2;", 1, {{"2"}});
+
+        // Index Sort Optimization
+        assert_rows("Index Sort (ASC)", "SELECT id FROM items ORDER BY id;", 3, {{"1"}, {"2"}, {"3"}});
+        assert_rows("Index Sort (DESC)", "SELECT id FROM items ORDER BY id DESC;", 3, {{"3"}, {"2"}, {"1"}});
+
+        executor.execute("USE test_db;");
+        executor.execute("DROP DATABASE opt_db;");
     }
 };
 

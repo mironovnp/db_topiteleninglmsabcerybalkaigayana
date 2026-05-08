@@ -108,11 +108,11 @@ int main(int argc, char* argv[]) {
             if (c == ' ' || c == ';' || c == '\n' || c == '\t') break;
             first_word += std::toupper(c);
         }
-        
+
         if (!first_word.empty()) {
-            bool valid_start = (first_word == "SELECT" || first_word == "CREATE" || 
-                                first_word == "DROP" || first_word == "INSERT" || 
-                                first_word == "UPDATE" || first_word == "DELETE" || 
+            bool valid_start = (first_word == "SELECT" || first_word == "CREATE" ||
+                                first_word == "DROP" || first_word == "INSERT" ||
+                                first_word == "UPDATE" || first_word == "DELETE" ||
                                 first_word == "USE" || first_word == "ALTER");
             if (!valid_start) {
                 std::cout << "\033[31m[ERROR]\033[0m Unexpected keyword: " << first_word << "\n\n";
@@ -159,6 +159,6 @@ int main(int argc, char* argv[]) {
         std::cout << "\n";
     }
 
-    std::cout << "Goodbye!\n";
+    std::cout << "Goool nakonec-to ti vishel!\n";
     return 0;
 }

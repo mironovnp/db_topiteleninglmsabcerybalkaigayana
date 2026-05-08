@@ -32,9 +32,10 @@ static const std::unordered_map<std::string, TokenType> KEYWORDS = {
     {"LIMIT",TokenType::KW_LIMIT},{"OFFSET",TokenType::KW_OFFSET},
     {"IN",TokenType::KW_IN},{"EXISTS",TokenType::KW_EXISTS},{"NULL",TokenType::KW_NULL},
     {"UNIQUE",TokenType::KW_UNIQUE},{"DEFAULT",TokenType::KW_DEFAULT},
-    {"CASCADE",TokenType::KW_CASCADE},
-    {"INDEX",TokenType::KW_INDEX},
-    {"IF",TokenType::KW_IF},
+    {"CASCADE",TokenType::KW_CASCADE},{"INDEX",TokenType::KW_INDEX},{"IF",TokenType::KW_IF},
+    {"DISTINCT",TokenType::KW_DISTINCT},{"IS",TokenType::KW_IS},
+    {"FOREIGN",TokenType::KW_FOREIGN},{"REFERENCES",TokenType::KW_REFERENCES},
+    {"LIKE",TokenType::KW_LIKE},{"BETWEEN",TokenType::KW_BETWEEN},{"AUTOINCREMENT",TokenType::KW_AUTOINCREMENT},
 };
 
 using enum TokenType;
@@ -240,16 +241,22 @@ std::unique_ptr<CreateTableStatement> Parser::parseCreateTable() {
                 expect(LPAREN);
                 col.fk_ref_column = expect(IDENTIFIER).value;
                 expect(RPAREN);
-                if (match(KW_ON)) {
-                    expect(KW_DELETE);
-                    if (match(KW_CASCADE)) col.on_delete = OnDeleteAction::CASCADE;
-                    else if (match(KW_SET)) {
-                        expect(KW_NULL);
-                        col.on_delete = OnDeleteAction::SET_NULL;
+                while (match(KW_ON)) {
+                    if (match(KW_DELETE)) {
+                        if (match(KW_CASCADE)) col.on_delete = OnDeleteAction::CASCADE;
+                        else if (match(KW_SET)) { expect(KW_NULL); col.on_delete = OnDeleteAction::SET_NULL; }
+                        else throw std::runtime_error("Expected CASCADE or SET NULL after ON DELETE");
+                    } else if (match(KW_UPDATE)) {
+                        if (match(KW_CASCADE)) col.on_update = OnUpdateAction::CASCADE;
+                        else if (match(KW_SET)) { expect(KW_NULL); col.on_update = OnUpdateAction::SET_NULL; }
+                        else throw std::runtime_error("Expected CASCADE or SET NULL after ON UPDATE");
                     } else {
-                        throw std::runtime_error("Expected CASCADE or SET NULL after ON DELETE");
+                        throw std::runtime_error("Expected DELETE or UPDATE after ON");
                     }
                 }
+            } else if (check(KW_AUTOINCREMENT)) {
+                consume();
+                col.is_autoincrement = true;
             } else {
                 break;
             }
@@ -344,6 +351,8 @@ QualifiedCol Parser::parseQualifiedCol() {
 
 std::unique_ptr<SelectStatement> Parser::parseSelect() {
     auto q = std::make_unique<SelectStatement>();
+    if (match(KW_DISTINCT)) q->distinct = true;
+
     if (match(STAR)) {
         q->select_all = true;
     } else {
@@ -355,10 +364,18 @@ std::unique_ptr<SelectStatement> Parser::parseSelect() {
         } while (match(COMMA));
     }
     expect(KW_FROM);
-    q->table_name = expect(IDENTIFIER).value;
-    if (match(KW_AS)) q->alias = expect(IDENTIFIER).value;
-    else if (check(IDENTIFIER) && !check(KW_INNER) && !check(KW_LEFT) && !check(KW_RIGHT) && !check(KW_FULL) && !check(KW_CROSS) && !check(KW_JOIN) && !check(KW_WHERE) && !check(KW_GROUP) && !check(KW_ORDER) && !check(KW_LIMIT)) {
-        q->alias = consume().value;
+    if (match(LPAREN)) {
+        expect(KW_SELECT);
+        q->from_subquery = parseSelect();
+        expect(RPAREN);
+        if (match(KW_AS)) q->from_alias = expect(IDENTIFIER).value;
+        else q->from_alias = expect(IDENTIFIER).value;
+    } else {
+        q->table_name = expect(IDENTIFIER).value;
+        if (match(KW_AS)) q->alias = expect(IDENTIFIER).value;
+        else if (check(IDENTIFIER) && !check(KW_INNER) && !check(KW_LEFT) && !check(KW_RIGHT) && !check(KW_FULL) && !check(KW_CROSS) && !check(KW_JOIN) && !check(KW_WHERE) && !check(KW_GROUP) && !check(KW_ORDER) && !check(KW_LIMIT)) {
+            q->alias = consume().value;
+        }
     }
 
     while (true) {
@@ -563,6 +580,41 @@ std::unique_ptr<Expression> Parser::parseExprCmp() {
         auto right = parseExprAddSub();
         left = std::make_unique<BinaryExpression>(opTok, std::move(left), std::move(right));
     }
+
+    if (match(KW_IS)) {
+        bool is_not = match(KW_NOT);
+        expect(KW_NULL);
+        return std::make_unique<IsNullExpression>(std::move(left), is_not);
+    }
+
+    if (match(KW_LIKE)) {
+        std::string p = expect(STRING_LITERAL).value;
+        return std::make_unique<LikeExpression>(std::move(left), p, false);
+    }
+    
+    if (match(KW_BETWEEN)) {
+        auto low = parseExprAddSub();
+        expect(KW_AND);
+        auto high = parseExprAddSub();
+        return std::make_unique<BetweenExpression>(std::move(left), std::move(low), std::move(high), false);
+    }
+
+    if (check(KW_NOT)) {
+        size_t saved = pos_;
+        consume();
+        if (match(KW_LIKE)) {
+            std::string p = expect(STRING_LITERAL).value;
+            return std::make_unique<LikeExpression>(std::move(left), p, true);
+        }
+        if (match(KW_BETWEEN)) {
+            auto low = parseExprAddSub();
+            expect(KW_AND);
+            auto high = parseExprAddSub();
+            return std::make_unique<BetweenExpression>(std::move(left), std::move(low), std::move(high), true);
+        }
+        pos_ = saved;
+    }
+
     return left;
 }
 
@@ -592,6 +644,12 @@ std::unique_ptr<Expression> Parser::parseExprAtom() {
     }
 
     if (match(LPAREN)) {
+        if (check(KW_SELECT)) {
+            consume();
+            auto subq = std::make_unique<SubqueryExpression>(parseSelect(), false, false);
+            expect(RPAREN);
+            return subq;
+        }
         auto expr = parseExprOr();
         expect(RPAREN);
         return expr;
@@ -616,11 +674,21 @@ std::unique_ptr<Expression> Parser::parseExprAtom() {
         return subq;
     }
 
-    if (match(KW_COUNT)) { expect(LPAREN); std::string col = match(STAR) ? "*" : expect(IDENTIFIER).value; expect(RPAREN); return std::make_unique<AggregateExpression>(AggrFunc::COUNT, col); }
-    if (match(KW_SUM)) { expect(LPAREN); std::string col = expect(IDENTIFIER).value; expect(RPAREN); return std::make_unique<AggregateExpression>(AggrFunc::SUM, col); }
-    if (match(KW_AVG)) { expect(LPAREN); std::string col = expect(IDENTIFIER).value; expect(RPAREN); return std::make_unique<AggregateExpression>(AggrFunc::AVG, col); }
-    if (match(KW_MIN)) { expect(LPAREN); std::string col = expect(IDENTIFIER).value; expect(RPAREN); return std::make_unique<AggregateExpression>(AggrFunc::MIN, col); }
-    if (match(KW_MAX)) { expect(LPAREN); std::string col = expect(IDENTIFIER).value; expect(RPAREN); return std::make_unique<AggregateExpression>(AggrFunc::MAX, col); }
+    auto parse_aggr = [&](AggrFunc f) {
+        expect(LPAREN);
+        bool d = match(KW_DISTINCT);
+        std::string col;
+        if (f == AggrFunc::COUNT && match(STAR)) col = "*";
+        else col = expect(IDENTIFIER).value;
+        expect(RPAREN);
+        return std::make_unique<AggregateExpression>(f, col, d);
+    };
+
+    if (match(KW_COUNT)) return parse_aggr(AggrFunc::COUNT);
+    if (match(KW_SUM)) return parse_aggr(AggrFunc::SUM);
+    if (match(KW_AVG)) return parse_aggr(AggrFunc::AVG);
+    if (match(KW_MIN)) return parse_aggr(AggrFunc::MIN);
+    if (match(KW_MAX)) return parse_aggr(AggrFunc::MAX);
 
     Token t = cur();
     if (t.type == STRING_LITERAL || t.type == NUMBER_LITERAL || t.type == BOOL_LITERAL) {

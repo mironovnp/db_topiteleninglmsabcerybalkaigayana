@@ -28,15 +28,12 @@ void BufferPool::openFile() {
         std::filesystem::create_directories(parent);
 
     // Open or create file
-    file_.open(file_path_,
-               std::ios::in | std::ios::out | std::ios::binary);
-    if (!file_.is_open()) {
-        // File doesn't exist — create it
+    if (!std::filesystem::exists(file_path_)) {
         std::ofstream create(file_path_, std::ios::binary);
         create.close();
-        file_.open(file_path_,
-                   std::ios::in | std::ios::out | std::ios::binary);
     }
+
+    file_.open(file_path_, std::ios::in | std::ios::out | std::ios::binary);
     if (!file_.is_open())
         throw std::runtime_error("BufferPool: cannot open " + file_path_);
 
