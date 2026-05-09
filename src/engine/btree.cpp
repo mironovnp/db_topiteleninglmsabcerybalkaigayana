@@ -5,6 +5,27 @@
 
 namespace db {
 
+static void walLogPageImage(BufferPool& pool, PageId page_id, Page& pg) {
+    WALManager* wal = pool.getWALManager();
+    if (!wal) return;
+    // Payload format:
+    //   file_path_len (2) | file_path bytes | page bytes (PAGE_SIZE)
+    // (file_path is needed because page_id is per-file, not global)
+    const std::string& fp = pool.filePath();
+    if (fp.size() > 0xFFFF) return;
+    uint16_t fpl = static_cast<uint16_t>(fp.size());
+    std::string payload;
+    payload.reserve(2 + fp.size() + PAGE_SIZE);
+    payload.append(reinterpret_cast<const char*>(&fpl), 2);
+    payload.append(fp.data(), fp.size());
+    payload.append(pg.data, PAGE_SIZE);
+
+    // Payload can contain '\0' bytes; std::string is fine as a byte buffer.
+    LogRecord rec(0, pg.getLSN(), LogRecordType::PAGE_IMAGE, page_id, std::move(payload));
+    LSN lsn = wal->appendRecord(rec);
+    pg.setLSN(lsn);
+}
+
 // ════════════════════════════════════════════════════════════════════════
 //  Constructor
 // ════════════════════════════════════════════════════════════════════════
@@ -313,6 +334,8 @@ bool BPlusTree::insert(const std::string& key, const Row& row) {
     }
 
     if (leafInsertCell(*pg, key, row_data, pos)) {
+        // Physical WAL: log full page after-image so splits/internal updates are recoverable too.
+        walLogPageImage(pool_, lid, *pg);
         pool_.unpinPage(lid, true);
         return true;
     }
@@ -381,6 +404,8 @@ void BPlusTree::splitLeafAndInsert(PageId leaf_id,
     // Separator key = first key of new leaf
     std::string sep = all[mid].key;
 
+    walLogPageImage(pool_, leaf_id, *old_pg);
+    walLogPageImage(pool_, new_id, *new_pg);
     pool_.unpinPage(leaf_id, true);
     pool_.unpinPage(new_id, true);
 
@@ -401,6 +426,7 @@ void BPlusTree::insertIntoParent(PageId left_id, const std::string& key,
         rp->setPageId(new_root_id);
         std::vector<InternalEntry> entries = {{key, right_id}};
         writeInternalPage(*rp, left_id, entries);
+        walLogPageImage(pool_, new_root_id, *rp);
         pool_.unpinPage(new_root_id, true);
         root_ = new_root_id;
         return;
@@ -474,6 +500,7 @@ void BPlusTree::insertIntoParent(PageId left_id, const std::string& key,
     if (needed <= PAGE_SIZE) {
         PageId fc = internalGetFirstChild(*pp);
         writeInternalPage(*pp, fc, entries);
+        walLogPageImage(pool_, parent_id, *pp);
         pool_.unpinPage(parent_id, true);
     } else {
         PageId fc = internalGetFirstChild(*pp);
@@ -516,6 +543,7 @@ void BPlusTree::splitInternalAndInsert(PageId node_id,
     pg->reset();
     pg->setPageId(node_id);
     writeInternalPage(*pg, fc, left_entries);
+    walLogPageImage(pool_, node_id, *pg);
     pool_.unpinPage(node_id, true);
 
     // Create right node
@@ -523,6 +551,7 @@ void BPlusTree::splitInternalAndInsert(PageId node_id,
     Page* rp = pool_.newPage(&right_id);
     rp->setPageId(right_id);
     writeInternalPage(*rp, right_fc, right_entries);
+    walLogPageImage(pool_, right_id, *rp);
     pool_.unpinPage(right_id, true);
 
     insertIntoParent(node_id, push_up_key, right_id);
@@ -568,11 +597,7 @@ bool BPlusTree::remove(const std::string& key) {
         leafInsertCell(*pg, kept[i].key, kept[i].data,
                        static_cast<int>(i));
 
-    if (pool_.getWALManager()) {
-        LogRecord rec(0, pg->getLSN(), LogRecordType::DELETE_CELL, lid, key);
-        LSN lsn = pool_.getWALManager()->appendRecord(rec);
-        pg->setLSN(lsn);
-    }
+    walLogPageImage(pool_, lid, *pg);
 
     pool_.unpinPage(lid, true);
     return true;

@@ -1,10 +1,12 @@
 #pragma once
 #include "engine/page.hpp"      // Row lives here now
 #include "engine/wal.hpp"
+#include "engine/buffer_pool.hpp"
 #include <string>
 #include <vector>
 #include <filesystem>
 #include <memory>
+#include <unordered_map>
 
 namespace db {
 
@@ -114,6 +116,13 @@ public:
 private:
     std::filesystem::path data_dir_;
     std::unique_ptr<WALManager> wal_mgr_;
+    mutable std::unordered_map<std::string, std::unique_ptr<BufferPool>> pools_;
+
+    BufferPool& getPool(const std::string& path) const;
+    void closePool(const std::string& path) const;
+    void flushAllPools() const;
+    void maybeCheckpoint();
+
     std::filesystem::path dbPath(const std::string& db) const;
     std::filesystem::path tablePath(const std::string& db, const std::string& tbl) const;
     std::filesystem::path indexPath(const std::string& db, const std::string& tbl,

@@ -1,4 +1,6 @@
 #include "engine/executor.hpp"
+#include "engine/wal.hpp"
+#include "engine/page.hpp"
 #include <iostream>
 #include <string>
 #include <vector>
@@ -77,6 +79,9 @@ public:
 
         std::cout << "\n>>> ФАЗА 17: Удаление БД" << std::endl;
         test_drop_db();
+
+        std::cout << "\n>>> ФАЗА 18: WAL Recovery" << std::endl;
+        test_wal_recovery();
 
         std::cout << "\n" << std::string(40, '=') << std::endl;
         std::cout << "ИТОГО: " << passed_count << "/" << total_count << " тестов пройдено." << std::endl;
@@ -346,6 +351,75 @@ private:
     void test_drop_db() {
         assert_success("Удаление БД", "DROP DATABASE test_db;");
         assert_error("Проверка удаления БД", "USE test_db;", "does not exist");
+    }
+
+    void test_wal_recovery() {
+        total_count++;
+        try {
+            auto dir = std::filesystem::path(data_dir) / "wal_recovery";
+            std::filesystem::remove_all(dir);
+            std::filesystem::create_directories(dir);
+
+            std::string data_file = (dir / "t.db").string();
+            std::string wal_file = (dir / "wal.log").string();
+
+            // Create an "old" page on disk.
+            db::Page oldp;
+            oldp.reset();
+            oldp.setPageType(db::LEAF_PAGE);
+            oldp.setPageId(0);
+            oldp.setLSN(0);
+            const char old_marker[] = "OLD";
+            memcpy(oldp.data + 128, old_marker, sizeof(old_marker));
+            {
+                std::ofstream out(data_file, std::ios::binary | std::ios::trunc);
+                out.write(oldp.data, db::PAGE_SIZE);
+            }
+
+            // Create a PAGE_IMAGE record with a different marker.
+            db::Page newp;
+            newp.reset();
+            newp.setPageType(db::LEAF_PAGE);
+            newp.setPageId(0);
+            newp.setLSN(0); // will be overwritten during recovery with record.lsn
+            const char new_marker[] = "NEW";
+            memcpy(newp.data + 128, new_marker, sizeof(new_marker));
+
+            db::WALManager wal(wal_file);
+            uint16_t fpl = static_cast<uint16_t>(data_file.size());
+            std::string payload;
+            payload.reserve(2 + data_file.size() + db::PAGE_SIZE);
+            payload.append(reinterpret_cast<const char*>(&fpl), 2);
+            payload.append(data_file.data(), data_file.size());
+            payload.append(newp.data, db::PAGE_SIZE);
+
+            db::LogRecord rec(0, 0, db::LogRecordType::PAGE_IMAGE, 0, std::move(payload));
+            db::LSN lsn = wal.appendRecord(rec);
+            wal.flushTo(lsn);
+
+            // Apply recovery and validate disk is updated.
+            wal.recover();
+
+            db::Page got;
+            {
+                std::ifstream in(data_file, std::ios::binary);
+                in.read(got.data, db::PAGE_SIZE);
+            }
+
+            bool ok_marker = (memcmp(got.data + 128, new_marker, sizeof(new_marker)) == 0);
+            bool ok_lsn = (got.getLSN() == lsn);
+
+            if (ok_marker && ok_lsn) {
+                std::cout << "  [OK] WAL recovery применяет PAGE_IMAGE" << std::endl;
+                passed_count++;
+            } else {
+                std::cerr << "  [FAIL] WAL recovery не применился: marker=" << ok_marker
+                          << " lsn=" << ok_lsn << " (got=" << got.getLSN()
+                          << " expected=" << lsn << ")" << std::endl;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "  [FAIL] WAL recovery exception: " << e.what() << std::endl;
+        }
     }
     void test_cascades_and_aggr_distinct() {
         // COUNT DISTINCT

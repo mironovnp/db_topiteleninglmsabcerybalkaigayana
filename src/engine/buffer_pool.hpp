@@ -44,6 +44,7 @@ public:
     uint32_t filePageCount() const { return next_page_id_; }
 
     WALManager* getWALManager() const { return wal_mgr_; }
+    const std::string& filePath() const { return file_path_; }
 
 private:
     struct Frame {

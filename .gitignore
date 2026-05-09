@@ -6,3 +6,5 @@ cli_output.txt
 server.log
 test_data/
 CaseChampGui/
+.ssh_known_hosts
+test_db_data_for_executor_tests/

@@ -8,6 +8,12 @@
 #include <windows.h>
 #else
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <errno.h>
+#include <sys/uio.h>
+#include <unordered_map>
 #endif
 
 namespace db {
@@ -88,9 +94,12 @@ WALManager::WALManager(const std::string& log_file_path)
 
 WALManager::~WALManager() {
     flushTo(next_lsn_ - 1); // Flush everything on shutdown
-    if (log_file_.is_open()) {
-        log_file_.close();
+#ifndef _WIN32
+    if (log_fd_ >= 0) {
+        ::close(log_fd_);
+        log_fd_ = -1;
     }
+#endif
 }
 
 void WALManager::openFile() {
@@ -99,46 +108,62 @@ void WALManager::openFile() {
         std::filesystem::create_directories(parent);
     }
 
-    if (!std::filesystem::exists(log_file_path_)) {
-        std::ofstream create(log_file_path_, std::ios::binary);
-        create.close();
+#ifndef _WIN32
+    // Open (or create) the WAL file once and keep an fd so we can fdatasync().
+    log_fd_ = ::open(log_file_path_.c_str(), O_RDWR | O_CREAT, 0644);
+    if (log_fd_ < 0) {
+        throw std::runtime_error("WALManager: cannot open " + log_file_path_ + " (errno=" + std::to_string(errno) + ")");
     }
 
-    log_file_.open(log_file_path_, std::ios::in | std::ios::out | std::ios::binary | std::ios::app);
-    if (!log_file_.is_open()) {
-        throw std::runtime_error("WALManager: cannot open " + log_file_path_);
-    }
-
-    // Determine next LSN by scanning the file
-    log_file_.seekg(0, std::ios::end);
-    if (log_file_.tellg() == 0) {
+    // Determine next LSN by streaming scan (no OOM on large logs).
+    off_t end = ::lseek(log_fd_, 0, SEEK_END);
+    if (end <= 0) {
         next_lsn_ = 1;
         flushed_lsn_ = 0;
         return;
     }
 
-    log_file_.seekg(0, std::ios::beg);
-    std::string file_content((std::istreambuf_iterator<char>(log_file_)),
-                              std::istreambuf_iterator<char>());
-    
-    const char* ptr = file_content.data();
-    uint32_t remaining = static_cast<uint32_t>(file_content.size());
-    
-    LSN last_lsn = 0;
-    while (remaining > 0) {
-        auto [rec, consumed] = LogRecord::deserialize(ptr, remaining);
-        if (consumed == 0) break; // Reached end or incomplete record
-        last_lsn = rec.lsn;
-        ptr += consumed;
-        remaining -= consumed;
+    if (::lseek(log_fd_, 0, SEEK_SET) < 0) {
+        throw std::runtime_error("WALManager: lseek failed for " + log_file_path_);
     }
-    
+
+    LSN last_lsn = 0;
+    while (true) {
+        uint32_t total_len = 0;
+        ssize_t r = ::read(log_fd_, &total_len, sizeof(total_len));
+        if (r == 0) break; // EOF
+        if (r < 0) throw std::runtime_error("WALManager: read failed (len) for " + log_file_path_);
+        if (r != static_cast<ssize_t>(sizeof(total_len))) break; // partial/truncated
+
+        // Read type (1) + lsn (4) so we can track last_lsn without buffering the full record.
+        uint8_t type = 0;
+        uint32_t lsn = 0;
+        r = ::read(log_fd_, &type, 1);
+        if (r != 1) break;
+        r = ::read(log_fd_, &lsn, 4);
+        if (r != 4) break;
+
+        last_lsn = lsn;
+
+        // Skip the remainder of this record:
+        // total_len includes: type(1) + lsn(4) + txn_id(4) + prev_lsn(4) + page_id(4) + payload_size(4) + payload
+        // We've already consumed 1 + 4 bytes of that total_len.
+        int64_t to_skip = static_cast<int64_t>(total_len) - (1 + 4);
+        if (to_skip < 0) break;
+        if (::lseek(log_fd_, to_skip, SEEK_CUR) < 0) break;
+    }
+
     next_lsn_ = last_lsn + 1;
     flushed_lsn_ = last_lsn;
-    
-    // Move put pointer to end for append
-    log_file_.seekp(0, std::ios::end);
-    log_file_.clear(); // Clear any eof flags
+
+    // Position for appends.
+    ::lseek(log_fd_, 0, SEEK_END);
+#else
+    // Windows: keep previous simple behavior (no fdatasync here).
+    // (If needed, can be upgraded to native handles later.)
+    next_lsn_ = 1;
+    flushed_lsn_ = 0;
+#endif
 }
 
 LSN WALManager::appendRecord(LogRecord& record) {
@@ -158,24 +183,191 @@ void WALManager::flushTo(LSN lsn) {
     if (lsn <= flushed_lsn_) return;
     
     if (!log_buffer_.empty()) {
-        log_file_.write(log_buffer_.data(), log_buffer_.size());
-        log_file_.flush(); // Flush std::fstream buffer to OS
-        
-        // fsync to ensure durability
-#ifdef _WIN32
-        // Windows fsync equivalent
-        // Not perfectly robust without native handles, but flush() helps
+#ifndef _WIN32
+        if (log_fd_ < 0) {
+            throw std::runtime_error("WALManager: flushTo on closed fd");
+        }
+
+        const char* p = log_buffer_.data();
+        size_t left = log_buffer_.size();
+        while (left > 0) {
+            ssize_t w = ::write(log_fd_, p, left);
+            if (w < 0) throw std::runtime_error("WALManager: write failed for " + log_file_path_);
+            p += static_cast<size_t>(w);
+            left -= static_cast<size_t>(w);
+        }
+
+        // Durability for *this* file only (not a global sync()).
+        if (::fdatasync(log_fd_) != 0) {
+            throw std::runtime_error("WALManager: fdatasync failed for " + log_file_path_);
+        }
 #else
-        // POSIX fsync
-        // We really should use open() and fsync() directly, but for CaseChamp this might suffice
-        // if we just want a logical demonstration, or we can try to extract fd if available.
-        // As a simpler fallback, std::fstream::flush + an OS sync is often enough for a prototype.
-        sync(); // Forces all OS buffers to disk. (Heavy, but guarantees durability).
+        // Windows fallback: no-op durability beyond process flush in this prototype.
 #endif
         
         log_buffer_.clear();
         flushed_lsn_ = next_lsn_ - 1;
     }
+}
+
+void WALManager::recover() {
+#ifndef _WIN32
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (log_fd_ < 0) return;
+
+    // Make sure we replay only durable WAL.
+    if (::fdatasync(log_fd_) != 0) {
+        throw std::runtime_error("WALManager: fdatasync failed for " + log_file_path_);
+    }
+
+    if (::lseek(log_fd_, 0, SEEK_SET) < 0) {
+        throw std::runtime_error("WALManager: lseek failed for " + log_file_path_);
+    }
+
+    LSN last_lsn = 0;
+
+    // Keep data fds open per file for speed.
+    std::unordered_map<std::string, int> data_fds;
+
+    auto getDataFd = [&](const std::string& path) -> int {
+        auto it = data_fds.find(path);
+        if (it != data_fds.end()) return it->second;
+        auto parent = std::filesystem::path(path).parent_path();
+        if (!parent.empty()) std::filesystem::create_directories(parent);
+        int fd = ::open(path.c_str(), O_RDWR | O_CREAT, 0644);
+        if (fd < 0) return -1;
+        data_fds.emplace(path, fd);
+        return fd;
+    };
+
+    while (true) {
+        uint32_t total_len = 0;
+        ssize_t r = ::read(log_fd_, &total_len, sizeof(total_len));
+        if (r == 0) break; // EOF
+        if (r < 0) throw std::runtime_error("WALManager: read failed (len) for " + log_file_path_);
+        if (r != static_cast<ssize_t>(sizeof(total_len))) break; // partial
+
+        // Read fixed header fields.
+        uint8_t type_u8 = 0;
+        uint32_t lsn = 0;
+        uint32_t txn_id = 0;
+        uint32_t prev_lsn = 0;
+        uint32_t page_id = 0;
+        uint32_t payload_size = 0;
+
+        auto readExact = [&](void* dst, size_t n) -> bool {
+            char* p = static_cast<char*>(dst);
+            size_t left = n;
+            while (left > 0) {
+                ssize_t rr = ::read(log_fd_, p, left);
+                if (rr <= 0) return false;
+                p += rr;
+                left -= static_cast<size_t>(rr);
+            }
+            return true;
+        };
+
+        if (!readExact(&type_u8, 1)) break;
+        if (!readExact(&lsn, 4)) break;
+        if (!readExact(&txn_id, 4)) break;
+        if (!readExact(&prev_lsn, 4)) break;
+        if (!readExact(&page_id, 4)) break;
+        if (!readExact(&payload_size, 4)) break;
+
+        last_lsn = lsn;
+
+        LogRecordType type = static_cast<LogRecordType>(type_u8);
+        if (payload_size == 0) continue;
+
+        if (type != LogRecordType::PAGE_IMAGE) {
+            // Skip payload quickly.
+            if (::lseek(log_fd_, payload_size, SEEK_CUR) < 0) break;
+            continue;
+        }
+
+        std::string payload;
+        payload.resize(payload_size);
+        if (!readExact(payload.data(), payload.size())) break;
+
+        // Parse payload: file_path_len(2) | file_path | page_bytes(PAGE_SIZE)
+        if (payload.size() < 2) continue;
+        const char* p = payload.data();
+        uint16_t fpl = 0;
+        memcpy(&fpl, p, 2);
+        p += 2;
+        if (payload.size() < 2 + fpl + PAGE_SIZE) continue;
+
+        std::string file_path(p, fpl);
+        p += fpl;
+
+        int fd = getDataFd(file_path);
+        if (fd < 0) continue;
+
+        off_t off = static_cast<off_t>(page_id) * PAGE_SIZE;
+
+        // Idempotent redo: check on-disk pageLSN.
+        bool should_write = true;
+        Page cur{};
+        ssize_t pr = ::pread(fd, cur.data, PAGE_SIZE, off);
+        if (pr == static_cast<ssize_t>(PAGE_SIZE)) {
+            if (cur.getLSN() >= lsn) should_write = false;
+        }
+
+        if (!should_write) continue;
+
+        Page pg;
+        memcpy(pg.data, p, PAGE_SIZE);
+        pg.setLSN(lsn);
+
+        off_t end = ::lseek(fd, 0, SEEK_END);
+        if (end < off + static_cast<off_t>(PAGE_SIZE)) {
+            if (::ftruncate(fd, off + static_cast<off_t>(PAGE_SIZE)) != 0) continue;
+        }
+
+        ssize_t pw = ::pwrite(fd, pg.data, PAGE_SIZE, off);
+        if (pw != static_cast<ssize_t>(PAGE_SIZE)) {
+            // Best-effort: keep going even on short write.
+            continue;
+        }
+    }
+
+    // Sync all touched data files once.
+    for (auto& [_, fd] : data_fds) {
+        ::fdatasync(fd);
+        ::close(fd);
+    }
+
+    // After recovery, set LSN pointers to the end of the durable log.
+    next_lsn_ = last_lsn + 1;
+    flushed_lsn_ = last_lsn;
+    ::lseek(log_fd_, 0, SEEK_END);
+#endif
+}
+
+void WALManager::reset() {
+#ifndef _WIN32
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (log_fd_ < 0) return;
+    if (::ftruncate(log_fd_, 0) != 0) {
+        throw std::runtime_error("WALManager: ftruncate failed for " + log_file_path_);
+    }
+    ::lseek(log_fd_, 0, SEEK_SET);
+    next_lsn_ = 1;
+    flushed_lsn_ = 0;
+    log_buffer_.clear();
+#endif
+}
+
+uint64_t WALManager::fileSizeBytes() const {
+#ifndef _WIN32
+    if (log_fd_ < 0) return 0;
+    struct stat st {};
+    if (::fstat(log_fd_, &st) != 0) return 0;
+    return static_cast<uint64_t>(st.st_size);
+#else
+    return 0;
+#endif
 }
 
 LSN WALManager::getFlushedLSN() const {

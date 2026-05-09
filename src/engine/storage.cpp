@@ -9,9 +9,32 @@
 
 namespace db {
 
+static constexpr uint64_t WAL_CHECKPOINT_THRESHOLD_BYTES = 4ull * 1024 * 1024; // 4 MiB
+
 Storage::Storage(const std::string& data_dir) : data_dir_(data_dir) {
     std::filesystem::create_directories(data_dir_);
     wal_mgr_ = std::make_unique<WALManager>((data_dir_ / "wal.log").string());
+    // Crash recovery: replay WAL into data files before opening any BufferPools.
+    wal_mgr_->recover();
+}
+
+void Storage::flushAllPools() const {
+    for (auto& [_, pool] : pools_) {
+        if (pool) pool->flushAll();
+    }
+}
+
+void Storage::maybeCheckpoint() {
+    if (!wal_mgr_) return;
+    if (wal_mgr_->fileSizeBytes() < WAL_CHECKPOINT_THRESHOLD_BYTES) return;
+
+    // Checkpoint protocol (simple No-Force version):
+    // 1) Force WAL (everything appended so far) to disk.
+    wal_mgr_->flushTo(wal_mgr_->getNextLSN() - 1);
+    // 2) Flush all dirty pages to disk.
+    flushAllPools();
+    // 3) Reset WAL to empty.
+    wal_mgr_->reset();
 }
 
 std::filesystem::path Storage::dbPath(const std::string& db) const {
@@ -220,7 +243,7 @@ bool Storage::createTable(const std::string& db_name,
     if (std::filesystem::exists(p)) return false;
 
     // Create the .db file with a meta page (page 0) and an empty root leaf (page 1)
-    BufferPool pool(p.string(), POOL_SIZE, wal_mgr_.get());
+    BufferPool& pool = getPool(p.string());
 
     // Page 0: Meta
     PageId meta_id;
@@ -248,7 +271,8 @@ bool Storage::createTable(const std::string& db_name,
     meta->setNumRecords(static_cast<uint32_t>(payload.size()));
     pool.unpinPage(meta_id, true);
 
-    pool.flushAll();
+    if (wal_mgr_) wal_mgr_->flushTo(wal_mgr_->getNextLSN() - 1);
+    maybeCheckpoint();
     return true;
 }
 
@@ -256,6 +280,7 @@ bool Storage::dropTable(const std::string& db_name,
                         const std::string& table_name) {
     auto p = tablePath(db_name, table_name);
     if (!std::filesystem::exists(p)) return false;
+    closePool(p.string());
 
     // Also remove any .idx files for this table
     auto dir = dbPath(db_name);
@@ -264,6 +289,7 @@ bool Storage::dropTable(const std::string& db_name,
         if (entry.is_regular_file() && entry.path().extension() == ".idx") {
             std::string stem = entry.path().stem().string(); // e.g. "users.email"
             if (stem.substr(0, prefix.size()) == prefix) {
+                closePool(entry.path().string());
                 std::filesystem::remove(entry.path());
             }
         }
@@ -283,7 +309,7 @@ TableSchema Storage::getTableSchema(const std::string& db_name,
     if (!std::filesystem::exists(p))
         throw std::runtime_error("Table '" + table_name + "' does not exist");
 
-    BufferPool pool(p.string(), POOL_SIZE, wal_mgr_.get());
+    BufferPool& pool = getPool(p.string());
 
     Page* meta = pool.fetchPage(0);
     TableSchema s = deserializeSchema(meta->data + 16, PAGE_SIZE - 16);
@@ -297,7 +323,7 @@ TableSchema Storage::getTableSchema(const std::string& db_name,
 std::vector<Row> Storage::readAllRows(const std::string& db_name,
                                        const std::string& table_name) const {
     auto p = tablePath(db_name, table_name);
-    BufferPool pool(p.string(), POOL_SIZE, wal_mgr_.get());
+    BufferPool& pool = getPool(p.string());
 
     // Read root_page_id and key type from meta
     Page* meta = pool.fetchPage(0);
@@ -319,7 +345,7 @@ int Storage::appendRows(const std::string& db_name,
                         const std::string& table_name,
                         const std::vector<Row>& rows) {
     auto p = tablePath(db_name, table_name);
-    BufferPool pool(p.string(), POOL_SIZE, wal_mgr_.get());
+    BufferPool& pool = getPool(p.string());
 
     // Read meta
     Page* meta = pool.fetchPage(0);
@@ -347,7 +373,8 @@ int Storage::appendRows(const std::string& db_name,
     memcpy(meta->data + 16, &new_root, 4);
     pool.unpinPage(0, true);
 
-    pool.flushAll();
+    if (wal_mgr_) wal_mgr_->flushTo(wal_mgr_->getNextLSN() - 1);
+    maybeCheckpoint();
     return count;
 }
 
@@ -359,7 +386,7 @@ bool Storage::writeAllRows(const std::string& db_name,
     // Read current schema from existing file
     TableSchema schema;
     {
-        BufferPool pool(p.string(), POOL_SIZE, wal_mgr_.get());
+        BufferPool& pool = getPool(p.string());
         Page* meta = pool.fetchPage(0);
         uint32_t payload_len = meta->getNumRecords();
         schema = deserializeSchema(meta->data + 16, payload_len);
@@ -376,6 +403,7 @@ bool Storage::writeAllRows(const std::string& db_name,
     auto p = tablePath(db_name, table_name);
 
     // Delete and recreate the file
+    closePool(p.string());
     std::filesystem::remove(p);
 
     // Sort rows by primary key
@@ -402,7 +430,7 @@ bool Storage::writeAllRows(const std::string& db_name,
               });
 
     // Create new file with meta page
-    BufferPool pool(p.string(), POOL_SIZE, wal_mgr_.get());
+    BufferPool& pool = getPool(p.string());
 
     PageId meta_id;
     Page* meta = pool.newPage(&meta_id);
@@ -421,7 +449,8 @@ bool Storage::writeAllRows(const std::string& db_name,
     meta->setNumRecords(static_cast<uint32_t>(payload.size()));
     pool.unpinPage(meta_id, true);
 
-    pool.flushAll();
+    if (wal_mgr_) wal_mgr_->flushTo(wal_mgr_->getNextLSN() - 1);
+    maybeCheckpoint();
     return true;
 }
 
@@ -431,7 +460,7 @@ Row Storage::findRow(const std::string& db_name,
                      const std::string& table_name,
                      const std::string& key) const {
     auto p = tablePath(db_name, table_name);
-    BufferPool pool(p.string(), POOL_SIZE, wal_mgr_.get());
+    BufferPool& pool = getPool(p.string());
 
     Page* meta = pool.fetchPage(0);
     PageId root_id;
@@ -518,14 +547,15 @@ bool Storage::alterTableDropColumn(const std::string& db_name,
 // ── Secondary indexes ──────────────────────────────────────────────────
 
 // Helper: rewrite meta page with updated schema (e.g. after adding/removing an index)
-static void rewriteMeta(BufferPool& pool, const TableSchema& schema, PageId root_id) {
+static void rewriteMeta(BufferPool& pool, WALManager* wal_mgr, const TableSchema& schema, PageId root_id) {
     Page* meta = pool.fetchPage(0);
     std::string payload = Storage::serializeSchemaPublic(schema);
     memcpy(&payload[0], &root_id, 4);
     memcpy(meta->data + 16, payload.data(), payload.size());
     meta->setNumRecords(static_cast<uint32_t>(payload.size()));
     pool.unpinPage(0, true);
-    pool.flushAll();
+    // No-Force: do not force dirty pages here. We only force the WAL.
+    if (wal_mgr) wal_mgr->flushTo(wal_mgr->getNextLSN() - 1);
 }
 
 bool Storage::createIndex(const std::string& db_name, const std::string& table_name,
@@ -593,7 +623,7 @@ bool Storage::createIndex(const std::string& db_name, const std::string& table_n
               });
 
     // Create the .idx file with meta page + bulk-loaded tree
-    BufferPool pool(ip.string(), POOL_SIZE, wal_mgr_.get());
+    BufferPool& pool = getPool(ip.string());
 
     PageId meta_id;
     Page* meta = pool.newPage(&meta_id);
@@ -606,17 +636,18 @@ bool Storage::createIndex(const std::string& db_name, const std::string& table_n
     memcpy(meta->data + 16, &root_id, 4);
     meta->setNumRecords(4);
     pool.unpinPage(meta_id, true);
-    pool.flushAll();
+    if (wal_mgr_) wal_mgr_->flushTo(wal_mgr_->getNextLSN() - 1);
+    maybeCheckpoint();
 
     // Update table schema to include the new index
     schema.indexes.push_back({index_name, column_name});
     auto tp = tablePath(db_name, table_name);
-    BufferPool tpool(tp.string(), POOL_SIZE, wal_mgr_.get());
+    BufferPool& tpool = getPool(tp.string());
     Page* tmeta = tpool.fetchPage(0);
     PageId troot;
     memcpy(&troot, tmeta->data + 16, 4);
     tpool.unpinPage(0, false);
-    rewriteMeta(tpool, schema, troot);
+    rewriteMeta(tpool, wal_mgr_.get(), schema, troot);
 
     return true;
 }
@@ -637,18 +668,20 @@ bool Storage::dropIndex(const std::string& db_name, const std::string& table_nam
 
     // Remove index file
     auto ip = indexPath(db_name, table_name, col_name);
-    if (std::filesystem::exists(ip))
+    if (std::filesystem::exists(ip)) {
+        closePool(ip.string());
         std::filesystem::remove(ip);
+    }
 
     // Update schema
     schema.indexes.erase(schema.indexes.begin() + idx_pos);
     auto tp = tablePath(db_name, table_name);
-    BufferPool tpool(tp.string(), POOL_SIZE, wal_mgr_.get());
+    BufferPool& tpool = getPool(tp.string());
     Page* tmeta = tpool.fetchPage(0);
     PageId troot;
     memcpy(&troot, tmeta->data + 16, 4);
     tpool.unpinPage(0, false);
-    rewriteMeta(tpool, schema, troot);
+    rewriteMeta(tpool, wal_mgr_.get(), schema, troot);
 
     return true;
 }
@@ -666,7 +699,7 @@ std::vector<std::string> Storage::indexLookup(const std::string& db_name,
     for (const auto& col : schema.columns)
         if (col.name == column_name) { col_type = col.type; break; }
 
-    BufferPool pool(ip.string(), POOL_SIZE, wal_mgr_.get());
+    BufferPool& pool = getPool(ip.string());
     Page* meta = pool.fetchPage(0);
     PageId root_id;
     memcpy(&root_id, meta->data + 16, 4);
@@ -697,7 +730,7 @@ std::vector<std::string> Storage::indexScan(const std::string& db_name,
     for (const auto& col : schema.columns)
         if (col.name == column_name) { col_type = col.type; break; }
 
-    BufferPool pool(ip.string(), POOL_SIZE, wal_mgr_.get());
+    BufferPool& pool = getPool(ip.string());
     Page* meta = pool.fetchPage(0);
     PageId root_id; memcpy(&root_id, meta->data + 16, 4);
     pool.unpinPage(0, false);
@@ -728,7 +761,7 @@ void Storage::indexInsertRow(const std::string& db_name, const std::string& tabl
 
         std::string col_type = schema.columns[col_idx].type;
 
-        BufferPool pool(ip.string(), POOL_SIZE, wal_mgr_.get());
+        BufferPool& pool = getPool(ip.string());
         Page* meta = pool.fetchPage(0);
         PageId root_id;
         memcpy(&root_id, meta->data + 16, 4);
@@ -746,7 +779,8 @@ void Storage::indexInsertRow(const std::string& db_name, const std::string& tabl
         meta = pool.fetchPage(0);
         memcpy(meta->data + 16, &new_root, 4);
         pool.unpinPage(0, true);
-        pool.flushAll();
+        if (wal_mgr_) wal_mgr_->flushTo(wal_mgr_->getNextLSN() - 1);
+        maybeCheckpoint();
     }
 }
 
@@ -766,7 +800,7 @@ void Storage::indexRemoveRow(const std::string& db_name, const std::string& tabl
 
         std::string col_type = schema.columns[col_idx].type;
 
-        BufferPool pool(ip.string(), POOL_SIZE, wal_mgr_.get());
+        BufferPool& pool = getPool(ip.string());
         Page* meta = pool.fetchPage(0);
         PageId root_id;
         memcpy(&root_id, meta->data + 16, 4);
@@ -780,7 +814,8 @@ void Storage::indexRemoveRow(const std::string& db_name, const std::string& tabl
         meta = pool.fetchPage(0);
         memcpy(meta->data + 16, &new_root, 4);
         pool.unpinPage(0, true);
-        pool.flushAll();
+        if (wal_mgr_) wal_mgr_->flushTo(wal_mgr_->getNextLSN() - 1);
+        maybeCheckpoint();
     }
 }
 
@@ -788,6 +823,17 @@ bool Storage::hasIndex(const std::string& db_name, const std::string& table_name
                         const std::string& column_name) const {
     auto ip = indexPath(db_name, table_name, column_name);
     return std::filesystem::exists(ip);
+}
+
+BufferPool& Storage::getPool(const std::string& path) const {
+    if (pools_.find(path) == pools_.end()) {
+        pools_[path] = std::make_unique<BufferPool>(path, POOL_SIZE, wal_mgr_.get());
+    }
+    return *pools_[path];
+}
+
+void Storage::closePool(const std::string& path) const {
+    pools_.erase(path);
 }
 
 } // namespace db

@@ -1,7 +1,6 @@
 #pragma once
 #include "engine/page.hpp"
 #include <string>
-#include <fstream>
 #include <mutex>
 #include <vector>
 
@@ -16,6 +15,8 @@ enum class LogRecordType : uint8_t {
     INIT_PAGE,
     INSERT_CELL,
     DELETE_CELL,
+    // Physical logging: after-image of a full page (PAGE_SIZE bytes) in payload.
+    PAGE_IMAGE,
     BEGIN_TXN,
     COMMIT_TXN,
     ABORT_TXN
@@ -64,6 +65,14 @@ public:
 
     // Forces the log to disk up to the specified LSN.
     void flushTo(LSN lsn);
+
+    // Crash recovery (redo): re-apply physical page images from WAL to data files.
+    void recover();
+
+    // Reset the WAL file to empty (used after a successful checkpoint).
+    void reset();
+
+    uint64_t fileSizeBytes() const;
     
     // Gets the maximum LSN that has been durably flushed to disk.
     LSN getFlushedLSN() const;
@@ -73,7 +82,10 @@ public:
 
 private:
     std::string log_file_path_;
-    std::fstream log_file_;
+    // Use an explicit file descriptor on POSIX so we can fdatasync()
+#ifndef _WIN32
+    int log_fd_ = -1;
+#endif
     
     LSN next_lsn_ = 1;
     LSN flushed_lsn_ = 0;

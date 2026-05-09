@@ -93,6 +93,9 @@ uint32_t BufferPool::getFrame() {
     Frame& f = frames_[idx];
     // Flush dirty page before evicting
     if (f.dirty) {
+        // STEAL + WAL: before writing a dirty page, the log must be forced
+        // at least up to the page's LSN.
+        if (wal_mgr_) wal_mgr_->flushTo(f.page.getLSN());
         writeToDisk(f.page_id, f.page);
         f.dirty = false;
     }
@@ -153,6 +156,7 @@ Page* BufferPool::newPage(PageId* out_id) {
         LogRecord rec(0, 0, LogRecordType::INIT_PAGE, id);
         LSN lsn = wal_mgr_->appendRecord(rec);
         f.page.setLSN(lsn);
+        wal_mgr_->flushTo(lsn);
     }
 
     // Write an empty page to extend the file
