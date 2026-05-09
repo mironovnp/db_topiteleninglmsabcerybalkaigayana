@@ -22,7 +22,7 @@ enum class TokenType {
     KW_JOIN, KW_INNER, KW_LEFT, KW_RIGHT, KW_FULL, KW_CROSS, KW_OUTER, KW_ON,
     KW_LIMIT, KW_OFFSET,
     KW_IN, KW_EXISTS, KW_NULL, KW_UNIQUE, KW_DEFAULT, KW_FOREIGN, KW_REFERENCES, KW_CASCADE,
-    KW_INDEX, KW_IF, KW_DISTINCT, KW_IS, KW_LIKE, KW_BETWEEN, KW_AUTOINCREMENT,
+    KW_INDEX, KW_IF, KW_DISTINCT, KW_IS, KW_LIKE, KW_BETWEEN, KW_AUTOINCREMENT, KW_SHOW,
     IDENTIFIER, STRING_LITERAL, NUMBER_LITERAL, BOOL_LITERAL,
     OP_EQ, OP_NEQ, OP_LT, OP_GT, OP_LTE, OP_GTE,
     OP_PLUS, OP_MINUS, OP_DIV, // OP_STAR is handled by STAR
@@ -281,6 +281,13 @@ public:
     std::unique_ptr<Expression> where;
 };
 
+class ShowStatement : public Statement {
+public:
+    enum Type { DATABASES, TABLES, COLUMNS, INDEX, CREATE_TABLE };
+    Type type;
+    std::string table_name; // used for COLUMNS, INDEX, CREATE_TABLE
+};
+
 // ── Lexer ──────────────────────────────────────────────────────────────
 
 class Lexer {
@@ -324,6 +331,7 @@ private:
     std::unique_ptr<AlterTableStatement> parseAlterTable();
     std::unique_ptr<CreateIndexStatement> parseCreateIndex();
     std::unique_ptr<DropIndexStatement> parseDropIndex();
+    std::unique_ptr<ShowStatement> parseShow();
 
     QualifiedCol parseQualifiedCol();
 

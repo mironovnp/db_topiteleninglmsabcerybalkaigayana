@@ -230,6 +230,10 @@ json Executor::execute(const std::string& sql) {
                 if (tokens.size() > 1 && tokens[1].type == TokenType::KW_DATABASE) {
                     needs_db = false;
                 }
+            } else if (t0 == TokenType::KW_SHOW) {
+                if (tokens.size() > 1 && (tokens[1].value == "DATABASES" || tokens[1].value == "databases")) {
+                    needs_db = false;
+                }
             }
 
             if (needs_db && current_db_.empty()) {
@@ -251,6 +255,7 @@ json Executor::execute(const std::string& sql) {
         if (auto q = dynamic_cast<InsertStatement*>(query.get())) return execInsert(q);
         if (auto q = dynamic_cast<UpdateStatement*>(query.get())) return execUpdate(q);
         if (auto q = dynamic_cast<DeleteStatement*>(query.get())) return execDelete(q);
+        if (auto q = dynamic_cast<ShowStatement*>(query.get())) return execShow(q);
         return err("Unknown query type");
     } catch (const std::exception& e) { return err(e.what()); }
 }
@@ -297,6 +302,102 @@ json Executor::execAlterTable(const AlterTableStatement* q) {
 }
 json Executor::execCreateIndex(const CreateIndexStatement* q) { if (storage_.createIndex(current_db_, q->table_name, q->index_name, q->column_name)) return ok("Created."); return err("Failed."); }
 json Executor::execDropIndex(const DropIndexStatement* q) { if (storage_.dropIndex(current_db_, q->table_name, q->index_name)) return ok("Dropped."); return err("Failed."); }
+
+json Executor::execShow(const ShowStatement* q) {
+    switch (q->type) {
+        case ShowStatement::DATABASES: return execShowDatabases();
+        case ShowStatement::TABLES: return execShowTables();
+        case ShowStatement::COLUMNS: return execShowColumns(q->table_name);
+        case ShowStatement::INDEX: return execShowIndex(q->table_name);
+        case ShowStatement::CREATE_TABLE: return execShowCreateTable(q->table_name);
+        default: return err("Unknown SHOW type");
+    }
+}
+
+json Executor::execShowDatabases() {
+    auto dbs = storage_.listDatabases();
+    json rows = json::array();
+    for (const auto& db : dbs) rows.push_back({db});
+    return {{"success", true}, {"columns", {"Database"}}, {"rows", rows}};
+}
+
+json Executor::execShowTables() {
+    requireDB();
+    auto tables = storage_.listTables(current_db_);
+    json rows = json::array();
+    for (const auto& t : tables) rows.push_back({t});
+    return {{"success", true}, {"columns", {"Tables_in_" + current_db_}}, {"rows", rows}};
+}
+
+json Executor::execShowColumns(const std::string& table_name) {
+    requireDB();
+    auto s = storage_.getTableSchema(current_db_, table_name);
+    json rows = json::array();
+    for (size_t i = 0; i < s.columns.size(); ++i) {
+        const auto& c = s.columns[i];
+        std::string extra;
+        if (c.is_autoincrement) extra = "auto_increment";
+        
+        std::string key;
+        if ((int)i == s.primary_key_index) key = "PRI";
+        else if (c.unique) key = "UNI";
+
+        rows.push_back({
+            c.name,
+            c.type,
+            c.not_null ? "NO" : "YES",
+            key,
+            c.has_default ? c.default_value : "NULL",
+            extra
+        });
+    }
+    return {{"success", true}, {"columns", {"Field", "Type", "Null", "Key", "Default", "Extra"}}, {"rows", rows}};
+}
+
+json Executor::execShowIndex(const std::string& table_name) {
+    requireDB();
+    auto s = storage_.getTableSchema(current_db_, table_name);
+    json rows = json::array();
+    // Primary key is an implicit index
+    rows.push_back({table_name, "0", "PRIMARY", "1", s.columns[s.primary_key_index].name, "A", "NULL", "", ""});
+    
+    for (const auto& idx : s.indexes) {
+        rows.push_back({table_name, "1", idx.index_name, "1", idx.column_name, "A", "NULL", "", ""});
+    }
+    return {{"success", true}, {"columns", {"Table", "Non_unique", "Key_name", "Seq_in_index", "Column_name", "Collation", "Cardinality", "Sub_part", "Packed"}}, {"rows", rows}};
+}
+
+json Executor::execShowCreateTable(const std::string& table_name) {
+    requireDB();
+    auto s = storage_.getTableSchema(current_db_, table_name);
+    std::ostringstream sql;
+    sql << "CREATE TABLE " << table_name << " (\n";
+    for (size_t i = 0; i < s.columns.size(); ++i) {
+        const auto& c = s.columns[i];
+        sql << "  " << c.name << " " << c.type;
+        if (c.not_null) sql << " NOT NULL";
+        if (c.unique && (int)i != s.primary_key_index) sql << " UNIQUE";
+        if (c.has_default) sql << " DEFAULT " << c.default_value;
+        if (c.is_autoincrement) sql << " AUTOINCREMENT";
+        if ((int)i == s.primary_key_index) sql << " PRIMARY KEY";
+        if (!c.fk_ref_table.empty()) {
+            sql << " REFERENCES " << c.fk_ref_table << "(" << c.fk_ref_column << ")";
+            if (c.on_delete != OnDeleteAction::NO_ACTION) {
+                sql << " ON DELETE " << (c.on_delete == OnDeleteAction::CASCADE ? "CASCADE" : "SET NULL");
+            }
+            if (c.on_update != OnUpdateAction::NO_ACTION) {
+                sql << " ON UPDATE " << (c.on_update == OnUpdateAction::CASCADE ? "CASCADE" : "SET NULL");
+            }
+        }
+        if (i < s.columns.size() - 1) sql << ",";
+        sql << "\n";
+    }
+    sql << ");";
+    
+    json rows = json::array();
+    rows.push_back({table_name, sql.str()});
+    return {{"success", true}, {"columns", {"Table", "Create Table"}}, {"rows", rows}};
+}
 
 json Executor::execInsert(const InsertStatement* q) {
     auto s = storage_.getTableSchema(current_db_, q->table_name);

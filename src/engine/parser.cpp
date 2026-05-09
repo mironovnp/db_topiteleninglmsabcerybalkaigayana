@@ -36,6 +36,7 @@ static const std::unordered_map<std::string, TokenType> KEYWORDS = {
     {"DISTINCT",TokenType::KW_DISTINCT},{"IS",TokenType::KW_IS},
     {"FOREIGN",TokenType::KW_FOREIGN},{"REFERENCES",TokenType::KW_REFERENCES},
     {"LIKE",TokenType::KW_LIKE},{"BETWEEN",TokenType::KW_BETWEEN},{"AUTOINCREMENT",TokenType::KW_AUTOINCREMENT},
+    {"SHOW",TokenType::KW_SHOW},
 };
 
 using enum TokenType;
@@ -178,6 +179,7 @@ std::unique_ptr<Statement> Parser::parse() {
     if (check(KW_UPDATE)) { consume(); return parseUpdate(); }
     if (check(KW_DELETE)) { consume(); return parseDelete(); }
     if (check(KW_USE))    { consume(); return parseUse(); }
+    if (check(KW_SHOW))   { consume(); return parseShow(); }
     throw std::runtime_error("Unknown query, got: " + cur().value);
 }
 
@@ -736,6 +738,42 @@ std::unique_ptr<DropIndexStatement> Parser::parseDropIndex() {
     q->index_name = expect(IDENTIFIER).value;
     expect(KW_ON);
     q->table_name = expect(IDENTIFIER).value;
+    match(SEMICOLON);
+    return q;
+}
+
+std::unique_ptr<ShowStatement> Parser::parseShow() {
+    auto q = std::make_unique<ShowStatement>();
+    Token t = consume();
+    std::string type = t.value;
+    std::transform(type.begin(), type.end(), type.begin(), ::toupper);
+
+    if (type == "DATABASES") {
+        q->type = ShowStatement::DATABASES;
+    } else if (type == "TABLES") {
+        q->type = ShowStatement::TABLES;
+    } else if (type == "COLUMNS") {
+        q->type = ShowStatement::COLUMNS;
+        if (match(KW_FROM) || match(KW_IN)) {
+            q->table_name = expect(IDENTIFIER).value;
+        } else {
+            throw std::runtime_error("Expected FROM or IN after SHOW COLUMNS");
+        }
+    } else if (type == "INDEX" || t.type == KW_INDEX) {
+        q->type = ShowStatement::INDEX;
+        if (match(KW_FROM) || match(KW_IN)) {
+            q->table_name = expect(IDENTIFIER).value;
+        } else {
+            throw std::runtime_error("Expected FROM or IN after SHOW INDEX");
+        }
+    } else if (type == "CREATE" || t.type == KW_CREATE) {
+        expect(KW_TABLE);
+        q->type = ShowStatement::CREATE_TABLE;
+        q->table_name = expect(IDENTIFIER).value;
+    } else {
+        throw std::runtime_error("Unknown SHOW command: SHOW " + type);
+    }
+
     match(SEMICOLON);
     return q;
 }

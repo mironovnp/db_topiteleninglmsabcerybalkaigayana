@@ -39,6 +39,13 @@ private:
     nlohmann::json execAlterTable(const AlterTableStatement* q);
     nlohmann::json execCreateIndex(const CreateIndexStatement* q);
     nlohmann::json execDropIndex(const DropIndexStatement* q);
+    nlohmann::json execShow(const ShowStatement* q);
+
+    nlohmann::json execShowDatabases();
+    nlohmann::json execShowTables();
+    nlohmann::json execShowColumns(const std::string& table_name);
+    nlohmann::json execShowIndex(const std::string& table_name);
+    nlohmann::json execShowCreateTable(const std::string& table_name);
 
     void requireDB() const;
 

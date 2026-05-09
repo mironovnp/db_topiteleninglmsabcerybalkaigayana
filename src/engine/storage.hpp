@@ -54,6 +54,7 @@ public:
     bool createDatabase(const std::string& db_name);
     bool dropDatabase(const std::string& db_name);
     bool databaseExists(const std::string& db_name) const;
+    std::vector<std::string> listDatabases() const;
 
     // Table
     bool createTable(const std::string& db_name, const TableSchema& schema);

@@ -72,7 +72,10 @@ public:
         std::cout << "\n>>> ФАЗА 15: Обработка ошибок и краевых случаев" << std::endl;
         test_errors_and_edge_cases();
 
-        std::cout << "\n>>> ФАЗА 16: Удаление БД" << std::endl;
+        std::cout << "\n>>> ФАЗА 16: Команды SHOW" << std::endl;
+        test_show_commands();
+
+        std::cout << "\n>>> ФАЗА 17: Удаление БД" << std::endl;
         test_drop_db();
 
         std::cout << "\n" << std::string(40, '=') << std::endl;
@@ -175,6 +178,7 @@ private:
 
     void test_ddl_and_errors() {
         assert_error("Запрос без базы данных", "CREATE TABLE t (id INT);", "No database selected");
+        assert_error("SHOW TABLES без базы", "SHOW TABLES;", "No database selected");
         assert_success("Создание БД test_db", "CREATE DATABASE test_db;");
         assert_success("Использование БД", "USE test_db;");
         assert_success("Создание таблицы users", "CREATE TABLE users (id INT PRIMARY KEY, name TEXT, age INT);");
@@ -473,6 +477,73 @@ private:
         assert_rows("Сравнение FLOAT", "SELECT id FROM types_table WHERE f > 10.0;", 1, {{"1"}});
         assert_rows("Поиск по BOOL", "SELECT id FROM types_table WHERE b = TRUE;", 1, {{"1"}});
         executor.execute("DROP TABLE types_table;");
+    }
+
+    void test_show_commands() {
+        // 1. SHOW DATABASES
+        // Should contain test_db
+        total_count++;
+        json res = executor.execute("SHOW DATABASES;");
+        bool found_db = false;
+        for (const auto& row : res["rows"]) {
+            if (row[0].get<std::string>() == "test_db") { found_db = true; break; }
+        }
+        if (found_db) {
+            std::cout << "  [OK] SHOW DATABASES содержит test_db" << std::endl;
+            passed_count++;
+        } else {
+            std::cerr << "  [FAIL] SHOW DATABASES не нашел test_db" << std::endl;
+        }
+
+        // 2. SHOW TABLES
+        // We don't know exact count because previous tests might have left some tables.
+        // Let's just check that users and orders exist.
+        total_count++;
+        res = executor.execute("SHOW TABLES;");
+        bool found_users = false, found_orders = false;
+        for (const auto& row : res["rows"]) {
+            if (row[0].get<std::string>() == "users") found_users = true;
+            if (row[0].get<std::string>() == "orders") found_orders = true;
+        }
+        if (found_users && found_orders) {
+            std::cout << "  [OK] SHOW TABLES содержит users и orders" << std::endl;
+            passed_count++;
+        } else {
+            std::cerr << "  [FAIL] SHOW TABLES не нашел нужные таблицы" << std::endl;
+        }
+        
+        // 3. SHOW COLUMNS
+        assert_rows("SHOW COLUMNS FROM users", "SHOW COLUMNS FROM users;", 3, {
+            {"id", "INT", "YES", "PRI", "NULL", ""},
+            {"name", "TEXT", "YES", "", "NULL", ""},
+            {"age", "INT", "YES", "", "NULL", ""}
+        });
+
+        // 4. SHOW INDEX
+        assert_rows("SHOW INDEX FROM users", "SHOW INDEX FROM users;", 2, {
+            {"users", "0", "PRIMARY", "1", "id"},
+            {"users", "1", "idx_name", "1", "name"}
+        });
+
+        // 5. SHOW CREATE TABLE
+        total_count++;
+        res = executor.execute("SHOW CREATE TABLE users;");
+        if (res["success"].get<bool>() && res["rows"].size() == 1) {
+            std::string sql = res["rows"][0][1];
+            if (sql.find("CREATE TABLE users") != std::string::npos && sql.find("id INT PRIMARY KEY") != std::string::npos) {
+                std::cout << "  [OK] SHOW CREATE TABLE users корректен" << std::endl;
+                passed_count++;
+            } else {
+                std::cerr << "  [FAIL] SHOW CREATE TABLE users вернул странный SQL: " << sql << std::endl;
+            }
+        } else {
+            std::cerr << "  [FAIL] SHOW CREATE TABLE users ошибка: " << res["message"] << std::endl;
+        }
+
+        // 6. Ошибки SHOW (с базой, но на несуществующих таблицах)
+        assert_error("SHOW COLUMNS для призрака", "SHOW COLUMNS FROM ghost_table;", "does not exist");
+        assert_error("SHOW INDEX для призрака", "SHOW INDEX FROM ghost_table;", "does not exist");
+        assert_error("SHOW CREATE TABLE для призрака", "SHOW CREATE TABLE ghost_table;", "does not exist");
     }
 };
 

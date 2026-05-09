@@ -48,6 +48,17 @@ bool Storage::databaseExists(const std::string& db_name) const {
     return std::filesystem::is_directory(dbPath(db_name));
 }
 
+std::vector<std::string> Storage::listDatabases() const {
+    std::vector<std::string> dbs;
+    if (!std::filesystem::exists(data_dir_)) return dbs;
+    for (const auto& entry : std::filesystem::directory_iterator(data_dir_)) {
+        if (entry.is_directory()) {
+            dbs.push_back(entry.path().filename().string());
+        }
+    }
+    return dbs;
+}
+
 // ── Schema serialization ──────────────────────────────────────────────
 //
 //  Meta page payload (after the 16-byte common header):
