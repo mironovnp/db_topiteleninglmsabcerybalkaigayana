@@ -58,6 +58,9 @@ public:
     bool databaseExists(const std::string& db_name) const;
     std::vector<std::string> listDatabases() const;
 
+    /// Root directory for a database (CSV paths relative to this).
+    std::filesystem::path databaseDirectory(const std::string& db_name) const;
+
     // Table
     bool createTable(const std::string& db_name, const TableSchema& schema);
     bool dropTable(const std::string& db_name, const std::string& table_name);

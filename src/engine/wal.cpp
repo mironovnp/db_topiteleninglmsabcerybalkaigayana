@@ -1,5 +1,5 @@
 #include "engine/wal.hpp"
-#include "engine/storage.hpp"
+#include "engine/storage/storage.hpp"
 #include <cstring>
 #include <filesystem>
 #include <stdexcept>

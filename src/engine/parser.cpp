@@ -14,6 +14,7 @@ static const std::unordered_map<std::string, TokenType> KEYWORDS = {
     {"CREATE",TokenType::KW_CREATE},{"DROP",TokenType::KW_DROP},{"DATABASE",TokenType::KW_DATABASE},{"TABLE",TokenType::KW_TABLE},
     {"SELECT",TokenType::KW_SELECT},{"FROM",TokenType::KW_FROM},{"WHERE",TokenType::KW_WHERE},
     {"INSERT",TokenType::KW_INSERT},{"INTO",TokenType::KW_INTO},{"VALUES",TokenType::KW_VALUES},
+    {"LOAD",TokenType::KW_LOAD},{"CSV",TokenType::KW_CSV},{"APPEND",TokenType::KW_APPEND},
     {"UPDATE",TokenType::KW_UPDATE},{"SET",TokenType::KW_SET},{"DELETE",TokenType::KW_DELETE},
     {"AND",TokenType::KW_AND},{"OR",TokenType::KW_OR},{"NOT",TokenType::KW_NOT},{"USE",TokenType::KW_USE},
     {"INT",TokenType::KW_INT},{"FLOAT",TokenType::KW_FLOAT},{"BOOL",TokenType::KW_BOOL},
@@ -176,6 +177,11 @@ std::unique_ptr<Statement> Parser::parse() {
     if (check(KW_ALTER)) { consume(); return parseAlterTable(); }
     if (check(KW_SELECT)) { consume(); return parseSelect(); }
     if (check(KW_INSERT)) { consume(); return parseInsert(); }
+    if (check(KW_LOAD)) {
+        consume();
+        expect(KW_CSV);
+        return parseLoadCsv();
+    }
     if (check(KW_UPDATE)) { consume(); return parseUpdate(); }
     if (check(KW_DELETE)) { consume(); return parseDelete(); }
     if (check(KW_USE))    { consume(); return parseUse(); }
@@ -323,6 +329,13 @@ std::unique_ptr<AlterTableStatement> Parser::parseAlterTable() {
             else break;
         }
         q->alter_col_def = cd;
+        if (match(KW_FROM)) {
+            expect(KW_CSV);
+            if (cur().type != STRING_LITERAL)
+                throw std::runtime_error(
+                    "ALTER TABLE ADD COLUMN FROM CSV: expected file path string literal");
+            q->add_column_csv_path = consume().value;
+        }
     } else if (check(KW_DROP)) {
         consume();
         match(KW_COLUMN);
@@ -774,6 +787,25 @@ std::unique_ptr<ShowStatement> Parser::parseShow() {
         throw std::runtime_error("Unknown SHOW command: SHOW " + type);
     }
 
+    match(SEMICOLON);
+    return q;
+}
+
+std::unique_ptr<LoadCsvStatement> Parser::parseLoadCsv() {
+    auto q = std::make_unique<LoadCsvStatement>();
+    if (cur().type != STRING_LITERAL)
+        throw std::runtime_error("LOAD CSV: expected file path string literal");
+    q->file_path = consume().value;
+    expect(KW_INTO);
+    q->table_name = expect(IDENTIFIER).value;
+    if (match(LPAREN)) {
+        do {
+            q->columns.push_back(expect(IDENTIFIER).value);
+        } while (match(COMMA));
+        expect(RPAREN);
+    }
+    if (match(KW_APPEND))
+        q->append = true;
     match(SEMICOLON);
     return q;
 }

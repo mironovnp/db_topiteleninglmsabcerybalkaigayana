@@ -1,5 +1,5 @@
 #pragma once
-#include "engine/storage.hpp"
+#include "engine/storage/storage.hpp"
 #include "engine/parser.hpp"
 #include <nlohmann/json.hpp>
 #include <string>
@@ -40,6 +40,14 @@ private:
     nlohmann::json execCreateIndex(const CreateIndexStatement* q);
     nlohmann::json execDropIndex(const DropIndexStatement* q);
     nlohmann::json execShow(const ShowStatement* q);
+    nlohmann::json execLoadCsv(const LoadCsvStatement* q);
+    nlohmann::json execAlterTableAddColumnFromCsv(const AlterTableStatement* q);
+
+    /// UNIQUE/PK/FK checks and physical insert (same path as INSERT tail).
+    nlohmann::json insertValidatedRows(const std::string& table_name, const TableSchema& s,
+                                       std::vector<Row> evaluated_rows);
+    void applyDefaultsAndAutoincrement(const TableSchema& s, const std::string& table_name, Row& r,
+                                       std::map<int, long>& last_ids);
 
     nlohmann::json execShowDatabases();
     nlohmann::json execShowTables();

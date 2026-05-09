@@ -1,7 +1,7 @@
 #include "engine/btree.hpp"
 #include "engine/cell_value.hpp"
 #include "engine/row_codec.hpp"
-#include "engine/storage.hpp"
+#include "engine/storage/storage.hpp"
 #include <algorithm>
 #include <stdexcept>
 
@@ -315,18 +315,13 @@ std::vector<Row> BPlusTree::scanRange(const std::optional<BTreeKey>& low,
         uint32_t n = pg->getNumRecords();
         for (uint32_t i = 0; i < n; ++i) {
             auto cv = readCell(*pg, i);
-            if (low.has_value()) {
+            if (low.has_value() || high.has_value()) {
                 BTreeKey stored;
                 if (!unpackKeyBlob(cv.key_blob, stored))
                     throw std::runtime_error("BPlusTree::scanRange: bad key");
-                if (compare_btree_keys_nav(stored, *low) < 0)
+                if (low.has_value() && compare_btree_keys_nav(stored, *low) < 0)
                     continue;
-            }
-            if (high.has_value()) {
-                BTreeKey stored;
-                if (!unpackKeyBlob(cv.key_blob, stored))
-                    throw std::runtime_error("BPlusTree::scanRange: bad key");
-                if (compare_btree_keys_nav(stored, *high) > 0) {
+                if (high.has_value() && compare_btree_keys_nav(stored, *high) > 0) {
                     done = true;
                     break;
                 }

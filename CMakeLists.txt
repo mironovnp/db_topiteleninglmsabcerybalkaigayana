@@ -25,7 +25,13 @@ FetchContent_MakeAvailable(json)
 
 # ── Engine (internal static lib) ──
 add_library(dbengine STATIC
-    src/engine/storage.cpp
+    src/engine/storage/storage.cpp
+    src/engine/storage/storage_pool.cpp
+    src/engine/storage/storage_internal.cpp
+    src/engine/storage/storage_schema.cpp
+    src/engine/storage/storage_table.cpp
+    src/engine/storage/storage_index.cpp
+    src/engine/storage/storage_wal.cpp
     src/engine/parser.cpp
     src/engine/executor.cpp
     src/engine/buffer_pool.cpp

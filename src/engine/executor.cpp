@@ -6,15 +6,34 @@
 #include <functional>
 #include <map>
 #include <set>
+#include <unordered_map>
 #include <iomanip>
 #include <sstream>
 
 #include <regex>
 #include <iostream>
+#include <fstream>
+#include <filesystem>
 
 namespace db {
 
 namespace {
+
+ColumnDef column_def_from_col_def(const ColDef& c) {
+    ColumnDef d;
+    d.name = c.name;
+    d.type = c.type;
+    d.not_null = c.not_null;
+    d.unique = c.unique;
+    d.has_default = c.has_default;
+    d.is_autoincrement = c.is_autoincrement;
+    d.default_value = c.default_value;
+    d.fk_ref_table = c.fk_ref_table;
+    d.fk_ref_column = c.fk_ref_column;
+    d.on_delete = c.on_delete;
+    d.on_update = c.on_update;
+    return d;
+}
 
 CellValue value_to_cell(const ColumnDef& col, const Value& v) {
     if (v.type == "NULL")
@@ -41,6 +60,107 @@ CellValue value_to_cell(const ColumnDef& col, const Value& v) {
 }
 
 } // namespace
+
+static std::string trim_csv_field(std::string s) {
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front())))
+        s.erase(s.begin());
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back())))
+        s.pop_back();
+    return s;
+}
+
+static bool column_type_is_text_like(const ColumnDef& col) {
+    if (col.type == "TEXT")
+        return true;
+    return col.type.size() >= 7 && col.type.compare(0, 7, "VARCHAR") == 0;
+}
+
+static std::vector<std::string> split_csv_line(const std::string& line) {
+    std::vector<std::string> fields;
+    std::string cur;
+    bool in_quotes = false;
+    for (size_t i = 0; i < line.size(); ++i) {
+        char c = line[i];
+        if (in_quotes) {
+            if (c == '"') {
+                if (i + 1 < line.size() && line[i + 1] == '"') {
+                    cur += '"';
+                    ++i;
+                } else {
+                    in_quotes = false;
+                }
+            } else {
+                cur += c;
+            }
+        } else {
+            if (c == '"')
+                in_quotes = true;
+            else if (c == ',') {
+                fields.push_back(cur);
+                cur.clear();
+            } else {
+                cur += c;
+            }
+        }
+    }
+    fields.push_back(cur);
+    return fields;
+}
+
+static CellValue cell_from_csv_field(const ColumnDef& col, const std::string& raw) {
+    std::string s = trim_csv_field(raw);
+    if (s.empty()) {
+        if (column_type_is_text_like(col))
+            return CellPrimitive{std::string{}};
+        return std::nullopt;
+    }
+    return coerce_string_to_cell_column(col, s, column_type_is_text_like(col));
+}
+
+static std::filesystem::path resolve_csv_path(const Storage& storage, const std::string& db_name,
+                                              const std::string& literal_path) {
+    std::filesystem::path p(literal_path);
+    if (p.is_absolute())
+        return p;
+    return storage.databaseDirectory(db_name) / p;
+}
+
+static std::string strip_utf8_bom(std::string line) {
+    if (line.size() >= 3 && static_cast<unsigned char>(line[0]) == 0xEF &&
+        static_cast<unsigned char>(line[1]) == 0xBB && static_cast<unsigned char>(line[2]) == 0xBF)
+        return line.substr(3);
+    return line;
+}
+
+static std::string strip_cr(std::string line) {
+    if (!line.empty() && line.back() == '\r')
+        line.pop_back();
+    return line;
+}
+
+static std::string read_file_all(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in)
+        throw std::runtime_error("Cannot open file: " + path.string());
+    std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    return data;
+}
+
+static std::vector<std::string> split_lines_unix(const std::string& data) {
+    std::vector<std::string> lines;
+    size_t start = 0;
+    for (size_t i = 0; i < data.size(); ++i) {
+        if (data[i] == '\n') {
+            lines.push_back(data.substr(start, i - start));
+            start = i + 1;
+        }
+    }
+    if (start < data.size())
+        lines.push_back(data.substr(start));
+    else if (!data.empty() && data.back() == '\n')
+        lines.push_back("");
+    return lines;
+}
 
 static std::string formatFloat(double val) {
     std::ostringstream out;
@@ -311,6 +431,7 @@ json Executor::execute(const std::string& sql) {
         if (auto q = dynamic_cast<DropIndexStatement*>(query.get())) return execDropIndex(q);
         if (auto q = dynamic_cast<SelectStatement*>(query.get())) return execSelect(q);
         if (auto q = dynamic_cast<InsertStatement*>(query.get())) return execInsert(q);
+        if (auto q = dynamic_cast<LoadCsvStatement*>(query.get())) return execLoadCsv(q);
         if (auto q = dynamic_cast<UpdateStatement*>(query.get())) return execUpdate(q);
         if (auto q = dynamic_cast<DeleteStatement*>(query.get())) return execDelete(q);
         if (auto q = dynamic_cast<ShowStatement*>(query.get())) return execShow(q);
@@ -354,9 +475,188 @@ json Executor::execDropTable(const DropTableStatement* q) {
     throw std::runtime_error("Table '" + q->table_name + "' does not exist");
 }
 json Executor::execAlterTable(const AlterTableStatement* q) {
-    if (q->alter_action == AlterAction::ADD_COL) { if (storage_.alterTableAddColumn(current_db_, q->table_name, {q->alter_col_name, q->alter_col_type})) return ok("Added."); }
-    else { if (storage_.alterTableDropColumn(current_db_, q->table_name, q->alter_col_name)) return ok("Dropped."); }
+    requireDB();
+    if (q->alter_action == AlterAction::ADD_COL) {
+        if (!q->add_column_csv_path.empty())
+            return execAlterTableAddColumnFromCsv(q);
+        if (storage_.alterTableAddColumn(current_db_, q->table_name, column_def_from_col_def(q->alter_col_def)))
+            return ok("Added.");
+        return err("Failed.");
+    }
+    if (storage_.alterTableDropColumn(current_db_, q->table_name, q->alter_col_name))
+        return ok("Dropped.");
     return err("Failed.");
+}
+
+json Executor::execAlterTableAddColumnFromCsv(const AlterTableStatement* q) {
+    const ColumnDef new_cd = column_def_from_col_def(q->alter_col_def);
+    if (new_cd.is_autoincrement)
+        return err("ALTER TABLE ADD COLUMN ... FROM CSV: AUTOINCREMENT is not supported for this form.");
+
+    auto s_before = storage_.getTableSchema(current_db_, q->table_name);
+    const int pk_idx = s_before.primary_key_index;
+    if (pk_idx < 0 || pk_idx >= static_cast<int>(s_before.columns.size()))
+        return err("ALTER TABLE ADD COLUMN FROM CSV: invalid primary key index.");
+
+    for (const auto& col : s_before.columns) {
+        if (col.name == new_cd.name)
+            return err("Column already exists: " + new_cd.name);
+    }
+
+    const std::string& pk_name = s_before.columns[static_cast<size_t>(pk_idx)].name;
+
+    std::filesystem::path fpath = resolve_csv_path(storage_, current_db_, q->add_column_csv_path);
+    std::string raw;
+    try {
+        raw = read_file_all(fpath);
+    } catch (const std::exception& e) {
+        return err(e.what());
+    }
+    if (raw.empty())
+        return err("CSV file is empty");
+
+    std::vector<std::string> lines = split_lines_unix(raw);
+    if (lines.size() < 2)
+        return err("ALTER TABLE ADD COLUMN FROM CSV: need a header row and at least one data row");
+
+    std::string header_line = strip_cr(strip_utf8_bom(lines[0]));
+    std::vector<std::string> header_fields = split_csv_line(header_line);
+    if (header_fields.size() != 2)
+        return err("ALTER TABLE ADD COLUMN FROM CSV: header must contain exactly two columns: "
+                   "primary key '" +
+                   pk_name + "' and new column '" + new_cd.name + "'");
+
+    std::string h0 = trim_csv_field(header_fields[0]);
+    std::string h1 = trim_csv_field(header_fields[1]);
+    if ((h0 == pk_name && h1 == new_cd.name) || (h1 == pk_name && h0 == new_cd.name)) {
+        // ok
+    } else {
+        return err("ALTER TABLE ADD COLUMN FROM CSV: header must be exactly '" + pk_name + "' and '" +
+                   new_cd.name + "'");
+    }
+    const int pk_csv_idx = (h0 == pk_name) ? 0 : 1;
+    const int new_csv_idx = 1 - pk_csv_idx;
+
+    std::map<std::string, std::string> pk_to_new_raw;
+    for (size_t li = 1; li < lines.size(); ++li) {
+        std::string line = strip_cr(lines[li]);
+        if (trim_csv_field(line).empty())
+            continue;
+
+        std::vector<std::string> fields = split_csv_line(line);
+        if (fields.size() != 2) {
+            return err("ALTER TABLE ADD COLUMN FROM CSV: row " + std::to_string(li + 1) +
+                       " must have exactly 2 fields");
+        }
+        std::string pk_raw = trim_csv_field(fields[static_cast<size_t>(pk_csv_idx)]);
+        std::string new_raw = fields[static_cast<size_t>(new_csv_idx)];
+        if (pk_to_new_raw.count(pk_raw))
+            return err("ALTER TABLE ADD COLUMN FROM CSV: duplicate primary key in file: " + pk_raw);
+        pk_to_new_raw[pk_raw] = new_raw;
+    }
+
+    if (pk_to_new_raw.empty())
+        return err("ALTER TABLE ADD COLUMN FROM CSV: no data rows");
+
+    auto existing_rows = storage_.readAllRows(current_db_, q->table_name);
+    std::set<std::string> pk_in_table;
+    for (const auto& row : existing_rows) {
+        if (pk_idx >= static_cast<int>(row.size()))
+            return err("ALTER TABLE ADD COLUMN FROM CSV: internal row/pk mismatch");
+        pk_in_table.insert(cell_to_where_string(row[static_cast<size_t>(pk_idx)]));
+    }
+
+    if (pk_to_new_raw.size() != pk_in_table.size())
+        return err("ALTER TABLE ADD COLUMN FROM CSV: CSV row count (" +
+                   std::to_string(pk_to_new_raw.size()) + ") must equal table row count (" +
+                   std::to_string(pk_in_table.size()) + ")");
+
+    for (const auto& kv : pk_to_new_raw) {
+        if (!pk_in_table.count(kv.first))
+            return err("ALTER TABLE ADD COLUMN FROM CSV: primary key not in table: " + kv.first);
+    }
+
+    if (!storage_.alterTableAddColumn(current_db_, q->table_name, new_cd))
+        return err("ALTER TABLE ADD COLUMN failed (duplicate column or table missing).");
+
+    auto s_after = storage_.getTableSchema(current_db_, q->table_name);
+    const int new_col_idx = static_cast<int>(s_after.columns.size()) - 1;
+    if (s_after.columns[static_cast<size_t>(new_col_idx)].name != new_cd.name)
+        return err("ALTER TABLE ADD COLUMN FROM CSV: internal schema mismatch");
+
+    std::vector<Row> rows_after = storage_.readAllRows(current_db_, q->table_name);
+    std::vector<std::pair<Row, Row>> updates;
+    updates.reserve(rows_after.size());
+
+    for (const auto& row : rows_after) {
+        std::string pk_lex = cell_to_where_string(row[static_cast<size_t>(pk_idx)]);
+        auto it = pk_to_new_raw.find(pk_lex);
+        if (it == pk_to_new_raw.end())
+            return err("ALTER TABLE ADD COLUMN FROM CSV: missing CSV row for pk: " + pk_lex);
+
+        CellValue new_cell = cell_from_csv_field(s_after.columns[static_cast<size_t>(new_col_idx)], it->second);
+        if (new_cd.not_null && !new_cell.has_value())
+            return err("NOT NULL violation for new column '" + new_cd.name + "' at pk " + pk_lex);
+
+        Row new_row = row;
+        new_row[static_cast<size_t>(new_col_idx)] = std::move(new_cell);
+        updates.push_back({row, std::move(new_row)});
+    }
+
+    if (new_cd.unique) {
+        std::set<std::string> seen;
+        for (const auto& pr : updates) {
+            const auto& v = pr.second[static_cast<size_t>(new_col_idx)];
+            if (!v.has_value())
+                continue;
+            std::string lex = cell_to_where_string(v);
+            if (!seen.insert(lex).second)
+                return err("UNIQUE constraint violation on new column value: " + lex);
+        }
+    }
+
+    const ColumnDef& new_col_def = s_after.columns[static_cast<size_t>(new_col_idx)];
+    if (!new_col_def.fk_ref_table.empty()) {
+        TableSchema ps = storage_.getTableSchema(current_db_, new_col_def.fk_ref_table);
+        int pi = colIndex(ps, "", new_col_def.fk_ref_column);
+        if (pi < 0) throw std::runtime_error("Invalid FK reference column");
+        for (const auto& pr : updates) {
+            const Row& new_row = pr.second;
+            if (!new_row[static_cast<size_t>(new_col_idx)].has_value())
+                continue;
+            const std::string val =
+                cell_to_where_string(new_row[static_cast<size_t>(new_col_idx)]);
+            bool found = false;
+            if (pi == ps.primary_key_index) {
+                if (!storage_.findRow(current_db_, new_col_def.fk_ref_table, val).empty())
+                    found = true;
+            } else if (storage_.hasIndex(current_db_, new_col_def.fk_ref_table,
+                                         new_col_def.fk_ref_column)) {
+                if (!storage_.indexLookup(current_db_, new_col_def.fk_ref_table,
+                                          new_col_def.fk_ref_column, val)
+                         .empty())
+                    found = true;
+            } else {
+                auto prs = storage_.readAllRows(current_db_, new_col_def.fk_ref_table);
+                for (const auto& pr2 : prs) {
+                    if (cell_to_where_string(pr2[pi]) == val) {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if (!found)
+                return err("FOREIGN KEY violation: value '" + val + "' not found in " +
+                           new_col_def.fk_ref_table);
+        }
+    }
+
+    for (const auto& pr : updates) {
+        performUpdate(current_db_, q->table_name, s_after, pr.first, pr.second);
+        storage_.upsertClusterRowWal(current_db_, q->table_name, s_after, &pr.first, pr.second);
+    }
+
+    return ok("Added column and updated " + std::to_string(updates.size()) + " row(s) from CSV.");
 }
 json Executor::execCreateIndex(const CreateIndexStatement* q) { if (storage_.createIndex(current_db_, q->table_name, q->index_name, q->column_name)) return ok("Created."); return err("Failed."); }
 json Executor::execDropIndex(const DropIndexStatement* q) { if (storage_.dropIndex(current_db_, q->table_name, q->index_name)) return ok("Dropped."); return err("Failed."); }
@@ -457,97 +757,67 @@ json Executor::execShowCreateTable(const std::string& table_name) {
     return {{"success", true}, {"columns", {"Table", "Create Table"}}, {"rows", rows}};
 }
 
-json Executor::execInsert(const InsertStatement* q) {
-    auto s = storage_.getTableSchema(current_db_, q->table_name);
-    std::vector<Row> evaluated_rows;
-    
-    std::map<int, long> last_ids; // Reset for each INSERT statement
-
-    for (auto& ivs : q->insert_values) {
-        Row r(s.columns.size());
-        if (q->insert_columns.empty()) {
-            for (size_t i = 0; i < ivs.size() && i < r.size(); ++i) {
-                r[i] = value_to_cell(s.columns[i], evaluateExpression(ivs[i].get(), Row(), s));
-            }
-        } else {
-            for (size_t i = 0; i < ivs.size() && i < q->insert_columns.size(); ++i) {
-                int idx = colIndex(s, "", q->insert_columns[i]);
-                if (idx < 0) throw std::runtime_error("Unknown column: " + q->insert_columns[i]);
-                r[static_cast<size_t>(idx)] =
-                    value_to_cell(s.columns[static_cast<size_t>(idx)],
-                                  evaluateExpression(ivs[i].get(), Row(), s));
-            }
-        }
-
-        // Apply DEFAULTS and AUTO_INCREMENT
-        for (size_t i = 0; i < s.columns.size(); ++i) {
-            if (!r[i].has_value()) {
-                if (s.columns[i].is_autoincrement) {
-                    if (last_ids.find(static_cast<int>(i)) == last_ids.end()) {
-                        long max_id = 0;
-                        auto all_rows = storage_.readAllRows(current_db_, q->table_name);
-                        for (const auto& ar : all_rows) {
-                            try {
-                                if (i < ar.size() && ar[i].has_value()) {
-                                    long id = std::stol(cell_to_where_string(ar[i]));
-                                    if (id > max_id) max_id = id;
-                                }
-                            } catch (...) {
+void Executor::applyDefaultsAndAutoincrement(const TableSchema& s, const std::string& table_name,
+                                            Row& r, std::map<int, long>& last_ids) {
+    for (size_t i = 0; i < s.columns.size(); ++i) {
+        if (!r[i].has_value()) {
+            if (s.columns[i].is_autoincrement) {
+                if (last_ids.find(static_cast<int>(i)) == last_ids.end()) {
+                    long max_id = 0;
+                    auto all_rows = storage_.readAllRows(current_db_, table_name);
+                    for (const auto& ar : all_rows) {
+                        try {
+                            if (i < ar.size() && ar[i].has_value()) {
+                                long id = std::stol(cell_to_where_string(ar[i]));
+                                if (id > max_id) max_id = id;
                             }
+                        } catch (...) {
                         }
-                        last_ids[static_cast<int>(i)] = max_id;
                     }
-                    r[i] = CellPrimitive{static_cast<int64_t>(++last_ids[static_cast<int>(i)])};
-                } else if (s.columns[i].has_default) {
-                    r[i] = coerce_string_to_cell_column(s.columns[i], s.columns[i].default_value,
-                                                        false);
+                    last_ids[static_cast<int>(i)] = max_id;
                 }
+                r[i] = CellPrimitive{static_cast<int64_t>(++last_ids[static_cast<int>(i)])};
+            } else if (s.columns[i].has_default) {
+                r[i] = coerce_string_to_cell_column(s.columns[i], s.columns[i].default_value, false);
             }
         }
-
-        for (size_t i = 0; i < s.columns.size(); ++i) {
-            if (s.columns[i].not_null && !r[i].has_value()) {
-                return err("NOT NULL constraint violation: column '" + s.columns[i].name + "'");
-            }
-        }
-        evaluated_rows.push_back(std::move(r));
     }
+}
 
-    // 2. Проверяем UNIQUE и PRIMARY KEY
-    std::vector<Row> current_table_data; // Кэш для проверки без индексов
+json Executor::insertValidatedRows(const std::string& table_name, const TableSchema& s,
+                                   std::vector<Row> evaluated_rows) {
+    std::vector<Row> current_table_data;
     bool table_data_loaded = false;
 
     for (size_t row_idx = 0; row_idx < evaluated_rows.size(); ++row_idx) {
         const auto& r = evaluated_rows[row_idx];
-        
+
         for (size_t i = 0; i < s.columns.size(); ++i) {
-            if (s.columns[i].unique || (int)i == s.primary_key_index) {
+            if (s.columns[i].unique || static_cast<int>(i) == s.primary_key_index) {
                 if (!r[i].has_value())
                     continue;
 
                 const std::string val = cell_to_where_string(r[i]);
 
-                // Проверка во вставляемых данных (в рамках одного запроса)
                 for (size_t prev_idx = 0; prev_idx < row_idx; ++prev_idx) {
                     if (cell_to_where_string(evaluated_rows[prev_idx][i]) == val) {
-                        return err("UNIQUE constraint violation: duplicate value '" + val + "' in insert list");
+                        return err("UNIQUE constraint violation: duplicate value '" + val +
+                                   "' in insert list");
                     }
                 }
 
-                // Проверка в существующих данных
-                if ((int)i == s.primary_key_index) {
-                    if (!storage_.findRow(current_db_, q->table_name, val).empty()) {
+                if (static_cast<int>(i) == s.primary_key_index) {
+                    if (!storage_.findRow(current_db_, table_name, val).empty()) {
                         return err("PRIMARY KEY violation: duplicate key '" + val + "'");
                     }
-                } else if (storage_.hasIndex(current_db_, q->table_name, s.columns[i].name)) {
-                    if (!storage_.indexLookup(current_db_, q->table_name, s.columns[i].name, val)
-                             .empty()) {
+                } else if (storage_.hasIndex(current_db_, table_name, s.columns[i].name)) {
+                    if (!storage_.indexLookup(current_db_, table_name, s.columns[i].name, val).empty()) {
                         return err("UNIQUE constraint violation: duplicate value '" + val +
                                    "' in column '" + s.columns[i].name + "'");
                     }
                 } else {
                     if (!table_data_loaded) {
-                        current_table_data = storage_.readAllRows(current_db_, q->table_name);
+                        current_table_data = storage_.readAllRows(current_db_, table_name);
                         table_data_loaded = true;
                     }
                     for (const auto& tr : current_table_data) {
@@ -561,14 +831,17 @@ json Executor::execInsert(const InsertStatement* q) {
         }
     }
 
-    // 3. Проверяем FOREIGN KEY
+    std::unordered_map<std::string, TableSchema> fk_parent_schemas;
     for (const auto& r : evaluated_rows) {
         for (size_t i = 0; i < s.columns.size(); ++i) {
             if (!s.columns[i].fk_ref_table.empty()) {
                 if (!r[i].has_value())
                     continue;
                 const std::string val = cell_to_where_string(r[i]);
-                auto ps = storage_.getTableSchema(current_db_, s.columns[i].fk_ref_table);
+                const std::string& ref_t = s.columns[i].fk_ref_table;
+                auto em = fk_parent_schemas.try_emplace(ref_t,
+                    storage_.getTableSchema(current_db_, ref_t));
+                const TableSchema& ps = em.first->second;
                 int pi = colIndex(ps, "", s.columns[i].fk_ref_column);
                 if (pi < 0) throw std::runtime_error("Invalid FK reference column");
                 bool found = false;
@@ -576,7 +849,7 @@ json Executor::execInsert(const InsertStatement* q) {
                     if (!storage_.findRow(current_db_, s.columns[i].fk_ref_table, val).empty())
                         found = true;
                 } else if (storage_.hasIndex(current_db_, s.columns[i].fk_ref_table,
-                                             s.columns[i].fk_ref_column)) {
+                                               s.columns[i].fk_ref_column)) {
                     if (!storage_.indexLookup(current_db_, s.columns[i].fk_ref_table,
                                               s.columns[i].fk_ref_column, val)
                              .empty())
@@ -597,15 +870,164 @@ json Executor::execInsert(const InsertStatement* q) {
         }
     }
 
-    // 4. Если всё ок — вставляем
     int c = 0;
     for (auto& r : evaluated_rows) {
-        if (storage_.appendRows(current_db_, q->table_name, {r}) > 0) {
-            storage_.indexInsertRow(current_db_, q->table_name, s, r);
-            c++;
+        if (storage_.appendRows(current_db_, table_name, {r}) > 0) {
+            storage_.indexInsertRow(current_db_, table_name, s, r);
+            ++c;
         }
     }
     return ok(std::to_string(c) + " inserted.");
+}
+
+json Executor::execInsert(const InsertStatement* q) {
+    auto s = storage_.getTableSchema(current_db_, q->table_name);
+    std::vector<Row> evaluated_rows;
+
+    std::map<int, long> last_ids;
+
+    for (auto& ivs : q->insert_values) {
+        Row r(s.columns.size());
+        if (q->insert_columns.empty()) {
+            for (size_t i = 0; i < ivs.size() && i < r.size(); ++i) {
+                r[i] = value_to_cell(s.columns[i], evaluateExpression(ivs[i].get(), Row(), s));
+            }
+        } else {
+            for (size_t i = 0; i < ivs.size() && i < q->insert_columns.size(); ++i) {
+                int idx = colIndex(s, "", q->insert_columns[i]);
+                if (idx < 0) throw std::runtime_error("Unknown column: " + q->insert_columns[i]);
+                r[static_cast<size_t>(idx)] =
+                    value_to_cell(s.columns[static_cast<size_t>(idx)],
+                                  evaluateExpression(ivs[i].get(), Row(), s));
+            }
+        }
+
+        applyDefaultsAndAutoincrement(s, q->table_name, r, last_ids);
+
+        for (size_t i = 0; i < s.columns.size(); ++i) {
+            if (s.columns[i].not_null && !r[i].has_value()) {
+                return err("NOT NULL constraint violation: column '" + s.columns[i].name + "'");
+            }
+        }
+        evaluated_rows.push_back(std::move(r));
+    }
+
+    return insertValidatedRows(q->table_name, s, std::move(evaluated_rows));
+}
+
+json Executor::execLoadCsv(const LoadCsvStatement* q) {
+    requireDB();
+    if (!storage_.tableExists(current_db_, q->table_name))
+        return err("Table does not exist: " + q->table_name);
+
+    auto s = storage_.getTableSchema(current_db_, q->table_name);
+
+    if (!q->append) {
+        auto existing = storage_.readAllRows(current_db_, q->table_name);
+        if (!existing.empty()) {
+            return err(
+                "LOAD CSV: table '" + q->table_name +
+                "' is not empty. Existing rows are never deleted by LOAD CSV; use APPEND to add "
+                "rows from the file.");
+        }
+    }
+
+    std::filesystem::path fpath = resolve_csv_path(storage_, current_db_, q->file_path);
+
+    std::string raw;
+    try {
+        raw = read_file_all(fpath);
+    } catch (const std::exception& e) {
+        return err(e.what());
+    }
+
+    if (raw.empty())
+        return err("CSV file is empty");
+
+    std::vector<std::string> lines = split_lines_unix(raw);
+    if (lines.empty())
+        return err("CSV has no lines");
+
+    std::string header_line = strip_cr(strip_utf8_bom(lines[0]));
+    std::vector<std::string> header_fields = split_csv_line(header_line);
+    if (header_fields.empty())
+        return err("CSV header is empty");
+
+    std::vector<int> table_col_per_csv;
+    std::set<int> used_table_cols;
+    for (const auto& hf : header_fields) {
+        std::string col_name = trim_csv_field(hf);
+        int ti = colIndex(s, "", col_name);
+        if (ti < 0)
+            return err("Unknown column in CSV header: " + col_name);
+        if (!q->columns.empty()) {
+            bool allowed = false;
+            for (const auto& listed : q->columns) {
+                if (s.columns[static_cast<size_t>(ti)].name == listed) {
+                    allowed = true;
+                    break;
+                }
+            }
+            if (!allowed)
+                return err("CSV column not allowed by LOAD list: " + col_name);
+        }
+        if (!used_table_cols.insert(ti).second)
+            return err("Duplicate column in CSV header: " + col_name);
+        table_col_per_csv.push_back(ti);
+    }
+
+    if (q->columns.empty()) {
+        if (used_table_cols.size() != s.columns.size())
+            return err("CSV must include every table column exactly once");
+    } else {
+        if (used_table_cols.size() != q->columns.size())
+            return err("CSV header columns must match LOAD column list");
+        for (const auto& listed : q->columns) {
+            int lix = colIndex(s, "", listed);
+            if (lix < 0)
+                return err("Unknown column in LOAD list: " + listed);
+            if (!used_table_cols.count(lix))
+                return err("LOAD column missing from CSV header: " + listed);
+        }
+    }
+
+    std::vector<Row> evaluated_rows;
+    std::map<int, long> last_ids;
+
+    for (size_t li = 1; li < lines.size(); ++li) {
+        std::string line = strip_cr(lines[li]);
+        if (trim_csv_field(line).empty())
+            continue;
+
+        std::vector<std::string> fields = split_csv_line(line);
+        if (fields.size() != header_fields.size()) {
+            return err("CSV row " + std::to_string(li + 1) + ": expected " +
+                       std::to_string(header_fields.size()) + " fields, got " +
+                       std::to_string(fields.size()));
+        }
+
+        Row r(s.columns.size());
+        for (size_t j = 0; j < fields.size(); ++j) {
+            int ti = table_col_per_csv[j];
+            r[static_cast<size_t>(ti)] =
+                cell_from_csv_field(s.columns[static_cast<size_t>(ti)], fields[j]);
+        }
+
+        applyDefaultsAndAutoincrement(s, q->table_name, r, last_ids);
+
+        for (size_t i = 0; i < s.columns.size(); ++i) {
+            if (s.columns[i].not_null && !r[i].has_value()) {
+                return err("NOT NULL constraint violation at CSV row " + std::to_string(li + 1) +
+                           ": column '" + s.columns[i].name + "'");
+            }
+        }
+        evaluated_rows.push_back(std::move(r));
+    }
+
+    if (evaluated_rows.empty())
+        return ok("0 rows loaded (no data rows).");
+
+    return insertValidatedRows(q->table_name, s, std::move(evaluated_rows));
 }
 json Executor::execUpdate(const UpdateStatement* q) {
     requireDB();

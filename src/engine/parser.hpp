@@ -2,7 +2,7 @@
 #include <string>
 #include <vector>
 #include <memory>
-#include "engine/storage.hpp"
+#include "engine/storage/storage.hpp"
 
 namespace db {
 
@@ -11,7 +11,7 @@ namespace db {
 enum class TokenType {
     KW_CREATE, KW_DROP, KW_DATABASE, KW_TABLE,
     KW_SELECT, KW_FROM, KW_WHERE,
-    KW_INSERT, KW_INTO, KW_VALUES,
+    KW_INSERT, KW_INTO, KW_VALUES, KW_LOAD, KW_CSV, KW_APPEND,
     KW_UPDATE, KW_SET, KW_DELETE,
     KW_AND, KW_OR, KW_NOT, KW_USE,
     KW_INT, KW_FLOAT, KW_BOOL, KW_TEXT, KW_VARCHAR,
@@ -228,6 +228,8 @@ public:
     std::string alter_col_name;
     std::string alter_col_type;
     ColDef alter_col_def;
+    /// If set: after ADD COLUMN, fill the new column from CSV (PK column + new column in header).
+    std::string add_column_csv_path;
 };
 
 class CreateIndexStatement : public Statement {
@@ -281,6 +283,17 @@ public:
     std::unique_ptr<Expression> where;
 };
 
+/// LOAD CSV 'path' INTO table_name [ ( col1, col2, ... ) ] [ APPEND ]
+/// Without APPEND: table must be empty. With APPEND: rows are appended; header must match schema rules.
+class LoadCsvStatement : public Statement {
+public:
+    std::string file_path;
+    std::string table_name;
+    /// If empty, CSV header must list all table columns.
+    std::vector<std::string> columns;
+    bool append = false;
+};
+
 class ShowStatement : public Statement {
 public:
     enum Type { DATABASES, TABLES, COLUMNS, INDEX, CREATE_TABLE };
@@ -332,6 +345,7 @@ private:
     std::unique_ptr<CreateIndexStatement> parseCreateIndex();
     std::unique_ptr<DropIndexStatement> parseDropIndex();
     std::unique_ptr<ShowStatement> parseShow();
+    std::unique_ptr<LoadCsvStatement> parseLoadCsv();
 
     QualifiedCol parseQualifiedCol();
 

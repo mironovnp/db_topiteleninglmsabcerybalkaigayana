@@ -3,11 +3,12 @@
 #include "engine/page.hpp"
 #include "engine/cell_value.hpp"
 #include "engine/row_codec.hpp"
-#include "engine/storage.hpp"
+#include "engine/storage/storage.hpp"
 #include <iostream>
 #include <string>
 #include <vector>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <nlohmann/json.hpp>
 
@@ -94,6 +95,13 @@ public:
 
         std::cout << "\n>>> ФАЗА 21: Типизированные ключи B+-дерева (wire, legacy, compare)" << std::endl;
         test_btree_typed_keys();
+
+        std::cout << "\n>>> ФАЗА 22: LOAD CSV" << std::endl;
+        test_load_csv();
+        test_load_csv_nonempty_and_append();
+
+        std::cout << "\n>>> ФАЗА 23: ALTER ADD COLUMN FROM CSV" << std::endl;
+        test_alter_add_column_from_csv();
 
         std::cout << "\n" << std::string(40, '=') << std::endl;
         std::cout << "ИТОГО: " << passed_count << "/" << total_count << " тестов пройдено." << std::endl;
@@ -886,6 +894,166 @@ private:
         check("compare_cell_values: NULL sorts before non-NULL",
               db::compare_cell_values(std::nullopt, db::CellPrimitive{int64_t{0}}) < 0 &&
                   db::compare_cell_values(db::CellPrimitive{int64_t{0}}, std::nullopt) > 0);
+    }
+
+    void test_load_csv() {
+        try {
+            const std::string db_name = "csv_load_db";
+            const std::string csv_name = "batch_import.csv";
+            std::filesystem::path csv_path = std::filesystem::path(data_dir) / db_name / csv_name;
+
+            assert_success("Создание БД для LOAD CSV", "CREATE DATABASE " + db_name + ";");
+            assert_success("USE для LOAD CSV", "USE " + db_name + ";");
+            assert_success("Таблица для LOAD CSV",
+                             "CREATE TABLE csv_t (id INT PRIMARY KEY, name TEXT, age INT);");
+
+            std::filesystem::create_directories(csv_path.parent_path());
+            {
+                std::ofstream out(csv_path);
+                out << "age,id,name\n";
+                out << "40,100,Zeta\n";
+                out << "22,101,\"Quoted, Name\"\n";
+            }
+
+            json res = executor.execute("LOAD CSV '" + csv_name + "' INTO csv_t;");
+            bool ok_load = res["success"].get<bool>();
+
+            json sel = executor.execute("SELECT id, name FROM csv_t ORDER BY id;");
+            bool rows_ok = false;
+            if (sel["success"].get<bool>() && sel.contains("rows") && sel["rows"].is_array() &&
+                sel["rows"].size() == 2) {
+                rows_ok = (sel["rows"][0][0].get<std::string>() == "100" &&
+                            sel["rows"][0][1].get<std::string>() == "Zeta" &&
+                            sel["rows"][1][0].get<std::string>() == "101" &&
+                            sel["rows"][1][1].get<std::string>() == "Quoted, Name");
+            }
+
+            assert_success("Очистка LOAD CSV", "DROP TABLE csv_t; DROP DATABASE " + db_name + ";");
+            std::error_code ec;
+            std::filesystem::remove_all(std::filesystem::path(data_dir) / db_name, ec);
+
+            total_count++;
+            if (ok_load && rows_ok) {
+                std::cout << "  [OK] LOAD CSV (relative path, header order, quoted field)" << std::endl;
+                passed_count++;
+            } else {
+                std::cerr << "  [FAIL] LOAD CSV: ok=" << ok_load << " res=" << res.dump()
+                          << " sel=" << sel.dump() << std::endl;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "  [FAIL] test_load_csv exception: " << e.what() << std::endl;
+        }
+    }
+
+    void test_load_csv_nonempty_and_append() {
+        try {
+            const std::string db_name = "csv_append_db";
+            const std::string csv_name = "more_rows.csv";
+            std::filesystem::path csv_path = std::filesystem::path(data_dir) / db_name / csv_name;
+
+            assert_success("БД для LOAD CSV APPEND", "CREATE DATABASE " + db_name + ";");
+            assert_success("USE csv_append_db", "USE " + db_name + ";");
+            assert_success("Таблица для APPEND",
+                           "CREATE TABLE csv_append_t (id INT PRIMARY KEY, name TEXT, age INT);");
+            assert_success("Первая строка до CSV", "INSERT INTO csv_append_t (id, name, age) VALUES (1, 'First', 99);");
+
+            std::filesystem::create_directories(csv_path.parent_path());
+            {
+                std::ofstream out(csv_path);
+                out << "name,age,id\n";
+                out << "Second,20,2\n";
+            }
+
+            json reject = executor.execute("LOAD CSV '" + csv_name + "' INTO csv_append_t;");
+            bool rejected = !reject["success"].get<bool>();
+            std::string msg = reject.value("message", "");
+            bool msg_ok = msg.find("not empty") != std::string::npos || msg.find("APPEND") != std::string::npos;
+
+            json ok_append =
+                executor.execute("LOAD CSV '" + csv_name + "' INTO csv_append_t APPEND;");
+            bool append_ok = ok_append["success"].get<bool>();
+
+            json cnt = executor.execute("SELECT COUNT(*) FROM csv_append_t;");
+            bool count_ok = false;
+            if (cnt["success"].get<bool>() && cnt.contains("rows") && cnt["rows"].is_array() &&
+                !cnt["rows"].empty()) {
+                count_ok = (cnt["rows"][0][0].get<std::string>() == "2");
+            }
+
+            assert_success("Очистка APPEND-теста",
+                           "DROP TABLE csv_append_t; DROP DATABASE " + db_name + ";");
+            std::error_code ec;
+            std::filesystem::remove_all(std::filesystem::path(data_dir) / db_name, ec);
+
+            total_count++;
+            if (rejected && msg_ok && append_ok && count_ok) {
+                std::cout << "  [OK] LOAD CSV: отказ если таблица не пуста; APPEND добавляет строки"
+                          << std::endl;
+                passed_count++;
+            } else {
+                std::cerr << "  [FAIL] LOAD CSV APPEND: rejected=" << rejected << " msg_ok=" << msg_ok
+                          << " append_ok=" << append_ok << " count_ok=" << count_ok << std::endl;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "  [FAIL] test_load_csv_nonempty_and_append: " << e.what() << std::endl;
+        }
+    }
+
+    void test_alter_add_column_from_csv() {
+        try {
+            const std::string db_name = "alter_csv_db";
+            const std::string csv_name = "scores.csv";
+            std::filesystem::path csv_path = std::filesystem::path(data_dir) / db_name / csv_name;
+
+            assert_success("БД для ALTER CSV", "CREATE DATABASE " + db_name + ";");
+            assert_success("USE alter_csv_db", "USE " + db_name + ";");
+            assert_success("Таблица users_alter",
+                           "CREATE TABLE users_alter (id INT PRIMARY KEY, name TEXT);");
+            assert_success("Две строки", "INSERT INTO users_alter (id, name) VALUES (1, 'A'), (2, 'B');");
+
+            std::filesystem::create_directories(csv_path.parent_path());
+            {
+                std::ofstream out(csv_path);
+                out << "score,id\n";
+                out << "100,1\n";
+                out << "200,2\n";
+            }
+
+            json alt = executor.execute(
+                "ALTER TABLE users_alter ADD COLUMN score INT FROM CSV '" + csv_name + "';");
+            bool alt_ok = alt["success"].get<bool>();
+
+            json sel = executor.execute("SELECT id, name, score FROM users_alter ORDER BY id;");
+            bool data_ok = false;
+            if (sel["success"].get<bool>() && sel.contains("rows") && sel["rows"].is_array() &&
+                sel["rows"].size() == 2) {
+                data_ok = (sel["rows"][0][0].get<std::string>() == "1" &&
+                            sel["rows"][0][2].get<std::string>() == "100" &&
+                            sel["rows"][1][0].get<std::string>() == "2" &&
+                            sel["rows"][1][2].get<std::string>() == "200");
+            }
+
+            json bad = executor.execute(
+                "ALTER TABLE users_alter ADD COLUMN extra INT FROM CSV '" + csv_name + "';");
+            bool bad_rejected = !bad["success"].get<bool>();
+
+            assert_success("Очистка ALTER CSV",
+                           "DROP TABLE users_alter; DROP DATABASE " + db_name + ";");
+            std::error_code ec;
+            std::filesystem::remove_all(std::filesystem::path(data_dir) / db_name, ec);
+
+            total_count++;
+            if (alt_ok && data_ok && bad_rejected) {
+                std::cout << "  [OK] ALTER TABLE ADD COLUMN ... FROM CSV (полное покрытие PK)"
+                          << std::endl;
+                passed_count++;
+            } else {
+                std::cerr << "  [FAIL] ALTER FROM CSV: alt_ok=" << alt_ok << " data_ok=" << data_ok
+                          << " bad_rejected=" << bad_rejected << std::endl;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "  [FAIL] test_alter_add_column_from_csv: " << e.what() << std::endl;
+        }
     }
 };
 
