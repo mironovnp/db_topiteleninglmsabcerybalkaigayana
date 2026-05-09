@@ -4,14 +4,67 @@
 
 namespace db {
 
-const uint8_t kRowMagic[4] = {'T', 'B', 'W', '2'};
-
 std::string cell_primitive_to_lexical_for_key(const CellPrimitive& p) {
     if (auto* pv = std::get_if<int64_t>(&p)) return std::to_string(*pv);
     if (auto* pv = std::get_if<double>(&p)) return std::to_string(*pv);
     if (auto* pv = std::get_if<bool>(&p)) return *pv ? "true" : "false";
     if (auto* pv = std::get_if<std::string>(&p)) return *pv;
     return {};
+}
+
+namespace {
+
+int compare_primitives(const CellPrimitive& a, const CellPrimitive& b) {
+    return std::visit(
+        [&](const auto& va) {
+            return std::visit(
+                [&](const auto& vb) {
+                    using TA = std::decay_t<decltype(va)>;
+                    using TB = std::decay_t<decltype(vb)>;
+                    if constexpr (std::is_same_v<TA, TB>) {
+                        if (va < vb) return -1;
+                        if (vb < va) return 1;
+                        return 0;
+                    }
+                    return cell_primitive_to_lexical_for_key(CellPrimitive{va}).compare(
+                        cell_primitive_to_lexical_for_key(CellPrimitive{vb}));
+                },
+                b);
+        },
+        a);
+}
+
+} // namespace
+
+const uint8_t kRowMagic[4] = {'T', 'B', 'W', '2'};
+
+int compare_cell_values(const CellValue& a, const CellValue& b) {
+    if (!a && !b) return 0;
+    if (!a) return -1;
+    if (!b) return 1;
+    return compare_primitives(*a, *b);
+}
+
+int compare_btree_keys(const BTreeKey& a, const BTreeKey& b) {
+    size_t n = std::min(a.size(), b.size());
+    for (size_t i = 0; i < n; ++i) {
+        int c = compare_cell_values(a[i], b[i]);
+        if (c != 0) return c;
+    }
+    if (a.size() < b.size()) return -1;
+    if (a.size() > b.size()) return 1;
+    return 0;
+}
+
+int compare_btree_keys_nav(const BTreeKey& a, const BTreeKey& b) {
+    size_t n = std::min(a.size(), b.size());
+    for (size_t i = 0; i < n; ++i) {
+        int c = compare_cell_values(a[i], b[i]);
+        if (c != 0) return c;
+    }
+    if (a.size() == b.size()) return 0;
+    // Prefix rule: shorter key neither less nor greater (matches legacy composite '\0' behaviour).
+    return 0;
 }
 
 CellPrimitive parse_numeric_literal_strict(const ColumnDef& col,

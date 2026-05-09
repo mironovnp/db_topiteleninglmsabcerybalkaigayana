@@ -39,7 +39,7 @@ bool read_legacy_string_blob(const ColumnDef* columns, uint32_t ncols,
     return true;
 }
 
-void append_payload(std::string& b, CellValue cv) {
+void wire_append_cell(std::string& b, CellValue cv) {
     if (!cv) {
         b.push_back(0);
         return;
@@ -70,7 +70,61 @@ void append_payload(std::string& b, CellValue cv) {
         *cv);
 }
 
+bool wire_read_cell(const uint8_t*& p, const uint8_t* end, CellValue& out) {
+    if (p + 1 > end) return false;
+    uint8_t tag = *p++;
+    if (tag == 0) {
+        out = std::nullopt;
+        return true;
+    }
+    switch (static_cast<StoredCellTag>(tag)) {
+    case StoredCellTag::Int: {
+        if (p + sizeof(int64_t) > end) return false;
+        int64_t v;
+        std::memcpy(&v, p, sizeof(v));
+        p += sizeof(v);
+        out = CellPrimitive{v};
+        return true;
+    }
+    case StoredCellTag::Float: {
+        if (p + sizeof(double) > end) return false;
+        double v;
+        std::memcpy(&v, p, sizeof(v));
+        p += sizeof(v);
+        out = CellPrimitive{v};
+        return true;
+    }
+    case StoredCellTag::Bool: {
+        if (p + 1 > end) return false;
+        uint8_t u = *p++;
+        out = CellPrimitive{static_cast<bool>(u)};
+        return true;
+    }
+    case StoredCellTag::Text: {
+        if (p + 4 > end) return false;
+        uint32_t sl;
+        std::memcpy(&sl, p, 4);
+        p += 4;
+        if (p + sl > end) return false;
+        out = CellPrimitive{
+            std::string(reinterpret_cast<const char*>(p), sl)};
+        p += sl;
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
 } // namespace
+
+void btree_append_cell(std::string& buf, CellValue cv) {
+    wire_append_cell(buf, cv);
+}
+
+bool btree_read_cell(const uint8_t*& p, const uint8_t* end, CellValue& out) {
+    return wire_read_cell(p, end, out);
+}
 
 std::string serialize_row_disk(const TableSchema& schema, const Row& row) {
     std::string buf;
@@ -81,7 +135,7 @@ std::string serialize_row_disk(const TableSchema& schema, const Row& row) {
     for (uint16_t i = 0; i < ncol; ++i) {
         CellValue cv =
             i < row.size() ? row[i] : std::nullopt;
-        append_payload(buf, cv);
+        wire_append_cell(buf, cv);
     }
     return buf;
 }
@@ -108,52 +162,13 @@ bool deserialize_row_disk(const TableSchema& schema, const uint8_t* blob,
 
     Row row;
     for (uint16_t i = 0; i < ncol_b && p < end_all; ++i) {
-        if (p + 1 > end_all) return false;
-        uint8_t tag = *p++;
-        if (tag == 0) {
-            row.push_back(std::nullopt);
-            continue;
-        }
-
-        switch (static_cast<StoredCellTag>(tag)) {
-        case StoredCellTag::Int: {
-            if (p + sizeof(int64_t) > end_all) return false;
-            int64_t v;
-            std::memcpy(&v, p, sizeof(v));
-            p += sizeof(v);
-            row.push_back(CellPrimitive{v});
-            break;
-        }
-        case StoredCellTag::Float: {
-            if (p + sizeof(double) > end_all) return false;
-            double v;
-            std::memcpy(&v, p, sizeof(v));
-            p += sizeof(v);
-            row.push_back(CellPrimitive{v});
-            break;
-        }
-        case StoredCellTag::Bool: {
-            if (p + 1 > end_all) return false;
-            uint8_t u = *p++;
-            row.push_back(CellPrimitive{(bool)u});
-            break;
-        }
-        case StoredCellTag::Text: {
-            if (p + 4 > end_all) return false;
-            uint32_t sl;
-            std::memcpy(&sl, p, 4);
-            p += 4;
-            if (p + sl > end_all) return false;
-            row.emplace_back(
-                CellPrimitive{std::string(reinterpret_cast<const char*>(p), sl)});
-            p += sl;
-            break;
-        }
-        default:
+        CellValue cv;
+        if (!wire_read_cell(p, end_all, cv)) {
             return read_legacy_string_blob(colptr,
                                            static_cast<uint32_t>(schema.columns.size()),
                                            blob, len, out);
         }
+        row.push_back(std::move(cv));
     }
 
     while (row.size() < schema.columns.size())
@@ -161,6 +176,56 @@ bool deserialize_row_disk(const TableSchema& schema, const uint8_t* blob,
 
     out = std::move(row);
     return true;
+}
+
+void btree_key_append_bytes(std::string& buf, const BTreeKey& key) {
+    for (const auto& c : key)
+        wire_append_cell(buf, c);
+}
+
+bool btree_key_parts_from_bytes(const uint8_t* data, size_t len, uint8_t arity, BTreeKey& out) {
+    const uint8_t* p = data;
+    const uint8_t* end = data + len;
+    out.clear();
+    for (uint8_t i = 0; i < arity; ++i) {
+        CellValue cv;
+        if (!wire_read_cell(p, end, cv))
+            return false;
+        out.push_back(std::move(cv));
+    }
+    return p == end;
+}
+
+bool btree_key_from_legacy_bytes(const uint8_t* data, size_t len, uint8_t arity, const TableSchema& sch,
+                                 BTreeKey& out) {
+    out.clear();
+    std::string raw(reinterpret_cast<const char*>(data), reinterpret_cast<const char*>(data) + len);
+    if (arity == 1) {
+        if (sch.columns.empty() || sch.primary_key_index < 0 ||
+            sch.primary_key_index >= static_cast<int>(sch.columns.size()))
+            return false;
+        out.push_back(
+            coerce_string_to_cell_column(sch.columns[static_cast<size_t>(sch.primary_key_index)], raw,
+                                         false));
+        return true;
+    }
+    if (arity != 2 || sch.columns.size() < 2)
+        return false;
+    size_t z = raw.find('\0');
+    if (z == std::string::npos)
+        return false;
+    std::string p0 = raw.substr(0, z);
+    std::string p1 = raw.substr(z + 1);
+    out.push_back(coerce_string_to_cell_column(sch.columns[0], p0, false));
+    out.push_back(coerce_string_to_cell_column(sch.columns[1], p1, false));
+    return true;
+}
+
+bool decode_btree_key_blob(const uint8_t* data, uint32_t len, uint8_t arity, const TableSchema& sch,
+                           BTreeKey& out) {
+    if (btree_key_parts_from_bytes(data, len, arity, out))
+        return true;
+    return btree_key_from_legacy_bytes(data, len, arity, sch, out);
 }
 
 } // namespace db

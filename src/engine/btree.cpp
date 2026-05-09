@@ -4,22 +4,8 @@
 #include "engine/storage.hpp"
 #include <algorithm>
 #include <stdexcept>
-#include <cmath>
 
 namespace db {
-
-namespace {
-
-std::string row_lex_key_col(const TableSchema* sch, const Row& row, uint32_t key_col) {
-    if (!sch || key_col >= row.size())
-        return "";
-    CellValue cv = row[key_col];
-    if (!cv.has_value())
-        return "";
-    return cell_primitive_to_lexical_for_key(*cv);
-}
-
-} // namespace
 
 // Row-level WAL is handled by Storage; keep physical page snapshots disabled.
 static void walLogPageImage(BufferPool& pool, PageId page_id, Page& pg) {
@@ -42,51 +28,60 @@ Row BPlusTree::unpack_row_blob(const uint8_t* blob, uint32_t blob_len) const {
     return out;
 }
 
-std::string BPlusTree::row_key_lexical(size_t key_col_idx, const Row& row) const {
-    return row_lex_key_col(row_schema_, row, static_cast<uint32_t>(key_col_idx));
-}
-
-BPlusTree::BPlusTree(BufferPool& pool, PageId root_page_id, const std::string& key_type,
-                       const TableSchema* row_schema)
-    : pool_(pool), root_(root_page_id), key_type_(key_type), row_schema_(row_schema) {
+BPlusTree::BPlusTree(BufferPool& pool, PageId root_page_id, const TableSchema* row_schema,
+                     uint8_t key_arity)
+    : pool_(pool), root_(root_page_id), row_schema_(row_schema), key_arity_(key_arity) {
     if (!row_schema_)
         throw std::runtime_error("BPlusTree: row_schema is required for typed persistence");
+    if (key_arity_ != 1 && key_arity_ != 2)
+        throw std::runtime_error("BPlusTree: key_arity must be 1 or 2");
 }
 
-// ════════════════════════════════════════════════════════════════════════
-//  Key comparison (type-aware)
-// ════════════════════════════════════════════════════════════════════════
+void BPlusTree::validateKeyArity(const BTreeKey& k) const {
+    if (k.size() != key_arity_)
+        throw std::runtime_error("BPlusTree: key component count mismatch");
+}
 
-int BPlusTree::compareKeys(const std::string& a, const std::string& b) const {
-    size_t null_a = a.find('\0');
-    size_t null_b = b.find('\0');
+std::string BPlusTree::packKeyBlob(const BTreeKey& key) const {
+    validateKeyArity(key);
+    std::string s;
+    btree_key_append_bytes(s, key);
+    return s;
+}
 
-    std::string val_a = (null_a == std::string::npos) ? a : a.substr(0, null_a);
-    std::string val_b = (null_b == std::string::npos) ? b : b.substr(0, null_b);
+bool BPlusTree::unpackKeyBlob(const std::string& blob, BTreeKey& out) const {
+    return decode_btree_key_blob(reinterpret_cast<const uint8_t*>(blob.data()),
+                               static_cast<uint32_t>(blob.size()), key_arity_, *row_schema_, out);
+}
 
-    int cmp = 0;
-    if (key_type_ == "INT") {
-        long la = 0, lb = 0;
-        try { if (!val_a.empty()) la = std::stol(val_a); } catch (...) {}
-        try { if (!val_b.empty()) lb = std::stol(val_b); } catch (...) {}
-        cmp = (la < lb) ? -1 : (la > lb) ? 1 : 0;
-    } else if (key_type_ == "FLOAT") {
-        double da = 0, db = 0;
-        try { if (!val_a.empty()) da = std::stod(val_a); } catch (...) {}
-        try { if (!val_b.empty()) db = std::stod(val_b); } catch (...) {}
-        cmp = (da < db) ? -1 : (da > db) ? 1 : 0;
-    } else {
-        cmp = val_a.compare(val_b);
+int BPlusTree::compareBlobFull(const std::string& a, const std::string& b) const {
+    BTreeKey ka, kb;
+    if (!unpackKeyBlob(a, ka) || !unpackKeyBlob(b, kb))
+        throw std::runtime_error("BPlusTree: corrupt key encoding on page");
+    return compare_btree_keys(ka, kb);
+}
+
+int BPlusTree::compareBlobNav(const BTreeKey& probe, const std::string& blob) const {
+    BTreeKey kb;
+    if (!unpackKeyBlob(blob, kb))
+        throw std::runtime_error("BPlusTree: corrupt key encoding on page");
+    return compare_btree_keys_nav(probe, kb);
+}
+
+BTreeKey BPlusTree::bulkExtractKey(const Row& row, BTreeBulkKeySpec spec) {
+    if (spec.col1 < 0) {
+        int i = spec.col0;
+        CellValue v = (i >= 0 && i < static_cast<int>(row.size())) ? row[static_cast<size_t>(i)]
+                                                                   : std::nullopt;
+        return {std::move(v)};
     }
-
-    if (cmp != 0) return cmp;
-
-    // Primary values equal. Compare PK suffixes for secondary indexes.
-    if (null_a != std::string::npos && null_b != std::string::npos) {
-        return a.substr(null_a + 1).compare(b.substr(null_b + 1));
-    }
-    // Prefix match: "val" == "val\0pk"
-    return 0;
+    CellValue a = (spec.col0 >= 0 && spec.col0 < static_cast<int>(row.size()))
+                      ? row[static_cast<size_t>(spec.col0)]
+                      : std::nullopt;
+    CellValue b = (spec.col1 >= 0 && spec.col1 < static_cast<int>(row.size()))
+                      ? row[static_cast<size_t>(spec.col1)]
+                      : std::nullopt;
+    return {std::move(a), std::move(b)};
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -94,50 +89,55 @@ int BPlusTree::compareKeys(const std::string& a, const std::string& b) const {
 // ════════════════════════════════════════════════════════════════════════
 //
 //  Cell binary format (stored at end of page, growing toward front):
-//    key_len(2) | key_data | row_len(2) | row_data
+//    key_len(2) | key_blob | row_len(2) | row_data
 //
 
 BPlusTree::CellView BPlusTree::readCell(const Page& pg, uint32_t idx) {
     uint16_t off = leafGetCellOffset(pg, idx);
     const char* p = pg.data + off;
     CellView cv;
-    uint16_t kl; memcpy(&kl, p, 2); p += 2;
-    cv.key.assign(p, kl); p += kl;
-    uint16_t rl; memcpy(&rl, p, 2); p += 2;
+    uint16_t kl;
+    memcpy(&kl, p, 2);
+    p += 2;
+    cv.key_blob.assign(p, kl);
+    p += kl;
+    uint16_t rl;
+    memcpy(&rl, p, 2);
+    p += 2;
     cv.row_ptr = p;
     cv.row_len = rl;
     return cv;
 }
 
-uint32_t BPlusTree::cellSize(const std::string& key,
-                             const std::string& row_data) {
-    return 2 + key.size() + 2 + row_data.size();
+uint32_t BPlusTree::cellSize(const std::string& key_blob, const std::string& row_data) {
+    return 2 + static_cast<uint32_t>(key_blob.size()) + 2 + static_cast<uint32_t>(row_data.size());
 }
 
-bool BPlusTree::leafInsertCell(Page& pg, const std::string& key,
-                               const std::string& row_data, int pos) {
-    uint32_t n   = pg.getNumRecords();
-    uint32_t sz  = cellSize(key, row_data);
+bool BPlusTree::leafInsertCell(Page& pg, const std::string& key_blob, const std::string& row_data,
+                               int pos) {
+    uint32_t n = pg.getNumRecords();
+    uint32_t sz = cellSize(key_blob, row_data);
     uint32_t free = leafFreeSpace(pg);
 
-    // Need space for cell data + one new cell pointer
-    if (free < sz + CELL_PTR_SIZE) return false;
+    if (free < sz + CELL_PTR_SIZE)
+        return false;
 
-    // Write cell data at content_start - sz
     uint16_t cs = leafGetContentStart(pg);
     uint16_t new_cs = cs - static_cast<uint16_t>(sz);
     char* dst = pg.data + new_cs;
 
-    uint16_t kl = static_cast<uint16_t>(key.size());
-    memcpy(dst, &kl, 2); dst += 2;
-    memcpy(dst, key.data(), kl); dst += kl;
+    uint16_t kl = static_cast<uint16_t>(key_blob.size());
+    memcpy(dst, &kl, 2);
+    dst += 2;
+    memcpy(dst, key_blob.data(), kl);
+    dst += kl;
     uint16_t rl = static_cast<uint16_t>(row_data.size());
-    memcpy(dst, &rl, 2); dst += 2;
+    memcpy(dst, &rl, 2);
+    dst += 2;
     memcpy(dst, row_data.data(), rl);
 
     leafSetContentStart(pg, new_cs);
 
-    // Shift cell pointers to make room at position pos
     for (int i = static_cast<int>(n) - 1; i >= pos; --i)
         leafSetCellOffset(pg, i + 1, leafGetCellOffset(pg, i));
     leafSetCellOffset(pg, pos, new_cs);
@@ -148,39 +148,39 @@ bool BPlusTree::leafInsertCell(Page& pg, const std::string& key,
 // ════════════════════════════════════════════════════════════════════════
 //  Internal page helpers
 // ════════════════════════════════════════════════════════════════════════
-//
-//  After common header (16 bytes):
-//    first_child(4)
-//    entries[]: { key_len(2), key_data, child_id(4) } × num_records
-//
 
-std::vector<BPlusTree::InternalEntry>
-BPlusTree::readInternalEntries(const Page& pg) {
+std::vector<BPlusTree::InternalEntry> BPlusTree::readInternalEntries(const Page& pg) {
     std::vector<InternalEntry> out;
     uint32_t n = pg.getNumRecords();
     const char* p = pg.data + INTERNAL_HEADER_SIZE;
     for (uint32_t i = 0; i < n; ++i) {
         InternalEntry e;
-        uint16_t kl; memcpy(&kl, p, 2); p += 2;
-        e.key.assign(p, kl); p += kl;
-        memcpy(&e.child, p, 4); p += 4;
+        uint16_t kl;
+        memcpy(&kl, p, 2);
+        p += 2;
+        e.key_blob.assign(p, kl);
+        p += kl;
+        memcpy(&e.child, p, 4);
+        p += 4;
         out.push_back(std::move(e));
     }
     return out;
 }
 
-void BPlusTree::writeInternalPage(Page& pg, PageId first_child,
-                                  const std::vector<InternalEntry>& entries) {
+void BPlusTree::writeInternalPage(Page& pg, PageId first_child, const std::vector<InternalEntry>& entries) {
     pg.setPageType(INTERNAL_PAGE);
     pg.setNumRecords(static_cast<uint32_t>(entries.size()));
     internalSetFirstChild(pg, first_child);
 
     char* p = pg.data + INTERNAL_HEADER_SIZE;
     for (const auto& e : entries) {
-        uint16_t kl = static_cast<uint16_t>(e.key.size());
-        memcpy(p, &kl, 2); p += 2;
-        memcpy(p, e.key.data(), kl); p += kl;
-        memcpy(p, &e.child, 4); p += 4;
+        uint16_t kl = static_cast<uint16_t>(e.key_blob.size());
+        memcpy(p, &kl, 2);
+        p += 2;
+        memcpy(p, e.key_blob.data(), kl);
+        p += kl;
+        memcpy(p, &e.child, 4);
+        p += 4;
     }
 }
 
@@ -188,7 +188,7 @@ void BPlusTree::writeInternalPage(Page& pg, PageId first_child,
 //  Tree traversal
 // ════════════════════════════════════════════════════════════════════════
 
-PageId BPlusTree::findLeaf(const std::string& key) const {
+PageId BPlusTree::findLeaf(const BTreeKey& key) const {
     PageId cur = root_;
     int depth = 0;
     while (depth < 100) {
@@ -200,19 +200,21 @@ PageId BPlusTree::findLeaf(const std::string& key) const {
         }
         if (type != INTERNAL_PAGE) {
             pool_.unpinPage(cur, false);
-            throw std::runtime_error("BPlusTree::findLeaf: reached non-tree page type " + std::to_string(type) + " at page " + std::to_string(cur));
+            throw std::runtime_error("BPlusTree::findLeaf: reached non-tree page type " +
+                                     std::to_string(type) + " at page " + std::to_string(cur));
         }
-        // Internal node — find correct child
         auto entries = readInternalEntries(*pg);
         PageId next = internalGetFirstChild(*pg);
         for (const auto& e : entries) {
-            if (compareKeys(key, e.key) < 0) break;
+            if (compareBlobNav(key, e.key_blob) < 0)
+                break;
             next = e.child;
         }
         pool_.unpinPage(cur, false);
-        if (next == cur) throw std::runtime_error("BPlusTree::findLeaf: infinite loop at page " + std::to_string(cur));
+        if (next == cur)
+            throw std::runtime_error("BPlusTree::findLeaf: infinite loop at page " + std::to_string(cur));
         cur = next;
-        depth++;
+        ++depth;
     }
     throw std::runtime_error("BPlusTree::findLeaf: exceeded max depth");
 }
@@ -231,17 +233,15 @@ PageId BPlusTree::findLeftmostLeaf() const {
     }
 }
 
-// ════════════════════════════════════════════════════════════════════════
-//  Search
-// ════════════════════════════════════════════════════════════════════════
-
-std::optional<Row> BPlusTree::search(const std::string& key) const {
+std::optional<Row> BPlusTree::search(const BTreeKey& key) const {
+    validateKeyArity(key);
+    const std::string want = packKeyBlob(key);
     PageId lid = findLeaf(key);
     Page* pg = pool_.fetchPage(lid);
     uint32_t n = pg->getNumRecords();
     for (uint32_t i = 0; i < n; ++i) {
         auto cv = readCell(*pg, i);
-        if (compareKeys(cv.key, key) == 0) {
+        if (compareBlobFull(cv.key_blob, want) == 0) {
             Row row = unpack_row_blob(reinterpret_cast<const uint8_t*>(cv.row_ptr),
                                       static_cast<uint32_t>(cv.row_len));
             pool_.unpinPage(lid, false);
@@ -251,10 +251,6 @@ std::optional<Row> BPlusTree::search(const std::string& key) const {
     pool_.unpinPage(lid, false);
     return std::nullopt;
 }
-
-// ════════════════════════════════════════════════════════════════════════
-//  Scan all
-// ════════════════════════════════════════════════════════════════════════
 
 std::vector<Row> BPlusTree::scanAll() const {
     std::vector<Row> result;
@@ -275,40 +271,29 @@ std::vector<Row> BPlusTree::scanAll() const {
     return result;
 }
 
-std::vector<Row> BPlusTree::scanPrefix(const std::string& prefix) const {
+std::vector<Row> BPlusTree::scanPrefix(const BTreeKey& prefix_key) const {
+    if (prefix_key.size() != 1)
+        throw std::runtime_error("BPlusTree::scanPrefix: expected a single-component prefix key");
     std::vector<Row> result;
-    PageId lid = findLeaf(prefix);
+    PageId lid = findLeaf(prefix_key);
     PageId cur = lid;
-
     bool done = false;
     while (cur != INVALID_PAGE_ID && !done) {
         Page* pg = pool_.fetchPage(cur);
         uint32_t n = pg->getNumRecords();
         for (uint32_t i = 0; i < n; ++i) {
             auto cv = readCell(*pg, i);
-            
-            // Compare only the "value" part
-            size_t null_idx = cv.key.find('\0');
-            std::string val_part = (null_idx == std::string::npos) ? cv.key : cv.key.substr(0, null_idx);
-
-            int cmp = 0;
-            if (key_type_ == "INT") {
-                long la = 0, lb = 0;
-                try { if (!val_part.empty()) la = std::stol(val_part); } catch (...) {}
-                try { if (!prefix.empty()) lb = std::stol(prefix); } catch (...) {}
-                cmp = (la < lb) ? -1 : (la > lb) ? 1 : 0;
-            } else if (key_type_ == "FLOAT") {
-                double da = 0, db = 0;
-                try { if (!val_part.empty()) da = std::stod(val_part); } catch (...) {}
-                try { if (!prefix.empty()) db = std::stod(prefix); } catch (...) {}
-                cmp = (da < db) ? -1 : (da > db) ? 1 : 0;
-            } else {
-                cmp = val_part.compare(prefix);
+            BTreeKey stored;
+            if (!unpackKeyBlob(cv.key_blob, stored))
+                throw std::runtime_error("BPlusTree::scanPrefix: bad key");
+            CellValue s0 = !stored.empty() ? stored[0] : CellValue{};
+            int cmp = compare_cell_values(s0, prefix_key[0]);
+            if (cmp < 0)
+                continue;
+            if (cmp > 0) {
+                done = true;
+                break;
             }
-
-            if (cmp < 0) continue;
-            if (cmp > 0) { done = true; break; }
-            
             result.push_back(
                 unpack_row_blob(reinterpret_cast<const uint8_t*>(cv.row_ptr),
                                 static_cast<uint32_t>(cv.row_len)));
@@ -320,18 +305,32 @@ std::vector<Row> BPlusTree::scanPrefix(const std::string& prefix) const {
     return result;
 }
 
-std::vector<Row> BPlusTree::scanRange(const std::string* low, const std::string* high) const {
+std::vector<Row> BPlusTree::scanRange(const std::optional<BTreeKey>& low,
+                                      const std::optional<BTreeKey>& high) const {
     std::vector<Row> result;
-    PageId cur = (low) ? findLeaf(*low) : findLeftmostLeaf();
-    
+    PageId cur = low.has_value() ? findLeaf(*low) : findLeftmostLeaf();
     bool done = false;
     while (cur != INVALID_PAGE_ID && !done) {
         Page* pg = pool_.fetchPage(cur);
         uint32_t n = pg->getNumRecords();
         for (uint32_t i = 0; i < n; ++i) {
             auto cv = readCell(*pg, i);
-            if (low && compareKeys(cv.key, *low) < 0) continue;
-            if (high && compareKeys(cv.key, *high) > 0) { done = true; break; }
+            if (low.has_value()) {
+                BTreeKey stored;
+                if (!unpackKeyBlob(cv.key_blob, stored))
+                    throw std::runtime_error("BPlusTree::scanRange: bad key");
+                if (compare_btree_keys_nav(stored, *low) < 0)
+                    continue;
+            }
+            if (high.has_value()) {
+                BTreeKey stored;
+                if (!unpackKeyBlob(cv.key_blob, stored))
+                    throw std::runtime_error("BPlusTree::scanRange: bad key");
+                if (compare_btree_keys_nav(stored, *high) > 0) {
+                    done = true;
+                    break;
+                }
+            }
             result.push_back(
                 unpack_row_blob(reinterpret_cast<const uint8_t*>(cv.row_ptr),
                                 static_cast<uint32_t>(cv.row_len)));
@@ -343,11 +342,8 @@ std::vector<Row> BPlusTree::scanRange(const std::string* low, const std::string*
     return result;
 }
 
-// ════════════════════════════════════════════════════════════════════════
-//  Insert
-// ════════════════════════════════════════════════════════════════════════
-
-bool BPlusTree::upsert(const std::string& key, const Row& row) {
+bool BPlusTree::upsert(const BTreeKey& key, const Row& row) {
+    std::string key_blob = packKeyBlob(key);
     std::string row_data = pack_row_blob(row);
     PageId lid = findLeaf(key);
     Page* pg = pool_.fetchPage(lid);
@@ -356,24 +352,23 @@ bool BPlusTree::upsert(const std::string& key, const Row& row) {
     int pos = -1;
     for (uint32_t i = 0; i < n; ++i) {
         auto cv = readCell(*pg, i);
-        if (compareKeys(key, cv.key) == 0) {
+        if (compareBlobFull(key_blob, cv.key_blob) == 0) {
             pos = static_cast<int>(i);
             break;
         }
     }
 
-    // Replace existing cell: rebuild leaf (same layout as remove, one slot rewritten)
     if (pos >= 0) {
         struct KV {
-            std::string key_str, data;
+            std::string kb, data;
         };
         std::vector<KV> cells;
         for (uint32_t i = 0; i < n; ++i) {
             auto cv = readCell(*pg, i);
             if (static_cast<int>(i) == pos)
-                cells.push_back({key, row_data});
+                cells.push_back({key_blob, row_data});
             else
-                cells.push_back({cv.key, std::string(cv.row_ptr, cv.row_len)});
+                cells.push_back({cv.key_blob, std::string(cv.row_ptr, cv.row_len)});
         }
 
         PageId next = leafGetNextId(*pg);
@@ -383,7 +378,7 @@ bool BPlusTree::upsert(const std::string& key, const Row& row) {
         leafSetContentStart(*pg, PAGE_SIZE);
         leafSetNextId(*pg, next);
         for (size_t i = 0; i < cells.size(); ++i)
-            leafInsertCell(*pg, cells[i].key_str, cells[i].data, static_cast<int>(i));
+            leafInsertCell(*pg, cells[i].kb, cells[i].data, static_cast<int>(i));
 
         walLogPageImage(pool_, lid, *pg);
         pool_.unpinPage(lid, true);
@@ -394,78 +389,68 @@ bool BPlusTree::upsert(const std::string& key, const Row& row) {
     return insert(key, row);
 }
 
-bool BPlusTree::insert(const std::string& key, const Row& row) {
+bool BPlusTree::insert(const BTreeKey& key, const Row& row) {
+    std::string key_blob = packKeyBlob(key);
     std::string row_data = pack_row_blob(row);
     PageId lid = findLeaf(key);
     Page* pg = pool_.fetchPage(lid);
 
-    // Find sorted insertion position
     uint32_t n = pg->getNumRecords();
     int pos = 0;
     for (uint32_t i = 0; i < n; ++i) {
         auto cv = readCell(*pg, i);
-        int cmp = compareKeys(key, cv.key);
+        int cmp = compareBlobFull(key_blob, cv.key_blob);
         if (cmp == 0) {
             pool_.unpinPage(lid, false);
             return false;
         }
-        if (cmp > 0) pos = i + 1;
+        if (cmp > 0)
+            pos = i + 1;
     }
 
-    if (leafInsertCell(*pg, key, row_data, pos)) {
-        // Physical WAL: log full page after-image so splits/internal updates are recoverable too.
+    if (leafInsertCell(*pg, key_blob, row_data, pos)) {
         walLogPageImage(pool_, lid, *pg);
         pool_.unpinPage(lid, true);
         return true;
     }
 
-    // Leaf is full — need to split
     pool_.unpinPage(lid, false);
-    splitLeafAndInsert(lid, key, row_data);
+    splitLeafAndInsert(lid, key_blob, row_data);
     return true;
 }
 
-// ════════════════════════════════════════════════════════════════════════
-//  Leaf split
-// ════════════════════════════════════════════════════════════════════════
-
-void BPlusTree::splitLeafAndInsert(PageId leaf_id,
-                                   const std::string& key,
+void BPlusTree::splitLeafAndInsert(PageId leaf_id, const std::string& key_blob,
                                    const std::string& row_data) {
     Page* old_pg = pool_.fetchPage(leaf_id);
 
-    // Collect all existing cells + the new one
-    struct KV { std::string key, data; };
+    struct KV {
+        std::string kb, data;
+    };
     std::vector<KV> all;
     uint32_t n = old_pg->getNumRecords();
     for (uint32_t i = 0; i < n; ++i) {
         auto cv = readCell(*old_pg, i);
-        all.push_back({cv.key,
-                       std::string(cv.row_ptr, cv.row_len)});
+        all.push_back({cv.key_blob, std::string(cv.row_ptr, cv.row_len)});
     }
-    // Insert new cell in sorted position
     int pos = 0;
     for (size_t i = 0; i < all.size(); ++i) {
-        if (compareKeys(key, all[i].key) > 0) pos = i + 1;
+        if (compareBlobFull(key_blob, all[i].kb) > 0)
+            pos = static_cast<int>(i) + 1;
     }
-    all.insert(all.begin() + pos, {key, row_data});
+    all.insert(all.begin() + pos, {key_blob, row_data});
 
-    // Split: first half stays, second half goes to new leaf
     size_t mid = all.size() / 2;
 
-    // Reinitialize old leaf
     PageId old_next = leafGetNextId(*old_pg);
     old_pg->reset();
     old_pg->setPageType(LEAF_PAGE);
     old_pg->setPageId(leaf_id);
     leafSetContentStart(*old_pg, PAGE_SIZE);
-    leafSetNextId(*old_pg, INVALID_PAGE_ID); // will set below
+    leafSetNextId(*old_pg, INVALID_PAGE_ID);
 
     for (size_t i = 0; i < mid; ++i)
-        leafInsertCell(*old_pg, all[i].key, all[i].data,
-                       static_cast<int>(i));
+        leafInsertCell(*old_pg, all[i].kb, all[i].data, static_cast<int>(i));
 
-    // Create new leaf
     PageId new_id;
     Page* new_pg = pool_.newPage(&new_id);
     new_pg->setPageType(LEAF_PAGE);
@@ -474,14 +459,11 @@ void BPlusTree::splitLeafAndInsert(PageId leaf_id,
     leafSetNextId(*new_pg, old_next);
 
     for (size_t i = mid; i < all.size(); ++i)
-        leafInsertCell(*new_pg, all[i].key, all[i].data,
-                       static_cast<int>(i - mid));
+        leafInsertCell(*new_pg, all[i].kb, all[i].data, static_cast<int>(i - mid));
 
-    // Link old → new
     leafSetNextId(*old_pg, new_id);
 
-    // Separator key = first key of new leaf
-    std::string sep = all[mid].key;
+    std::string sep = all[mid].kb;
 
     walLogPageImage(pool_, leaf_id, *old_pg);
     walLogPageImage(pool_, new_id, *new_pg);
@@ -491,19 +473,13 @@ void BPlusTree::splitLeafAndInsert(PageId leaf_id,
     insertIntoParent(leaf_id, sep, new_id);
 }
 
-// ════════════════════════════════════════════════════════════════════════
-//  Insert into parent (may cascade splits upward)
-// ════════════════════════════════════════════════════════════════════════
-
-void BPlusTree::insertIntoParent(PageId left_id, const std::string& key,
-                                 PageId right_id) {
-    // If left is the root, create a new root
+void BPlusTree::insertIntoParent(PageId left_id, const std::string& key_blob, PageId right_id) {
     if (left_id == root_) {
         PageId new_root_id;
         Page* rp = pool_.newPage(&new_root_id);
         rp->setPageType(INTERNAL_PAGE);
         rp->setPageId(new_root_id);
-        std::vector<InternalEntry> entries = {{key, right_id}};
+        std::vector<InternalEntry> entries = {{key_blob, right_id}};
         writeInternalPage(*rp, left_id, entries);
         walLogPageImage(pool_, new_root_id, *rp);
         pool_.unpinPage(new_root_id, true);
@@ -511,8 +487,6 @@ void BPlusTree::insertIntoParent(PageId left_id, const std::string& key,
         return;
     }
 
-    // Find parent by searching from root
-    // (Simple approach: walk down from root tracking parent)
     PageId parent_id = INVALID_PAGE_ID;
     PageId cur = root_;
     while (true) {
@@ -524,11 +498,12 @@ void BPlusTree::insertIntoParent(PageId left_id, const std::string& key,
         auto entries = readInternalEntries(*pg);
         PageId fc = internalGetFirstChild(*pg);
 
-        // Check if any child is left_id
-        bool found = false;
-        if (fc == left_id) { found = true; }
+        bool found = (fc == left_id);
         for (const auto& e : entries) {
-            if (e.child == left_id) { found = true; break; }
+            if (e.child == left_id) {
+                found = true;
+                break;
+            }
         }
         if (found) {
             parent_id = cur;
@@ -536,11 +511,13 @@ void BPlusTree::insertIntoParent(PageId left_id, const std::string& key,
             break;
         }
 
-        // Descend
+        BTreeKey sep_key;
+        if (!unpackKeyBlob(key_blob, sep_key))
+            throw std::runtime_error("BPlusTree::insertIntoParent: bad separator key");
         PageId next = fc;
-        // Use the key to find the right path
         for (const auto& e : entries) {
-            if (compareKeys(key, e.key) < 0) break;
+            if (compareBlobNav(sep_key, e.key_blob) < 0)
+                break;
             next = e.child;
         }
         pool_.unpinPage(cur, false);
@@ -548,33 +525,33 @@ void BPlusTree::insertIntoParent(PageId left_id, const std::string& key,
     }
 
     if (parent_id == INVALID_PAGE_ID) {
-        // Shouldn't happen, but create new root as fallback
         PageId nr;
         Page* rp = pool_.newPage(&nr);
         rp->setPageType(INTERNAL_PAGE);
         rp->setPageId(nr);
-        writeInternalPage(*rp, left_id, {{key, right_id}});
+        writeInternalPage(*rp, left_id, {{key_blob, right_id}});
         pool_.unpinPage(nr, true);
         root_ = nr;
         return;
     }
 
-    // Try to insert into existing parent
     Page* pp = pool_.fetchPage(parent_id);
     auto entries = readInternalEntries(*pp);
 
-    // Find position for new key
+    BTreeKey sep_key;
+    if (!unpackKeyBlob(key_blob, sep_key))
+        throw std::runtime_error("BPlusTree::insertIntoParent: bad separator key");
+
     int insert_pos = 0;
     for (size_t i = 0; i < entries.size(); ++i) {
-        if (compareKeys(key, entries[i].key) > 0)
-            insert_pos = i + 1;
+        if (compareBlobNav(sep_key, entries[i].key_blob) > 0)
+            insert_pos = static_cast<int>(i) + 1;
     }
-    entries.insert(entries.begin() + insert_pos, {key, right_id});
+    entries.insert(entries.begin() + insert_pos, {key_blob, right_id});
 
-    // Check if it still fits
     uint32_t needed = INTERNAL_HEADER_SIZE;
     for (const auto& e : entries)
-        needed += 2 + e.key.size() + 4;
+        needed += 6 + static_cast<uint32_t>(e.key_blob.size());
 
     if (needed <= PAGE_SIZE) {
         PageId fc = internalGetFirstChild(*pp);
@@ -584,48 +561,40 @@ void BPlusTree::insertIntoParent(PageId left_id, const std::string& key,
     } else {
         PageId fc = internalGetFirstChild(*pp);
         pool_.unpinPage(parent_id, false);
-        splitInternalAndInsert(parent_id, key, right_id);
+        splitInternalAndInsert(parent_id, key_blob, right_id);
     }
 }
 
-// ════════════════════════════════════════════════════════════════════════
-//  Internal node split
-// ════════════════════════════════════════════════════════════════════════
-
-void BPlusTree::splitInternalAndInsert(PageId node_id,
-                                       const std::string& key,
+void BPlusTree::splitInternalAndInsert(PageId node_id, const std::string& key_blob,
                                        PageId new_child_id) {
     Page* pg = pool_.fetchPage(node_id);
     auto entries = readInternalEntries(*pg);
     PageId fc = internalGetFirstChild(*pg);
 
-    // Insert new entry in sorted position
+    BTreeKey sep_key;
+    if (!unpackKeyBlob(key_blob, sep_key))
+        throw std::runtime_error("BPlusTree::splitInternalAndInsert: bad key");
+
     int pos = 0;
     for (size_t i = 0; i < entries.size(); ++i) {
-        if (compareKeys(key, entries[i].key) > 0) pos = i + 1;
+        if (compareBlobNav(sep_key, entries[i].key_blob) > 0)
+            pos = static_cast<int>(i) + 1;
     }
-    entries.insert(entries.begin() + pos, {key, new_child_id});
+    entries.insert(entries.begin() + pos, {key_blob, new_child_id});
 
-    // Split: push middle key up
     size_t mid = entries.size() / 2;
-    std::string push_up_key = entries[mid].key;
+    std::string push_up_key = entries[mid].key_blob;
 
-    // Left node gets entries[0..mid-1], first_child = fc
-    std::vector<InternalEntry> left_entries(entries.begin(),
-                                            entries.begin() + mid);
-    // Right node gets entries[mid+1..], first_child = entries[mid].child
+    std::vector<InternalEntry> left_entries(entries.begin(), entries.begin() + mid);
     PageId right_fc = entries[mid].child;
-    std::vector<InternalEntry> right_entries(entries.begin() + mid + 1,
-                                             entries.end());
+    std::vector<InternalEntry> right_entries(entries.begin() + mid + 1, entries.end());
 
-    // Rewrite left (old node)
     pg->reset();
     pg->setPageId(node_id);
     writeInternalPage(*pg, fc, left_entries);
     walLogPageImage(pool_, node_id, *pg);
     pool_.unpinPage(node_id, true);
 
-    // Create right node
     PageId right_id;
     Page* rp = pool_.newPage(&right_id);
     rp->setPageId(right_id);
@@ -636,11 +605,8 @@ void BPlusTree::splitInternalAndInsert(PageId node_id,
     insertIntoParent(node_id, push_up_key, right_id);
 }
 
-// ════════════════════════════════════════════════════════════════════════
-//  Remove (lazy — doesn't merge/redistribute underflowing nodes)
-// ════════════════════════════════════════════════════════════════════════
-
-bool BPlusTree::remove(const std::string& key) {
+bool BPlusTree::remove(const BTreeKey& key) {
+    std::string key_blob = packKeyBlob(key);
     PageId lid = findLeaf(key);
     Page* pg = pool_.fetchPage(lid);
     uint32_t n = pg->getNumRecords();
@@ -648,21 +614,25 @@ bool BPlusTree::remove(const std::string& key) {
     int found = -1;
     for (uint32_t i = 0; i < n; ++i) {
         auto cv = readCell(*pg, i);
-        if (compareKeys(cv.key, key) == 0) { found = i; break; }
+        if (compareBlobFull(cv.key_blob, key_blob) == 0) {
+            found = static_cast<int>(i);
+            break;
+        }
     }
     if (found < 0) {
         pool_.unpinPage(lid, false);
         return false;
     }
 
-    // Rebuild leaf without the deleted cell
-    struct KV { std::string key, data; };
+    struct KV {
+        std::string kb, data;
+    };
     std::vector<KV> kept;
     for (uint32_t i = 0; i < n; ++i) {
-        if (static_cast<int>(i) == found) continue;
+        if (static_cast<int>(i) == found)
+            continue;
         auto cv = readCell(*pg, i);
-        kept.push_back({cv.key,
-                        std::string(cv.row_ptr, cv.row_len)});
+        kept.push_back({cv.key_blob, std::string(cv.row_ptr, cv.row_len)});
     }
 
     PageId next = leafGetNextId(*pg);
@@ -673,27 +643,30 @@ bool BPlusTree::remove(const std::string& key) {
     leafSetNextId(*pg, next);
 
     for (size_t i = 0; i < kept.size(); ++i)
-        leafInsertCell(*pg, kept[i].key, kept[i].data,
-                       static_cast<int>(i));
+        leafInsertCell(*pg, kept[i].kb, kept[i].data, static_cast<int>(i));
 
     walLogPageImage(pool_, lid, *pg);
-
     pool_.unpinPage(lid, true);
     return true;
 }
 
-// ════════════════════════════════════════════════════════════════════════
-//  Bulk Load — bottom-up construction from sorted rows
-// ════════════════════════════════════════════════════════════════════════
-
 PageId BPlusTree::bulkLoad(BufferPool& pool, const std::vector<Row>& sorted_rows,
-                           uint32_t key_col, const std::string& key_type,
-                           const TableSchema* rs) {
-    if (!rs)
+                          const TableSchema* row_schema, BTreeBulkKeySpec key_spec) {
+    if (!row_schema)
         throw std::runtime_error("BPlusTree::bulkLoad: row_schema required");
 
+    const uint8_t arity = key_spec.col1 < 0 ? 1 : 2;
+
+    auto pack_row_key = [&](const Row& row) -> std::string {
+        BTreeKey k = bulkExtractKey(row, key_spec);
+        if (k.size() != arity)
+            throw std::runtime_error("BPlusTree::bulkLoad: row missing key columns");
+        std::string s;
+        btree_key_append_bytes(s, k);
+        return s;
+    };
+
     if (sorted_rows.empty()) {
-        // Create a single empty leaf as root
         PageId id;
         Page* pg = pool.newPage(&id);
         pg->setPageType(LEAF_PAGE);
@@ -704,8 +677,10 @@ PageId BPlusTree::bulkLoad(BufferPool& pool, const std::vector<Row>& sorted_rows
         return id;
     }
 
-    // ── Step 1: Pack rows into leaf pages ──────────────────────────────
-    struct LeafInfo { PageId id; std::string first_key; };
+    struct LeafInfo {
+        PageId      id;
+        std::string first_key_blob;
+    };
     std::vector<LeafInfo> leaves;
 
     PageId cur_id;
@@ -714,16 +689,15 @@ PageId BPlusTree::bulkLoad(BufferPool& pool, const std::vector<Row>& sorted_rows
     cur_pg->setPageId(cur_id);
     leafSetContentStart(*cur_pg, PAGE_SIZE);
     leafSetNextId(*cur_pg, INVALID_PAGE_ID);
-    std::string first_key_of_leaf = row_lex_key_col(rs, sorted_rows.front(), key_col);
+    std::string first_key_of_leaf = pack_row_key(sorted_rows.front());
 
     for (size_t r = 0; r < sorted_rows.size(); ++r) {
         const Row& row = sorted_rows[r];
-        std::string key = row_lex_key_col(rs, row, key_col);
-        std::string rd = serialize_row_disk(*rs, row);
+        std::string kb = pack_row_key(row);
+        std::string rd = serialize_row_disk(*row_schema, row);
         int pos = static_cast<int>(cur_pg->getNumRecords());
 
-        if (!leafInsertCell(*cur_pg, key, rd, pos)) {
-            // Page full — finalize and start new leaf
+        if (!leafInsertCell(*cur_pg, kb, rd, pos)) {
             leaves.push_back({cur_id, first_key_of_leaf});
             PageId new_id;
             Page* new_pg = pool.newPage(&new_id);
@@ -732,15 +706,14 @@ PageId BPlusTree::bulkLoad(BufferPool& pool, const std::vector<Row>& sorted_rows
             leafSetContentStart(*new_pg, PAGE_SIZE);
             leafSetNextId(*new_pg, INVALID_PAGE_ID);
 
-            // Link previous → current
             leafSetNextId(*cur_pg, new_id);
             pool.unpinPage(cur_id, true);
 
             cur_pg = new_pg;
             cur_id = new_id;
-            first_key_of_leaf = key;
+            first_key_of_leaf = kb;
 
-            leafInsertCell(*cur_pg, key, rd, 0);
+            leafInsertCell(*cur_pg, kb, rd, 0);
         }
     }
     leaves.push_back({cur_id, first_key_of_leaf});
@@ -749,12 +722,13 @@ PageId BPlusTree::bulkLoad(BufferPool& pool, const std::vector<Row>& sorted_rows
     if (leaves.size() == 1)
         return leaves[0].id;
 
-    // ── Step 2: Build internal levels bottom-up ────────────────────────
-    // Current level = leaf page IDs with their first keys
-    struct ChildInfo { PageId id; std::string key; };
+    struct ChildInfo {
+        PageId      id;
+        std::string key_blob;
+    };
     std::vector<ChildInfo> level;
     for (auto& li : leaves)
-        level.push_back({li.id, li.first_key});
+        level.push_back({li.id, li.first_key_blob});
 
     while (level.size() > 1) {
         std::vector<ChildInfo> next_level;
@@ -767,21 +741,22 @@ PageId BPlusTree::bulkLoad(BufferPool& pool, const std::vector<Row>& sorted_rows
             np->setPageId(node_id);
 
             PageId first_child = level[i].id;
-            std::vector<BPlusTree::InternalEntry> entries;
+            std::vector<InternalEntry> entries;
 
             ++i;
             uint32_t space = INTERNAL_HEADER_SIZE;
             while (i < level.size()) {
-                uint32_t entry_size = 2 + level[i].key.size() + 4;
-                if (space + entry_size > PAGE_SIZE) break;
-                entries.push_back({level[i].key, level[i].id});
+                uint32_t entry_size = 6 + static_cast<uint32_t>(level[i].key_blob.size());
+                if (space + entry_size > PAGE_SIZE)
+                    break;
+                entries.push_back({level[i].key_blob, level[i].id});
                 space += entry_size;
                 ++i;
             }
 
             writeInternalPage(*np, first_child, entries);
             pool.unpinPage(node_id, true);
-            next_level.push_back({node_id, level[i - entries.size() - 1].key});
+            next_level.push_back({node_id, level[i - entries.size() - 1].key_blob});
         }
         level = std::move(next_level);
     }

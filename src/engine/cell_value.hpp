@@ -13,6 +13,17 @@ using CellPrimitive = std::variant<int64_t, double, bool, std::string>;
 /// SQL NULL encoded as empty optional (distinct from typed empty string TEXT).
 using CellValue = std::optional<CellPrimitive>;
 using Row = std::vector<CellValue>;
+/// B+-tree key: one cell (clustered PK) or two cells (secondary: indexed column + PK).
+using BTreeKey = std::vector<CellValue>;
+
+/// Total order on scalars (NULL first). Same-type compares use native operators; mixed types use lexical fallback.
+int compare_cell_values(const CellValue& a, const CellValue& b);
+
+/// Lexicographic compare over key components.
+int compare_btree_keys(const BTreeKey& a, const BTreeKey& b);
+
+/// Compare for B+tree navigation / range bounds: if one key is a prefix of the other in length, they compare equal.
+int compare_btree_keys_nav(const BTreeKey& a, const BTreeKey& b);
 
 extern const uint8_t kRowMagic[4];
 

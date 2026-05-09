@@ -3,6 +3,7 @@
 #include "engine/page.hpp"
 #include "engine/cell_value.hpp"
 #include "engine/row_codec.hpp"
+#include "engine/storage.hpp"
 #include <iostream>
 #include <string>
 #include <vector>
@@ -90,6 +91,9 @@ public:
 
         std::cout << "\n>>> ФАЗА 20: Типизированное хранение и NULL" << std::endl;
         test_cell_value_and_nulls();
+
+        std::cout << "\n>>> ФАЗА 21: Типизированные ключи B+-дерева (wire, legacy, compare)" << std::endl;
+        test_btree_typed_keys();
 
         std::cout << "\n" << std::string(40, '=') << std::endl;
         std::cout << "ИТОГО: " << passed_count << "/" << total_count << " тестов пройдено." << std::endl;
@@ -682,13 +686,14 @@ private:
 
             db::TableSchema mini_ix;
             mini_ix.table_name = "items";
-            mini_ix.columns = {{"val__composite", "TEXT"}, {"id", "INT"}};
+            mini_ix.columns = {{"val", "TEXT"}, {"id", "INT"}};
             mini_ix.primary_key_index = 1;
 
             db::Row idx_row1;
-            idx_row1.push_back(db::CellPrimitive{std::string{"RecoveredValue" + std::string(1, '\0') + "10"}});
+            idx_row1.push_back(db::CellPrimitive{std::string{"RecoveredValue"}});
             idx_row1.push_back(db::CellPrimitive{int64_t{10}});
-            std::string idx_key1 = "RecoveredValue" + std::string(1, '\0') + "10";
+            std::string idx_key1;
+            db::btree_key_append_bytes(idx_key1, db::BTreeKey{idx_row1[0], idx_row1[1]});
             db::LogRecord rec1_idx(0, 0, db::LogRecordType::ROW_UPSERT, 0,
                                db::LogRecord::encodeRowPayload(index_path, idx_key1, db::serialize_row_disk(mini_ix, idx_row1)));
             wal.appendRecord(rec1_idx);
@@ -796,6 +801,91 @@ private:
 
         executor.execute("DROP TABLE types_test;");
         executor.execute("DROP DATABASE types_db;");
+    }
+
+    void test_btree_typed_keys() {
+        auto check = [this](const char* name, bool cond) {
+            total_count++;
+            if (cond) {
+                std::cout << "  [OK] " << name << std::endl;
+                passed_count++;
+            } else {
+                std::cerr << "  [FAIL] " << name << std::endl;
+            }
+        };
+
+        db::TableSchema clustered;
+        clustered.primary_key_index = 0;
+        clustered.columns = {{"id", "INT"}};
+
+        db::BTreeKey k_int{{db::CellPrimitive{int64_t{7}}}};
+        std::string w_cluster;
+        db::btree_key_append_bytes(w_cluster, k_int);
+        db::BTreeKey dec_cluster;
+        check("BTree wire roundtrip (clustered INT)",
+              db::decode_btree_key_blob(reinterpret_cast<const uint8_t*>(w_cluster.data()),
+                                        static_cast<uint32_t>(w_cluster.size()), 1, clustered,
+                                        dec_cluster) &&
+                  dec_cluster.size() == 1 && dec_cluster[0].has_value() &&
+                  std::holds_alternative<int64_t>(*dec_cluster[0]) &&
+                  std::get<int64_t>(*dec_cluster[0]) == 7);
+
+        db::TableSchema mini;
+        mini.primary_key_index = 1;
+        mini.columns = {{"val", "TEXT"}, {"id", "INT"}};
+        db::BTreeKey k_sec{{db::CellPrimitive{std::string{"hi"}},
+                            db::CellPrimitive{int64_t{3}}}};
+        std::string w_sec;
+        db::btree_key_append_bytes(w_sec, k_sec);
+        db::BTreeKey dec_sec;
+        check("BTree wire roundtrip (secondary TEXT+INT)",
+              db::decode_btree_key_blob(reinterpret_cast<const uint8_t*>(w_sec.data()),
+                                        static_cast<uint32_t>(w_sec.size()), 2, mini, dec_sec) &&
+                  db::compare_btree_keys(dec_sec, k_sec) == 0);
+
+        db::BTreeKey low{{db::CellPrimitive{int64_t{1}}}};
+        db::BTreeKey high{{db::CellPrimitive{int64_t{2}}}};
+        check("compare_btree_keys: INT ascending",
+              db::compare_btree_keys(low, high) < 0 && db::compare_btree_keys(high, low) > 0);
+
+        db::BTreeKey a2{{db::CellPrimitive{std::string{"z"}}, db::CellPrimitive{int64_t{2}}}};
+        db::BTreeKey b2{{db::CellPrimitive{std::string{"z"}}, db::CellPrimitive{int64_t{3}}}};
+        check("compare_btree_keys: same indexed value, PK tie-break",
+              db::compare_btree_keys(a2, b2) < 0);
+
+        db::BTreeKey prefix{{db::CellPrimitive{int64_t{5}}}};
+        db::BTreeKey full;
+        full.push_back(db::CellPrimitive{int64_t{5}});
+        full.push_back(db::CellPrimitive{int64_t{99}});
+        check("compare_btree_keys_nav: prefix vs composite (equal for navigation)",
+              db::compare_btree_keys_nav(prefix, full) == 0 &&
+                  db::compare_btree_keys_nav(full, prefix) == 0);
+
+        std::string leg_pk = "99";
+        db::BTreeKey leg_dec;
+        check("Legacy clustered key decode (lexical INT)",
+              db::btree_key_from_legacy_bytes(reinterpret_cast<const uint8_t*>(leg_pk.data()),
+                                              leg_pk.size(), 1, clustered, leg_dec) &&
+                  leg_dec.size() == 1 && std::get<int64_t>(*leg_dec[0]) == 99);
+
+        std::string leg_ix = std::string("foo") + std::string(1, '\0') + "42";
+        db::BTreeKey leg_ix_dec;
+        check("Legacy secondary key decode (col\\0pk)",
+              db::btree_key_from_legacy_bytes(reinterpret_cast<const uint8_t*>(leg_ix.data()),
+                                              leg_ix.size(), 2, mini, leg_ix_dec) &&
+                  std::get<std::string>(*leg_ix_dec[0]) == "foo" &&
+                  std::get<int64_t>(*leg_ix_dec[1]) == 42);
+
+        std::string w_bad = w_cluster;
+        w_bad.push_back('\x01');
+        db::BTreeKey junk;
+        check("btree_key_parts_from_bytes rejects trailing garbage",
+              !db::btree_key_parts_from_bytes(reinterpret_cast<const uint8_t*>(w_bad.data()),
+                                              w_bad.size(), 1, junk));
+
+        check("compare_cell_values: NULL sorts before non-NULL",
+              db::compare_cell_values(std::nullopt, db::CellPrimitive{int64_t{0}}) < 0 &&
+                  db::compare_cell_values(db::CellPrimitive{int64_t{0}}, std::nullopt) > 0);
     }
 };
 
