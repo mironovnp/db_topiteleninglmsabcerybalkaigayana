@@ -20,9 +20,11 @@ namespace db {
 
 class BufferPool {
 public:
+    /// When replay_mode is true, newPage skips INIT_PAGE WAL records (crash recovery redo).
     explicit BufferPool(const std::string& file_path,
                         uint32_t pool_size = POOL_SIZE,
-                        WALManager* wal_mgr = nullptr);
+                        WALManager* wal_mgr = nullptr,
+                        bool replay_mode = false);
     ~BufferPool();
 
     /// Fetch existing page into pool. Returns pinned page (pin_count++).
@@ -45,6 +47,7 @@ public:
 
     WALManager* getWALManager() const { return wal_mgr_; }
     const std::string& filePath() const { return file_path_; }
+    bool replayMode() const { return replay_mode_; }
 
 private:
     struct Frame {
@@ -73,6 +76,7 @@ private:
     mutable std::fstream    file_;
     uint32_t                next_page_id_ = 0;
     WALManager*             wal_mgr_ = nullptr;
+    bool                    replay_mode_ = false;
 
     void     openFile();
     void     readFromDisk(PageId id, Page& pg);

@@ -24,6 +24,7 @@ public:
 
     // ── Point operations ───────────────────────────────────────────────
     bool     insert(const std::string& key, const Row& row);
+    bool     upsert(const std::string& key, const Row& row);
     bool     remove(const std::string& key);
     std::optional<Row> search(const std::string& key) const;
 

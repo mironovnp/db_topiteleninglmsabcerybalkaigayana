@@ -83,6 +83,9 @@ public:
         std::cout << "\n>>> ФАЗА 18: WAL Recovery" << std::endl;
         test_wal_recovery();
 
+        std::cout << "\n>>> ФАЗА 19: Logical WAL Recovery (Row-level)" << std::endl;
+        test_logical_wal_recovery();
+
         std::cout << "\n" << std::string(40, '=') << std::endl;
         std::cout << "ИТОГО: " << passed_count << "/" << total_count << " тестов пройдено." << std::endl;
         if (passed_count < total_count) {
@@ -618,6 +621,99 @@ private:
         assert_error("SHOW COLUMNS для призрака", "SHOW COLUMNS FROM ghost_table;", "does not exist");
         assert_error("SHOW INDEX для призрака", "SHOW INDEX FROM ghost_table;", "does not exist");
         assert_error("SHOW CREATE TABLE для призрака", "SHOW CREATE TABLE ghost_table;", "does not exist");
+    }
+
+    void test_logical_wal_recovery() {
+        total_count++;
+        try {
+            auto dir = std::filesystem::path(data_dir) / "logical_wal";
+            if (std::filesystem::exists(dir)) std::filesystem::remove_all(dir);
+            std::filesystem::create_directories(dir);
+
+            std::string db_name = "recovery_db";
+            std::string table_path;
+            {
+                db::Storage storage(dir.string());
+                storage.createDatabase(db_name);
+                
+                db::TableSchema s;
+                s.table_name = "items";
+                s.columns = {{"id", "INT"}, {"val", "TEXT"}};
+                s.primary_key_index = 0;
+                storage.createTable(db_name, s);
+                storage.createIndex(db_name, "items", "idx_val", "val");
+                table_path = (dir / db_name / "items.db").string();
+
+                // Вставим строку физически для теста удаления
+                db::Row row2 = {"20", "ToDelete"};
+                storage.appendRows(db_name, "items", {row2});
+                storage.indexInsertRow(db_name, "items", storage.getTableSchema(db_name, "items"), row2);
+            } // Сброс всех BufferPool на диск
+            
+            db::Storage storage(dir.string());
+            std::string wal_path = (dir / db_name / "wal.log").string();
+            db::WALManager wal(wal_path);
+
+            // 1. Тест ROW_UPSERT (Восстановление вставки)
+            table_path = (dir / db_name / "items.db").string();
+            std::string index_path = (dir / db_name / "items.val.idx").string();
+            std::string key1 = "10";
+            db::Row row1 = {"10", "RecoveredValue"};
+            std::string blob1 = db::serializeRow(row1);
+            
+            // Пишем записи в WAL вручную (таблица + индекс)
+            db::LogRecord rec1_tbl(0, 0, db::LogRecordType::ROW_UPSERT, 0, 
+                               db::LogRecord::encodeRowPayload(table_path, key1, blob1));
+            wal.appendRecord(rec1_tbl);
+
+            db::Row idx_row1 = {"RecoveredValue", "10"};
+            std::string idx_key1 = "RecoveredValue" + std::string(1, '\0') + "10";
+            db::LogRecord rec1_idx(0, 0, db::LogRecordType::ROW_UPSERT, 0,
+                               db::LogRecord::encodeRowPayload(index_path, idx_key1, db::serializeRow(idx_row1)));
+            wal.appendRecord(rec1_idx);
+
+            // 2. Тест ROW_DELETE (Восстановление удаления)
+            // Пишем удаление в WAL (таблица + индекс)
+            db::LogRecord rec2_tbl(0, 0, db::LogRecordType::ROW_DELETE, 0,
+                               db::LogRecord::encodeRowPayload(table_path, "20", ""));
+            wal.appendRecord(rec2_tbl);
+
+            std::string idx_key2 = "ToDelete" + std::string(1, '\0') + "20";
+            db::LogRecord rec2_idx(0, 0, db::LogRecordType::ROW_DELETE, 0,
+                               db::LogRecord::encodeRowPayload(index_path, idx_key2, ""));
+            wal.appendRecord(rec2_idx);
+            wal.flushTo(rec2_idx.lsn);
+
+            // Запускаем восстановление
+            wal.recover(&storage);
+
+            // Проверяем результат
+            auto rows = storage.readAllRows(db_name, "items");
+            bool found_10 = false;
+            bool found_20 = false;
+            for (const auto& r : rows) {
+                if (r[0] == "10" && r[1] == "RecoveredValue") found_10 = true;
+                if (r[0] == "20") found_20 = true;
+            }
+
+            // Проверка индекса (должен обновиться при логическом реплее)
+            auto idx_rows = storage.indexLookup(db_name, "items", "val", "RecoveredValue");
+            bool idx_10_ok = (idx_rows.size() == 1 && idx_rows[0] == "10");
+            
+            auto idx_rows_del = storage.indexLookup(db_name, "items", "val", "ToDelete");
+            bool idx_20_del_ok = idx_rows_del.empty();
+
+            if (found_10 && !found_20 && idx_10_ok && idx_20_del_ok) {
+                std::cout << "  [OK] Logical WAL recovery (UPSERT/DELETE + Index) успешно" << std::endl;
+                passed_count++;
+            } else {
+                std::cerr << "  [FAIL] Logical WAL recovery failed: found_10=" << found_10 
+                          << " found_20=" << found_20 << " idx10=" << idx_10_ok 
+                          << " idx20_del=" << idx_20_del_ok << std::endl;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "  [FAIL] test_logical_wal_recovery exception: " << e.what() << std::endl;
+        }
     }
 };
 

@@ -8,8 +8,10 @@ namespace db {
 //  Construction / destruction
 // ════════════════════════════════════════════════════════════════════════
 
-BufferPool::BufferPool(const std::string& file_path, uint32_t pool_size, WALManager* wal_mgr)
-    : file_path_(file_path), pool_size_(pool_size), frames_(pool_size), wal_mgr_(wal_mgr)
+BufferPool::BufferPool(const std::string& file_path, uint32_t pool_size, WALManager* wal_mgr,
+                       bool replay_mode)
+    : file_path_(file_path), pool_size_(pool_size), frames_(pool_size), wal_mgr_(wal_mgr),
+      replay_mode_(replay_mode)
 {
     for (uint32_t i = 0; i < pool_size_; ++i)
         free_list_.push_back(i);
@@ -93,9 +95,8 @@ uint32_t BufferPool::getFrame() {
     Frame& f = frames_[idx];
     // Flush dirty page before evicting
     if (f.dirty) {
-        // STEAL + WAL: before writing a dirty page, the log must be forced
-        // at least up to the page's LSN.
-        if (wal_mgr_) wal_mgr_->flushTo(f.page.getLSN());
+        // With row-logging, page LSN is not authoritative; flush all appended WAL before page write.
+        if (wal_mgr_) wal_mgr_->flushTo(wal_mgr_->getNextLSN() - 1);
         writeToDisk(f.page_id, f.page);
         f.dirty = false;
     }
@@ -152,7 +153,7 @@ Page* BufferPool::newPage(PageId* out_id) {
     f.in_use    = true;
     page_table_[id] = idx;
 
-    if (wal_mgr_) {
+    if (wal_mgr_ && !replay_mode_) {
         LogRecord rec(0, 0, LogRecordType::INIT_PAGE, id);
         LSN lsn = wal_mgr_->appendRecord(rec);
         f.page.setLSN(lsn);
@@ -186,7 +187,7 @@ void BufferPool::flushPage(PageId page_id) {
     if (it == page_table_.end()) return;
     Frame& f = frames_[it->second];
     if (f.dirty) {
-        if (wal_mgr_) wal_mgr_->flushTo(f.page.getLSN());
+        if (wal_mgr_) wal_mgr_->flushTo(wal_mgr_->getNextLSN() - 1);
         writeToDisk(f.page_id, f.page);
         f.dirty = false;
     }
@@ -195,7 +196,7 @@ void BufferPool::flushPage(PageId page_id) {
 void BufferPool::flushAll() {
     for (auto& f : frames_) {
         if (f.in_use && f.dirty) {
-            if (wal_mgr_) wal_mgr_->flushTo(f.page.getLSN());
+            if (wal_mgr_) wal_mgr_->flushTo(wal_mgr_->getNextLSN() - 1);
             writeToDisk(f.page_id, f.page);
             f.dirty = false;
         }

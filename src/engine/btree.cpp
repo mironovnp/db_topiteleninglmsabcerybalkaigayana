@@ -5,25 +5,11 @@
 
 namespace db {
 
+// Row-level WAL is handled by Storage; keep physical page snapshots disabled.
 static void walLogPageImage(BufferPool& pool, PageId page_id, Page& pg) {
-    WALManager* wal = pool.getWALManager();
-    if (!wal) return;
-    // Payload format:
-    //   file_path_len (2) | file_path bytes | page bytes (PAGE_SIZE)
-    // (file_path is needed because page_id is per-file, not global)
-    const std::string& fp = pool.filePath();
-    if (fp.size() > 0xFFFF) return;
-    uint16_t fpl = static_cast<uint16_t>(fp.size());
-    std::string payload;
-    payload.reserve(2 + fp.size() + PAGE_SIZE);
-    payload.append(reinterpret_cast<const char*>(&fpl), 2);
-    payload.append(fp.data(), fp.size());
-    payload.append(pg.data, PAGE_SIZE);
-
-    // Payload can contain '\0' bytes; std::string is fine as a byte buffer.
-    LogRecord rec(0, pg.getLSN(), LogRecordType::PAGE_IMAGE, page_id, std::move(payload));
-    LSN lsn = wal->appendRecord(rec);
-    pg.setLSN(lsn);
+    (void)pool;
+    (void)page_id;
+    (void)pg;
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -171,11 +157,17 @@ void BPlusTree::writeInternalPage(Page& pg, PageId first_child,
 
 PageId BPlusTree::findLeaf(const std::string& key) const {
     PageId cur = root_;
-    while (true) {
+    int depth = 0;
+    while (depth < 100) {
         Page* pg = pool_.fetchPage(cur);
-        if (pg->getPageType() == LEAF_PAGE) {
+        uint32_t type = pg->getPageType();
+        if (type == LEAF_PAGE) {
             pool_.unpinPage(cur, false);
             return cur;
+        }
+        if (type != INTERNAL_PAGE) {
+            pool_.unpinPage(cur, false);
+            throw std::runtime_error("BPlusTree::findLeaf: reached non-tree page type " + std::to_string(type) + " at page " + std::to_string(cur));
         }
         // Internal node — find correct child
         auto entries = readInternalEntries(*pg);
@@ -185,8 +177,11 @@ PageId BPlusTree::findLeaf(const std::string& key) const {
             next = e.child;
         }
         pool_.unpinPage(cur, false);
+        if (next == cur) throw std::runtime_error("BPlusTree::findLeaf: infinite loop at page " + std::to_string(cur));
         cur = next;
+        depth++;
     }
+    throw std::runtime_error("BPlusTree::findLeaf: exceeded max depth");
 }
 
 PageId BPlusTree::findLeftmostLeaf() const {
@@ -312,6 +307,53 @@ std::vector<Row> BPlusTree::scanRange(const std::string* low, const std::string*
 //  Insert
 // ════════════════════════════════════════════════════════════════════════
 
+bool BPlusTree::upsert(const std::string& key, const Row& row) {
+    std::string row_data = serializeRow(row);
+    PageId lid = findLeaf(key);
+    Page* pg = pool_.fetchPage(lid);
+
+    uint32_t n = pg->getNumRecords();
+    int pos = -1;
+    for (uint32_t i = 0; i < n; ++i) {
+        auto cv = readCell(*pg, i);
+        if (compareKeys(key, cv.key) == 0) {
+            pos = static_cast<int>(i);
+            break;
+        }
+    }
+
+    // Replace existing cell: rebuild leaf (same layout as remove, one slot rewritten)
+    if (pos >= 0) {
+        struct KV {
+            std::string key_str, data;
+        };
+        std::vector<KV> cells;
+        for (uint32_t i = 0; i < n; ++i) {
+            auto cv = readCell(*pg, i);
+            if (static_cast<int>(i) == pos)
+                cells.push_back({key, row_data});
+            else
+                cells.push_back({cv.key, std::string(cv.row_ptr, cv.row_len)});
+        }
+
+        PageId next = leafGetNextId(*pg);
+        pg->reset();
+        pg->setPageType(LEAF_PAGE);
+        pg->setPageId(lid);
+        leafSetContentStart(*pg, PAGE_SIZE);
+        leafSetNextId(*pg, next);
+        for (size_t i = 0; i < cells.size(); ++i)
+            leafInsertCell(*pg, cells[i].key_str, cells[i].data, static_cast<int>(i));
+
+        walLogPageImage(pool_, lid, *pg);
+        pool_.unpinPage(lid, true);
+        return true;
+    }
+
+    pool_.unpinPage(lid, false);
+    return insert(key, row);
+}
+
 bool BPlusTree::insert(const std::string& key, const Row& row) {
     std::string row_data = serializeRow(row);
     PageId lid = findLeaf(key);
@@ -324,9 +366,6 @@ bool BPlusTree::insert(const std::string& key, const Row& row) {
         auto cv = readCell(*pg, i);
         int cmp = compareKeys(key, cv.key);
         if (cmp == 0) {
-            // Duplicate key — overwrite
-            // Simplest approach: fall through to split path which rebuilds
-            // For now, just skip duplicate
             pool_.unpinPage(lid, false);
             return false;
         }

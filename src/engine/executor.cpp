@@ -540,12 +540,11 @@ json Executor::execUpdate(const UpdateStatement* q) {
         }
         if (mod) {
             performUpdate(current_db_, q->table_name, s, old, new_row);
-            storage_.indexRemoveRow(current_db_, q->table_name, s, old);
-            storage_.indexInsertRow(current_db_, q->table_name, s, new_row);
-            row = new_row; u++;
+            storage_.upsertClusterRowWal(current_db_, q->table_name, s, &old, new_row);
+            row = new_row;
+            u++;
         }
     }
-    if (u > 0) storage_.writeAllRows(current_db_, q->table_name, rows);
     return {{"success", true}, {"rows_affected", u}, {"message", std::to_string(u) + " updated."}};
 }
 
@@ -561,7 +560,6 @@ void Executor::performUpdate(const std::string& db_name, const std::string& tabl
                 
                 if (old_row[parent_idx] != new_row[parent_idx]) {
                     auto child_rows = storage_.readAllRows(db_name, child_table_name);
-                    bool changed = false;
                     for (auto& cr : child_rows) {
                         if (cr[child_idx] == old_row[parent_idx]) {
                             Row old_cr = cr;
@@ -572,13 +570,11 @@ void Executor::performUpdate(const std::string& db_name, const std::string& tabl
                             } else {
                                 throw std::runtime_error("FOREIGN KEY violation: ON UPDATE RESTRICT/NO_ACTION");
                             }
-                            storage_.indexRemoveRow(db_name, child_table_name, child_s, old_cr);
-                            storage_.indexInsertRow(db_name, child_table_name, child_s, cr);
+                            storage_.upsertClusterRowWal(db_name, child_table_name, child_s,
+                                                        &old_cr, cr);
                             performUpdate(db_name, child_table_name, child_s, old_cr, cr);
-                            changed = true;
                         }
                     }
-                    if (changed) storage_.writeAllRows(db_name, child_table_name, child_rows);
                 }
             }
         }
@@ -630,9 +626,13 @@ void Executor::performDelete(const std::string& db_name, const std::string& tabl
                         performDelete(db_name, child_table_name, referencing_rows, total_deleted);
                     } else if (child_col.on_delete == OnDeleteAction::SET_NULL) {
                         for (auto& cr : child_rows) {
-                            if (cr[child_idx] == pval) cr[child_idx] = "";
+                            if (cr[child_idx] == pval) {
+                                Row old_cr = cr;
+                                cr[child_idx] = "";
+                                storage_.upsertClusterRowWal(db_name, child_table_name, child_s,
+                                                            &old_cr, cr);
+                            }
                         }
-                        storage_.writeAllRows(db_name, child_table_name, child_rows);
                     } else {
                         // NO_ACTION / RESTRICT
                         throw std::runtime_error("FOREIGN KEY violation: cannot delete row from '" + table_name + "' (referenced by '" + child_table_name + "')");
@@ -642,18 +642,11 @@ void Executor::performDelete(const std::string& db_name, const std::string& tabl
         }
     }
 
-    // 2. Physical delete from current table
-    auto all_rows = storage_.readAllRows(db_name, table_name);
-    std::vector<Row> kept;
-    for (const auto& ar : all_rows) {
-        bool should_delete = false;
-        for (const auto& dr : rows_to_delete) {
-            if (ar[s.primary_key_index] == dr[s.primary_key_index]) { should_delete = true; break; }
-        }
-        if (should_delete) { storage_.indexRemoveRow(db_name, table_name, s, ar); total_deleted++; }
-        else kept.push_back(ar);
+    // 2. Physical delete from current table (cluster + indexes via WAL row records)
+    for (const auto& dr : rows_to_delete) {
+        storage_.deleteClusterRowWal(db_name, table_name, s, dr);
+        total_deleted++;
     }
-    storage_.writeAllRows(db_name, table_name, kept);
 }
 
 bool Executor::tryIndexScan(const SelectStatement* q, const TableSchema& s, std::vector<Row>& o) {

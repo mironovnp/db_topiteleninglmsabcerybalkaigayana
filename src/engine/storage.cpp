@@ -15,7 +15,7 @@ Storage::Storage(const std::string& data_dir) : data_dir_(data_dir) {
     std::filesystem::create_directories(data_dir_);
     wal_mgr_ = std::make_unique<WALManager>((data_dir_ / "wal.log").string());
     // Crash recovery: replay WAL into data files before opening any BufferPools.
-    wal_mgr_->recover();
+    wal_mgr_->recover(this);
 }
 
 void Storage::flushAllPools() const {
@@ -35,6 +35,314 @@ void Storage::maybeCheckpoint() {
     flushAllPools();
     // 3) Reset WAL to empty.
     wal_mgr_->reset();
+}
+
+void Storage::walAppendRowDelete(const std::string& abs_path, const std::string& key) {
+    if (!wal_mgr_) return;
+    LogRecord r(0, 0, LogRecordType::ROW_DELETE, 0, LogRecord::encodeRowPayload(abs_path, key));
+    wal_mgr_->appendRecord(r);
+}
+
+void Storage::walAppendRowUpsert(const std::string& abs_path, const std::string& key,
+                                 const std::string& row_blob) {
+    if (!wal_mgr_) return;
+    LogRecord r(0, 0, LogRecordType::ROW_UPSERT, 0,
+               LogRecord::encodeRowPayload(abs_path, key, row_blob));
+    wal_mgr_->appendRecord(r);
+}
+
+void Storage::walFlushDurably() {
+    if (wal_mgr_) wal_mgr_->flushTo(wal_mgr_->getNextLSN() - 1);
+}
+
+static bool pathEndsWithDb(const std::string& path) {
+    return path.size() >= 3 && path.compare(path.size() - 3, 3, ".db") == 0;
+}
+
+static bool pathEndsWithIdx(const std::string& path) {
+    return path.size() >= 4 && path.compare(path.size() - 4, 4, ".idx") == 0;
+}
+
+void Storage::replayWalLogicalRecord(LogRecordType type, std::string abs_path,
+                                    std::string key, std::string row_blob) {
+    if (!pathEndsWithDb(abs_path) && !pathEndsWithIdx(abs_path)) return;
+
+    BufferPool replayPool(abs_path, POOL_SIZE, nullptr, true);
+
+    if (pathEndsWithIdx(abs_path)) {
+        std::filesystem::path fp(abs_path);
+        std::string db_name = fp.parent_path().filename().string();
+        std::string stem = fp.stem().string();
+        size_t dot = stem.find('.');
+        if (dot == std::string::npos) return;
+        std::string table_name = stem.substr(0, dot);
+        std::string column_name = stem.substr(dot + 1);
+
+        auto tp = tablePath(db_name, table_name);
+        BufferPool schemaPool(tp.string(), POOL_SIZE, nullptr, true);
+        Page* sm = schemaPool.fetchPage(0);
+        uint32_t slen = sm->getNumRecords();
+        TableSchema sch = deserializeSchema(sm->data + 16, slen);
+        schemaPool.unpinPage(0, false);
+
+        int col_idx = -1;
+        for (int i = 0; i < (int)sch.columns.size(); ++i)
+            if (sch.columns[i].name == column_name) {
+                col_idx = i;
+                break;
+            }
+        if (col_idx < 0) return;
+        std::string col_type = sch.columns[col_idx].type;
+
+        Page* meta = replayPool.fetchPage(0);
+        PageId root_id;
+        memcpy(&root_id, meta->data + 16, 4);
+        replayPool.unpinPage(0, false);
+
+        BPlusTree tree(replayPool, root_id, col_type);
+        if (type == LogRecordType::ROW_DELETE) {
+            tree.remove(key);
+        } else if (type == LogRecordType::ROW_UPSERT) {
+            Row rw = deserializeRowBlob(row_blob);
+            if (!rw.empty()) {
+                tree.upsert(key, rw);
+            }
+        }
+        PageId new_root = tree.getRootPageId();
+        meta = replayPool.fetchPage(0);
+        memcpy(meta->data + 16, &new_root, 4);
+        replayPool.unpinPage(0, true);
+        replayPool.flushAll();
+        return;
+    }
+
+    // Clustered .db table
+    Page* meta = replayPool.fetchPage(0);
+    PageId root_id;
+    memcpy(&root_id, meta->data + 16, 4);
+    uint32_t payload_len = meta->getNumRecords();
+    TableSchema s = deserializeSchema(meta->data + 16, payload_len);
+    replayPool.unpinPage(0, false);
+
+    std::string key_type = s.columns.empty() ? "TEXT"
+                           : s.columns[s.primary_key_index].type;
+    BPlusTree tree(replayPool, root_id, key_type);
+    if (type == LogRecordType::ROW_DELETE) {
+        tree.remove(key);
+    } else if (type == LogRecordType::ROW_UPSERT) {
+        Row rw = deserializeRowBlob(row_blob);
+        if (!rw.empty()) {
+            tree.upsert(key, rw);
+        }
+    }
+    PageId new_root = tree.getRootPageId();
+    meta = replayPool.fetchPage(0);
+    memcpy(meta->data + 16, &new_root, 4);
+    replayPool.unpinPage(0, true);
+    replayPool.flushAll();
+}
+
+void Storage::indexRemovePhysical(const std::string& db_name, const std::string& table_name,
+                                  const TableSchema& schema, const Row& row) {
+    int pk_idx = schema.primary_key_index;
+
+    for (const auto& idx : schema.indexes) {
+        int col_idx = -1;
+        for (int i = 0; i < (int)schema.columns.size(); ++i)
+            if (schema.columns[i].name == idx.column_name) {
+                col_idx = i;
+                break;
+            }
+        if (col_idx < 0 || col_idx >= (int)row.size()) continue;
+        if (row[col_idx].empty()) continue;
+
+        auto ip = indexPath(db_name, table_name, idx.column_name);
+        if (!std::filesystem::exists(ip)) continue;
+
+        std::string col_type = schema.columns[col_idx].type;
+
+        BufferPool& pool = getPool(ip.string());
+        Page* meta = pool.fetchPage(0);
+        PageId root_id;
+        memcpy(&root_id, meta->data + 16, 4);
+        pool.unpinPage(0, false);
+
+        BPlusTree tree(pool, root_id, col_type);
+        std::string composite_key = row[col_idx] + std::string(1, '\0') + row[pk_idx];
+        tree.remove(composite_key);
+
+        PageId new_root = tree.getRootPageId();
+        meta = pool.fetchPage(0);
+        memcpy(meta->data + 16, &new_root, 4);
+        pool.unpinPage(0, true);
+    }
+}
+
+void Storage::deleteClusterRowWal(const std::string& db_name, const std::string& table_name,
+                                  const TableSchema& schema, const Row& row) {
+    const int pk_idx = schema.primary_key_index;
+    std::string pk = row[pk_idx];
+    const std::string tpath = tablePath(db_name, table_name).string();
+
+    for (const auto& idx : schema.indexes) {
+        int col_idx = -1;
+        for (int i = 0; i < (int)schema.columns.size(); ++i)
+            if (schema.columns[i].name == idx.column_name) {
+                col_idx = i;
+                break;
+            }
+        if (col_idx < 0 || col_idx >= (int)row.size()) continue;
+        if (row[col_idx].empty()) continue;
+
+        auto ip = indexPath(db_name, table_name, idx.column_name);
+        if (!std::filesystem::exists(ip)) continue;
+
+        std::string composite_key = row[col_idx] + std::string(1, '\0') + row[pk_idx];
+        walAppendRowDelete(ip.string(), composite_key);
+    }
+
+    walAppendRowDelete(tpath, pk);
+    walFlushDurably();
+
+    indexRemovePhysical(db_name, table_name, schema, row);
+
+    BufferPool& pool = getPool(tpath);
+    Page* meta = pool.fetchPage(0);
+    PageId root_id;
+    memcpy(&root_id, meta->data + 16, 4);
+    uint32_t payload_len = meta->getNumRecords();
+    TableSchema s = deserializeSchema(meta->data + 16, payload_len);
+    pool.unpinPage(0, false);
+
+    std::string key_type = s.columns.empty() ? "TEXT"
+                           : s.columns[s.primary_key_index].type;
+
+    BPlusTree tree(pool, root_id, key_type);
+    tree.remove(pk);
+
+    PageId new_root = tree.getRootPageId();
+    meta = pool.fetchPage(0);
+    memcpy(meta->data + 16, &new_root, 4);
+    pool.unpinPage(0, true);
+
+    walFlushDurably();
+    maybeCheckpoint();
+}
+
+void Storage::upsertClusterRowWal(const std::string& db_name, const std::string& table_name,
+                                  const TableSchema& schema, const Row* old_row,
+                                  const Row& new_row) {
+    const int pk_idx = schema.primary_key_index;
+    const std::string new_pk = new_row[pk_idx];
+    const std::string tpath = tablePath(db_name, table_name).string();
+
+    if (old_row) {
+        for (const auto& idx : schema.indexes) {
+            int col_idx = -1;
+            for (int i = 0; i < (int)schema.columns.size(); ++i)
+                if (schema.columns[i].name == idx.column_name) {
+                    col_idx = i;
+                    break;
+                }
+            if (col_idx < 0 || col_idx >= (int)old_row->size()) continue;
+            if ((*old_row)[col_idx].empty()) continue;
+
+            auto ip = indexPath(db_name, table_name, idx.column_name);
+            if (!std::filesystem::exists(ip)) continue;
+
+            std::string composite_old =
+                (*old_row)[col_idx] + std::string(1, '\0') + (*old_row)[pk_idx];
+            walAppendRowDelete(ip.string(), composite_old);
+        }
+
+        if ((*old_row)[pk_idx] != new_pk)
+            walAppendRowDelete(tpath, (*old_row)[pk_idx]);
+    }
+
+    walAppendRowUpsert(tpath, new_pk, serializeRow(new_row));
+
+    for (const auto& idx : schema.indexes) {
+        int col_idx = -1;
+        for (int i = 0; i < (int)schema.columns.size(); ++i)
+            if (schema.columns[i].name == idx.column_name) {
+                col_idx = i;
+                break;
+            }
+        if (col_idx < 0 || col_idx >= (int)new_row.size()) continue;
+        if (new_row[col_idx].empty()) continue;
+
+        auto ip = indexPath(db_name, table_name, idx.column_name);
+        if (!std::filesystem::exists(ip)) continue;
+
+        Row idx_row = {new_row[col_idx], new_pk};
+        std::string composite_new =
+            new_row[col_idx] + std::string(1, '\0') + new_pk;
+        walAppendRowUpsert(ip.string(), composite_new, serializeRow(idx_row));
+    }
+
+    walFlushDurably();
+
+    if (old_row) indexRemovePhysical(db_name, table_name, schema, *old_row);
+
+    BufferPool& pool = getPool(tpath);
+    Page* meta = pool.fetchPage(0);
+    PageId root_id;
+    memcpy(&root_id, meta->data + 16, 4);
+    uint32_t payload_len = meta->getNumRecords();
+    TableSchema s = deserializeSchema(meta->data + 16, payload_len);
+    pool.unpinPage(0, false);
+
+    std::string key_type = s.columns.empty() ? "TEXT"
+                           : s.columns[s.primary_key_index].type;
+
+    BPlusTree tree(pool, root_id, key_type);
+    if (old_row && (*old_row)[pk_idx] != new_pk)
+        tree.remove((*old_row)[pk_idx]);
+
+    tree.upsert(new_pk, new_row);
+
+    PageId new_root = tree.getRootPageId();
+    meta = pool.fetchPage(0);
+    memcpy(meta->data + 16, &new_root, 4);
+    pool.unpinPage(0, true);
+
+    // Secondary indexes physical insert/update
+    for (const auto& idx : schema.indexes) {
+        int col_idx = -1;
+        for (int i = 0; i < (int)schema.columns.size(); ++i)
+            if (schema.columns[i].name == idx.column_name) {
+                col_idx = i;
+                break;
+            }
+        if (col_idx < 0 || col_idx >= (int)new_row.size()) continue;
+        if (new_row[col_idx].empty()) continue;
+
+        auto ip = indexPath(db_name, table_name, idx.column_name);
+        if (!std::filesystem::exists(ip)) continue;
+
+        std::string col_type = schema.columns[col_idx].type;
+
+        BufferPool& ipool = getPool(ip.string());
+        Page* im = ipool.fetchPage(0);
+        PageId iroot;
+        memcpy(&iroot, im->data + 16, 4);
+        ipool.unpinPage(0, false);
+
+        Row idx_row = {new_row[col_idx], new_pk};
+        std::string composite_key =
+            new_row[col_idx] + std::string(1, '\0') + new_pk;
+
+        BPlusTree itree(ipool, iroot, col_type);
+        itree.upsert(composite_key, idx_row);
+
+        PageId nr = itree.getRootPageId();
+        im = ipool.fetchPage(0);
+        memcpy(im->data + 16, &nr, 4);
+        ipool.unpinPage(0, true);
+    }
+
+    walFlushDurably();
+    maybeCheckpoint();
 }
 
 std::filesystem::path Storage::dbPath(const std::string& db) const {
@@ -361,6 +669,17 @@ int Storage::appendRows(const std::string& db_name,
 
     BPlusTree tree(pool, root_id, key_type);
 
+    const std::string abs_table = p.string();
+
+    // ROW_UPSERT in WAL before mutating pages (skip duplicates like plain insert).
+    for (const auto& row : rows) {
+        std::string key = row[s.primary_key_index];
+        if (tree.search(key)) continue;
+        std::string blob = serializeRow(row);
+        walAppendRowUpsert(abs_table, key, blob);
+    }
+    walFlushDurably();
+
     int count = 0;
     for (const auto& row : rows) {
         std::string key = row[s.primary_key_index];
@@ -373,7 +692,7 @@ int Storage::appendRows(const std::string& db_name,
     memcpy(meta->data + 16, &new_root, 4);
     pool.unpinPage(0, true);
 
-    if (wal_mgr_) wal_mgr_->flushTo(wal_mgr_->getNextLSN() - 1);
+    walFlushDurably();
     maybeCheckpoint();
     return count;
 }
@@ -746,52 +1065,36 @@ std::vector<std::string> Storage::indexScan(const std::string& db_name,
 }
 
 void Storage::indexInsertRow(const std::string& db_name, const std::string& table_name,
-                              const TableSchema& schema, const Row& row) {
+                             const TableSchema& schema, const Row& row) {
     int pk_idx = schema.primary_key_index;
 
     for (const auto& idx : schema.indexes) {
         int col_idx = -1;
         for (int i = 0; i < (int)schema.columns.size(); ++i)
-            if (schema.columns[i].name == idx.column_name) { col_idx = i; break; }
+            if (schema.columns[i].name == idx.column_name) {
+                col_idx = i;
+                break;
+            }
         if (col_idx < 0 || col_idx >= (int)row.size()) continue;
         if (row[col_idx].empty()) continue;
 
         auto ip = indexPath(db_name, table_name, idx.column_name);
         if (!std::filesystem::exists(ip)) continue;
 
-        std::string col_type = schema.columns[col_idx].type;
-
-        BufferPool& pool = getPool(ip.string());
-        Page* meta = pool.fetchPage(0);
-        PageId root_id;
-        memcpy(&root_id, meta->data + 16, 4);
-        pool.unpinPage(0, false);
-
-        BPlusTree tree(pool, root_id, col_type);
-        // Store {col_value, pk_value} as the row
         Row idx_row = {row[col_idx], row[pk_idx]};
-        // Use a composite key: col_value + "\0" + pk_value for uniqueness
-        std::string composite_key = row[col_idx] + std::string(1, '\0') + row[pk_idx];
-        tree.insert(composite_key, idx_row);
-
-        // Update root in meta
-        PageId new_root = tree.getRootPageId();
-        meta = pool.fetchPage(0);
-        memcpy(meta->data + 16, &new_root, 4);
-        pool.unpinPage(0, true);
-        if (wal_mgr_) wal_mgr_->flushTo(wal_mgr_->getNextLSN() - 1);
-        maybeCheckpoint();
+        std::string composite_key =
+            row[col_idx] + std::string(1, '\0') + row[pk_idx];
+        walAppendRowUpsert(ip.string(), composite_key, serializeRow(idx_row));
     }
-}
-
-void Storage::indexRemoveRow(const std::string& db_name, const std::string& table_name,
-                              const TableSchema& schema, const Row& row) {
-    int pk_idx = schema.primary_key_index;
+    walFlushDurably();
 
     for (const auto& idx : schema.indexes) {
         int col_idx = -1;
         for (int i = 0; i < (int)schema.columns.size(); ++i)
-            if (schema.columns[i].name == idx.column_name) { col_idx = i; break; }
+            if (schema.columns[i].name == idx.column_name) {
+                col_idx = i;
+                break;
+            }
         if (col_idx < 0 || col_idx >= (int)row.size()) continue;
         if (row[col_idx].empty()) continue;
 
@@ -806,17 +1109,21 @@ void Storage::indexRemoveRow(const std::string& db_name, const std::string& tabl
         memcpy(&root_id, meta->data + 16, 4);
         pool.unpinPage(0, false);
 
+        Row idx_row = {row[col_idx], row[pk_idx]};
+        std::string composite_key =
+            row[col_idx] + std::string(1, '\0') + row[pk_idx];
+
         BPlusTree tree(pool, root_id, col_type);
-        std::string composite_key = row[col_idx] + std::string(1, '\0') + row[pk_idx];
-        tree.remove(composite_key);
+        tree.upsert(composite_key, idx_row);
 
         PageId new_root = tree.getRootPageId();
         meta = pool.fetchPage(0);
         memcpy(meta->data + 16, &new_root, 4);
         pool.unpinPage(0, true);
-        if (wal_mgr_) wal_mgr_->flushTo(wal_mgr_->getNextLSN() - 1);
-        maybeCheckpoint();
     }
+
+    walFlushDurably();
+    maybeCheckpoint();
 }
 
 bool Storage::hasIndex(const std::string& db_name, const std::string& table_name,

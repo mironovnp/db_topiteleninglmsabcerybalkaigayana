@@ -115,18 +115,31 @@ inline std::string serializeRow(const Row& row) {
     return buf;
 }
 
-inline Row deserializeRow(const char* ptr, uint16_t total) {
+// Full blob (e.g. WAL); total size is not limited to 16 bits.
+inline Row deserializeRowBytes(const char* ptr, size_t total) {
     Row row;
     const char* end = ptr + total;
     if (ptr + 2 > end) return row;
-    uint16_t n; memcpy(&n, ptr, 2); ptr += 2;
+    uint16_t n;
+    memcpy(&n, ptr, 2);
+    ptr += 2;
     for (uint16_t i = 0; i < n && ptr + 2 <= end; ++i) {
-        uint16_t len; memcpy(&len, ptr, 2); ptr += 2;
+        uint16_t len;
+        memcpy(&len, ptr, 2);
+        ptr += 2;
         if (ptr + len > end) break;
         row.emplace_back(ptr, len);
         ptr += len;
     }
     return row;
+}
+
+inline Row deserializeRow(const char* ptr, uint16_t total) {
+    return deserializeRowBytes(ptr, static_cast<size_t>(total));
+}
+
+inline Row deserializeRowBlob(const std::string& blob) {
+    return deserializeRowBytes(blob.data(), blob.size());
 }
 
 } // namespace db

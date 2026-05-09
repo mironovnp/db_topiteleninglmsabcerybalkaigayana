@@ -1,4 +1,5 @@
 #include "engine/wal.hpp"
+#include "engine/storage.hpp"
 #include <cstring>
 #include <filesystem>
 #include <stdexcept>
@@ -81,6 +82,54 @@ std::pair<LogRecord, uint32_t> LogRecord::deserialize(const char* data, uint32_t
     }
     
     return {rec, 4 + total_len};
+}
+
+std::string LogRecord::encodeRowPayload(const std::string& abs_path,
+                                       const std::string& key,
+                                       const std::string& row_blob) {
+    if (abs_path.size() > 0xFFFF || key.size() > 0xFFFF)
+        throw std::runtime_error("LogRecord::encodeRowPayload: path/key too large");
+    std::string buf;
+    uint16_t pl = static_cast<uint16_t>(abs_path.size());
+    uint16_t kl = static_cast<uint16_t>(key.size());
+    uint32_t rl = static_cast<uint32_t>(row_blob.size());
+    buf.append(reinterpret_cast<const char*>(&pl), 2);
+    buf.append(abs_path.data(), abs_path.size());
+    buf.append(reinterpret_cast<const char*>(&kl), 2);
+    buf.append(key.data(), key.size());
+    buf.append(reinterpret_cast<const char*>(&rl), 4);
+    if (rl > 0) buf.append(row_blob.data(), row_blob.size());
+    return buf;
+}
+
+bool LogRecord::decodeRowPayload(const std::string& payload,
+                                 std::string& out_path,
+                                 std::string& out_key,
+                                 std::string& out_row_blob) {
+    if (payload.size() < 2) return false;
+    const char* p = payload.data();
+    const char* end = payload.data() + payload.size();
+    uint16_t pl;
+    memcpy(&pl, p, 2);
+    p += 2;
+    if (p + pl > end) return false;
+    out_path.assign(p, pl);
+    p += pl;
+    if (p + 2 > end) return false;
+    uint16_t kl;
+    memcpy(&kl, p, 2);
+    p += 2;
+    if (p + kl > end) return false;
+    out_key.assign(p, kl);
+    p += kl;
+    if (p + 4 > end) return false;
+    uint32_t rl;
+    memcpy(&rl, p, 4);
+    p += 4;
+    if (rl > 100ull * 1024 * 1024) return false;
+    if (p + rl > end) return false;
+    out_row_blob.assign(p, rl);
+    return true;
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -210,7 +259,7 @@ void WALManager::flushTo(LSN lsn) {
     }
 }
 
-void WALManager::recover() {
+void WALManager::recover(Storage* storage) {
 #ifndef _WIN32
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -241,6 +290,18 @@ void WALManager::recover() {
         return fd;
     };
 
+    auto readExact = [&](void* dst, size_t n) -> bool {
+        char* p = static_cast<char*>(dst);
+        size_t left = n;
+        while (left > 0) {
+            ssize_t rr = ::read(log_fd_, p, left);
+            if (rr <= 0) return false;
+            p += rr;
+            left -= static_cast<size_t>(rr);
+        }
+        return true;
+    };
+
     while (true) {
         uint32_t total_len = 0;
         ssize_t r = ::read(log_fd_, &total_len, sizeof(total_len));
@@ -256,18 +317,6 @@ void WALManager::recover() {
         uint32_t page_id = 0;
         uint32_t payload_size = 0;
 
-        auto readExact = [&](void* dst, size_t n) -> bool {
-            char* p = static_cast<char*>(dst);
-            size_t left = n;
-            while (left > 0) {
-                ssize_t rr = ::read(log_fd_, p, left);
-                if (rr <= 0) return false;
-                p += rr;
-                left -= static_cast<size_t>(rr);
-            }
-            return true;
-        };
-
         if (!readExact(&type_u8, 1)) break;
         if (!readExact(&lsn, 4)) break;
         if (!readExact(&txn_id, 4)) break;
@@ -280,8 +329,20 @@ void WALManager::recover() {
         LogRecordType type = static_cast<LogRecordType>(type_u8);
         if (payload_size == 0) continue;
 
+        if (type == LogRecordType::ROW_UPSERT || type == LogRecordType::ROW_DELETE) {
+            std::string payload;
+            payload.resize(payload_size);
+            if (!readExact(payload.data(), payload.size())) break;
+            if (storage) {
+                std::string pth, ky, blob;
+                if (LogRecord::decodeRowPayload(payload, pth, ky, blob)) {
+                    storage->replayWalLogicalRecord(type, std::move(pth), std::move(ky), std::move(blob));
+                }
+            }
+            continue;
+        }
+
         if (type != LogRecordType::PAGE_IMAGE) {
-            // Skip payload quickly.
             if (::lseek(log_fd_, payload_size, SEEK_CUR) < 0) break;
             continue;
         }
@@ -292,14 +353,14 @@ void WALManager::recover() {
 
         // Parse payload: file_path_len(2) | file_path | page_bytes(PAGE_SIZE)
         if (payload.size() < 2) continue;
-        const char* p = payload.data();
+        const char* pp = payload.data();
         uint16_t fpl = 0;
-        memcpy(&fpl, p, 2);
-        p += 2;
+        memcpy(&fpl, pp, 2);
+        pp += 2;
         if (payload.size() < 2 + fpl + PAGE_SIZE) continue;
 
-        std::string file_path(p, fpl);
-        p += fpl;
+        std::string file_path(pp, fpl);
+        pp += fpl;
 
         int fd = getDataFd(file_path);
         if (fd < 0) continue;
@@ -317,7 +378,7 @@ void WALManager::recover() {
         if (!should_write) continue;
 
         Page pg;
-        memcpy(pg.data, p, PAGE_SIZE);
+        memcpy(pg.data, pp, PAGE_SIZE);
         pg.setLSN(lsn);
 
         off_t end = ::lseek(fd, 0, SEEK_END);
@@ -327,7 +388,6 @@ void WALManager::recover() {
 
         ssize_t pw = ::pwrite(fd, pg.data, PAGE_SIZE, off);
         if (pw != static_cast<ssize_t>(PAGE_SIZE)) {
-            // Best-effort: keep going even on short write.
             continue;
         }
     }

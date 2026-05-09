@@ -101,11 +101,19 @@ public:
                                        const std::string& column_name,
                                        const std::string* low,
                                        const std::string* high) const;
-    // Insert/remove entries from all secondary indexes of a table
+    // Insert secondary index entries (ROW_UPSERT in WAL + B+ tree); cluster row must already exist.
     void indexInsertRow(const std::string& db_name, const std::string& table_name,
                         const TableSchema& schema, const Row& row);
-    void indexRemoveRow(const std::string& db_name, const std::string& table_name,
-                        const TableSchema& schema, const Row& row);
+
+    // Incremental cluster + index persistence (replaces writeAllRows on UPDATE/DELETE paths).
+    void deleteClusterRowWal(const std::string& db_name, const std::string& table_name,
+                            const TableSchema& schema, const Row& row);
+    void upsertClusterRowWal(const std::string& db_name, const std::string& table_name,
+                             const TableSchema& schema, const Row* old_row, const Row& new_row);
+
+    // Crash recovery: logical redo (called from WALManager::recover).
+    void replayWalLogicalRecord(LogRecordType type, std::string abs_path, std::string key,
+                               std::string row_blob);
     // Check if a secondary index exists for a column
     bool hasIndex(const std::string& db_name, const std::string& table_name,
                   const std::string& column_name) const;
@@ -117,6 +125,14 @@ private:
     std::filesystem::path data_dir_;
     std::unique_ptr<WALManager> wal_mgr_;
     mutable std::unordered_map<std::string, std::unique_ptr<BufferPool>> pools_;
+
+    void walAppendRowDelete(const std::string& abs_path, const std::string& key);
+    void walAppendRowUpsert(const std::string& abs_path, const std::string& key,
+                            const std::string& row_blob);
+    void walFlushDurably();
+
+    void indexRemovePhysical(const std::string& db_name, const std::string& table_name,
+                             const TableSchema& schema, const Row& row);
 
     BufferPool& getPool(const std::string& path) const;
     void closePool(const std::string& path) const;

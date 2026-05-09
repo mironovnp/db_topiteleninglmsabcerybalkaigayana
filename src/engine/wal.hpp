@@ -6,6 +6,8 @@
 
 namespace db {
 
+class Storage;
+
 using LSN = uint32_t;
 using TxnId = uint32_t;
 
@@ -17,6 +19,9 @@ enum class LogRecordType : uint8_t {
     DELETE_CELL,
     // Physical logging: after-image of a full page (PAGE_SIZE bytes) in payload.
     PAGE_IMAGE,
+    // Logical row redo: payload via encodeRowPayload / decodeRowPayload
+    ROW_UPSERT,
+    ROW_DELETE,
     BEGIN_TXN,
     COMMIT_TXN,
     ABORT_TXN
@@ -50,6 +55,15 @@ struct LogRecord {
     
     // Deserialize from bytes. Returns a record and the number of bytes consumed.
     static std::pair<LogRecord, uint32_t> deserialize(const char* data, uint32_t size);
+
+    // ROW_UPSERT / ROW_DELETE: uint16 path_len | path | uint16 key_len | key | uint32 row_len | row
+    static std::string encodeRowPayload(const std::string& abs_path,
+                                       const std::string& key,
+                                       const std::string& row_blob = {});
+    static bool decodeRowPayload(const std::string& payload,
+                                 std::string& out_path,
+                                 std::string& out_key,
+                                 std::string& out_row_blob);
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -66,8 +80,8 @@ public:
     // Forces the log to disk up to the specified LSN.
     void flushTo(LSN lsn);
 
-    // Crash recovery (redo): re-apply physical page images from WAL to data files.
-    void recover();
+    // Crash recovery (redo): PAGE_IMAGE + ROW_* replay when storage != nullptr.
+    void recover(Storage* storage = nullptr);
 
     // Reset the WAL file to empty (used after a successful checkpoint).
     void reset();
