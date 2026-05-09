@@ -1,4 +1,6 @@
 #include "engine/executor.hpp"
+#include "engine/cell_value.hpp"
+#include <cctype>
 #include <stdexcept>
 #include <algorithm>
 #include <functional>
@@ -11,6 +13,34 @@
 #include <iostream>
 
 namespace db {
+
+namespace {
+
+CellValue value_to_cell(const ColumnDef& col, const Value& v) {
+    if (v.type == "NULL")
+        return std::nullopt;
+    if (col.type == "TEXT")
+        return CellPrimitive{v.val};
+    if (col.type == "BOOL") {
+        std::string s = v.val;
+        for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (s == "1" || s == "true")
+            return CellPrimitive{true};
+        if (s == "0" || s == "false")
+            return CellPrimitive{false};
+        return CellPrimitive{v.val};
+    }
+    try {
+        if (col.type == "INT")
+            return static_cast<int64_t>(std::stoll(v.val));
+        if (col.type == "FLOAT")
+            return std::stod(v.val);
+    } catch (...) {
+    }
+    return coerce_string_to_cell_column(col, v.val, false);
+}
+
+} // namespace
 
 static std::string formatFloat(double val) {
     std::ostringstream out;
@@ -98,16 +128,34 @@ Value Executor::evaluateExpression(const Expression* expr, const Row& row, const
     if (!expr) return {"", "NULL"};
     if (auto lit = dynamic_cast<const LiteralExpression*>(expr)) {
         if (lit->type == TokenType::NUMBER_LITERAL) return {lit->value, lit->value.find('.') != std::string::npos ? "FLOAT" : "INT"};
-        if (lit->type == TokenType::BOOL_LITERAL) return {lit->value == "TRUE" ? "1" : "0", "BOOL"};
+        if (lit->type == TokenType::BOOL_LITERAL) {
+            std::string lv = lit->value;
+            for (auto& ch : lv) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            bool on = (lv == "true" || lv == "1");
+            return {on ? "true" : "false", "BOOL"};
+        }
         if (lit->type == TokenType::KW_NULL) return {"", "NULL"};
         return {lit->value, "TEXT"};
     }
     if (auto col = dynamic_cast<const ColumnExpression*>(expr)) {
         int idx = colIndex(schema, col->table, col->column);
-        if (idx >= 0) return {row[idx], schema.columns[idx].type};
+        if (idx >= 0) {
+            CellValue cv =
+                (idx < (int)row.size()) ? row[static_cast<size_t>(idx)] : CellValue{};
+            if (!cv.has_value())
+                return {"", "NULL"};
+            return {cell_to_where_string(cv), schema.columns[static_cast<size_t>(idx)].type};
+        }
         if (outer_schema && outer_row) {
             idx = colIndex(*outer_schema, col->table, col->column);
-            if (idx >= 0) return {(*outer_row)[idx], outer_schema->columns[idx].type};
+            if (idx >= 0) {
+                CellValue cv = (idx < (int)outer_row->size())
+                                   ? (*outer_row)[static_cast<size_t>(idx)]
+                                   : CellValue{};
+                if (!cv.has_value())
+                    return {"", "NULL"};
+                return {cell_to_where_string(cv), outer_schema->columns[static_cast<size_t>(idx)].type};
+            }
         }
         throw std::runtime_error("Unknown column: " + (col->table.empty() ? "" : col->table + ".") + col->column);
     }
@@ -143,11 +191,18 @@ Value Executor::evaluateExpression(const Expression* expr, const Row& row, const
         }
         Value left = evaluateExpression(bin->left.get(), row, schema, aggrs, outer_schema, outer_row);
         if (bin->op == TokenType::KW_IN) {
-            if (auto sub = dynamic_cast<const SubqueryExpression*>(bin->right.get())) {
-                auto sub_res = const_cast<Executor*>(this)->execute_subquery(sub->subquery.get(), &schema, &row);
+            if (auto in_sub =
+                    dynamic_cast<const SubqueryExpression*>(bin->right.get())) {
+                auto rows_in = const_cast<Executor*>(this)->execute_subquery(
+                    in_sub->subquery.get(), &schema, &row);
                 bool found = false;
-                for (const auto& sr : sub_res) if (!sr.empty() && sr[0] == left.val) { found = true; break; }
-                return {(sub->negated ? !found : found) ? "1" : "0", "BOOL"};
+                for (const auto& one : rows_in) {
+                    if (!one.empty() && cell_to_where_string(one[0]) == left.val) {
+                        found = true;
+                        break;
+                    }
+                }
+                return {(in_sub->negated ? !found : found) ? "1" : "0", "BOOL"};
             }
         }
         Value right = evaluateExpression(bin->right.get(), row, schema, aggrs, outer_schema, outer_row);
@@ -160,6 +215,9 @@ Value Executor::evaluateExpression(const Expression* expr, const Row& row, const
             else if (bin->op == TokenType::STAR) res = lv * rv;
             else if (bin->op == TokenType::OP_DIV) res = (rv != 0) ? lv / rv : 0;
             return {formatFloat(res), "FLOAT"};
+        }
+        if (left.type == "NULL" || right.type == "NULL") {
+            return {"0", "BOOL"};
         }
         int cmp = compareValues(left, right);
         bool res = false;
@@ -181,7 +239,7 @@ Value Executor::evaluateExpression(const Expression* expr, const Row& row, const
     }
     if (auto is_null = dynamic_cast<const IsNullExpression*>(expr)) {
         Value v = evaluateExpression(is_null->operand.get(), row, schema, aggrs, outer_schema, outer_row);
-        bool is_v_null = (v.type == "NULL" || v.val.empty());
+        bool is_v_null = (v.type == "NULL");
         return {(is_null->is_not ? !is_v_null : is_v_null) ? "1" : "0", "BOOL"};
     }
     if (auto lk = dynamic_cast<const LikeExpression*>(expr)) {
@@ -203,7 +261,7 @@ Value Executor::evaluateExpression(const Expression* expr, const Row& row, const
         }
         // Scalar subquery: return first column of first row
         if (res.empty() || res[0].empty()) return {"", "NULL"};
-        return {res[0][0], "TEXT"}; // Type info is lost here but will be coerced in comparisons
+        return {cell_to_where_string(res[0][0]), "TEXT"};
     }
     return {"", "NULL"};
 }
@@ -406,40 +464,49 @@ json Executor::execInsert(const InsertStatement* q) {
     std::map<int, long> last_ids; // Reset for each INSERT statement
 
     for (auto& ivs : q->insert_values) {
-        Row r(s.columns.size(), "");
+        Row r(s.columns.size());
         if (q->insert_columns.empty()) {
             for (size_t i = 0; i < ivs.size() && i < r.size(); ++i) {
-                r[i] = evaluateExpression(ivs[i].get(), Row(), s).val;
+                r[i] = value_to_cell(s.columns[i], evaluateExpression(ivs[i].get(), Row(), s));
             }
         } else {
             for (size_t i = 0; i < ivs.size() && i < q->insert_columns.size(); ++i) {
                 int idx = colIndex(s, "", q->insert_columns[i]);
                 if (idx < 0) throw std::runtime_error("Unknown column: " + q->insert_columns[i]);
-                r[idx] = evaluateExpression(ivs[i].get(), Row(), s).val;
+                r[static_cast<size_t>(idx)] =
+                    value_to_cell(s.columns[static_cast<size_t>(idx)],
+                                  evaluateExpression(ivs[i].get(), Row(), s));
             }
         }
 
         // Apply DEFAULTS and AUTO_INCREMENT
         for (size_t i = 0; i < s.columns.size(); ++i) {
-            if (r[i].empty()) {
+            if (!r[i].has_value()) {
                 if (s.columns[i].is_autoincrement) {
-                    if (last_ids.find(i) == last_ids.end()) {
+                    if (last_ids.find(static_cast<int>(i)) == last_ids.end()) {
                         long max_id = 0;
                         auto all_rows = storage_.readAllRows(current_db_, q->table_name);
                         for (const auto& ar : all_rows) {
-                            try { if (!ar[i].empty()) { long id = std::stol(ar[i]); if (id > max_id) max_id = id; } } catch(...) {}
+                            try {
+                                if (i < ar.size() && ar[i].has_value()) {
+                                    long id = std::stol(cell_to_where_string(ar[i]));
+                                    if (id > max_id) max_id = id;
+                                }
+                            } catch (...) {
+                            }
                         }
-                        last_ids[i] = max_id;
+                        last_ids[static_cast<int>(i)] = max_id;
                     }
-                    r[i] = std::to_string(++last_ids[i]);
+                    r[i] = CellPrimitive{static_cast<int64_t>(++last_ids[static_cast<int>(i)])};
                 } else if (s.columns[i].has_default) {
-                    r[i] = s.columns[i].default_value;
+                    r[i] = coerce_string_to_cell_column(s.columns[i], s.columns[i].default_value,
+                                                        false);
                 }
             }
         }
 
         for (size_t i = 0; i < s.columns.size(); ++i) {
-            if (s.columns[i].not_null && r[i].empty()) {
+            if (s.columns[i].not_null && !r[i].has_value()) {
                 return err("NOT NULL constraint violation: column '" + s.columns[i].name + "'");
             }
         }
@@ -455,36 +522,38 @@ json Executor::execInsert(const InsertStatement* q) {
         
         for (size_t i = 0; i < s.columns.size(); ++i) {
             if (s.columns[i].unique || (int)i == s.primary_key_index) {
-                const std::string& val = r[i];
-                if (val.empty()) continue; // NULL значения обычно не нарушают UNIQUE (кроме PK)
+                if (!r[i].has_value())
+                    continue;
+
+                const std::string val = cell_to_where_string(r[i]);
 
                 // Проверка во вставляемых данных (в рамках одного запроса)
                 for (size_t prev_idx = 0; prev_idx < row_idx; ++prev_idx) {
-                    if (evaluated_rows[prev_idx][i] == val) {
+                    if (cell_to_where_string(evaluated_rows[prev_idx][i]) == val) {
                         return err("UNIQUE constraint violation: duplicate value '" + val + "' in insert list");
                     }
                 }
 
                 // Проверка в существующих данных
                 if ((int)i == s.primary_key_index) {
-                    // Первичный ключ проверяем быстро через findRow
                     if (!storage_.findRow(current_db_, q->table_name, val).empty()) {
                         return err("PRIMARY KEY violation: duplicate key '" + val + "'");
                     }
                 } else if (storage_.hasIndex(current_db_, q->table_name, s.columns[i].name)) {
-                    // Вторичный индекс
-                    if (!storage_.indexLookup(current_db_, q->table_name, s.columns[i].name, val).empty()) {
-                        return err("UNIQUE constraint violation: duplicate value '" + val + "' in column '" + s.columns[i].name + "'");
+                    if (!storage_.indexLookup(current_db_, q->table_name, s.columns[i].name, val)
+                             .empty()) {
+                        return err("UNIQUE constraint violation: duplicate value '" + val +
+                                   "' in column '" + s.columns[i].name + "'");
                     }
                 } else {
-                    // Медленная проверка через полный скан (если индекса нет)
                     if (!table_data_loaded) {
                         current_table_data = storage_.readAllRows(current_db_, q->table_name);
                         table_data_loaded = true;
                     }
                     for (const auto& tr : current_table_data) {
-                        if (tr[i] == val) {
-                            return err("UNIQUE constraint violation: duplicate value '" + val + "' in column '" + s.columns[i].name + "'");
+                        if (cell_to_where_string(tr[i]) == val) {
+                            return err("UNIQUE constraint violation: duplicate value '" + val +
+                                       "' in column '" + s.columns[i].name + "'");
                         }
                     }
                 }
@@ -496,20 +565,34 @@ json Executor::execInsert(const InsertStatement* q) {
     for (const auto& r : evaluated_rows) {
         for (size_t i = 0; i < s.columns.size(); ++i) {
             if (!s.columns[i].fk_ref_table.empty()) {
-                const std::string& val = r[i];
-                if (val.empty()) continue; 
+                if (!r[i].has_value())
+                    continue;
+                const std::string val = cell_to_where_string(r[i]);
                 auto ps = storage_.getTableSchema(current_db_, s.columns[i].fk_ref_table);
                 int pi = colIndex(ps, "", s.columns[i].fk_ref_column);
                 if (pi < 0) throw std::runtime_error("Invalid FK reference column");
                 bool found = false;
-                if (pi == ps.primary_key_index) { if (!storage_.findRow(current_db_, s.columns[i].fk_ref_table, val).empty()) found = true; }
-                else if (storage_.hasIndex(current_db_, s.columns[i].fk_ref_table, s.columns[i].fk_ref_column)) {
-                    if (!storage_.indexLookup(current_db_, s.columns[i].fk_ref_table, s.columns[i].fk_ref_column, val).empty()) found = true;
+                if (pi == ps.primary_key_index) {
+                    if (!storage_.findRow(current_db_, s.columns[i].fk_ref_table, val).empty())
+                        found = true;
+                } else if (storage_.hasIndex(current_db_, s.columns[i].fk_ref_table,
+                                             s.columns[i].fk_ref_column)) {
+                    if (!storage_.indexLookup(current_db_, s.columns[i].fk_ref_table,
+                                              s.columns[i].fk_ref_column, val)
+                             .empty())
+                        found = true;
                 } else {
                     auto prs = storage_.readAllRows(current_db_, s.columns[i].fk_ref_table);
-                    for (const auto& pr : prs) if (pr[pi] == val) { found = true; break; }
+                    for (const auto& pr : prs) {
+                        if (cell_to_where_string(pr[pi]) == val) {
+                            found = true;
+                            break;
+                        }
+                    }
                 }
-                if (!found) return err("FOREIGN KEY violation: value '" + val + "' not found in " + s.columns[i].fk_ref_table);
+                if (!found)
+                    return err("FOREIGN KEY violation: value '" + val + "' not found in " +
+                               s.columns[i].fk_ref_table);
             }
         }
     }
@@ -535,7 +618,10 @@ json Executor::execUpdate(const UpdateStatement* q) {
         for (auto& sc : q->set_clauses) {
             int idx = colIndex(s, "", sc.column);
             if (idx < 0) throw std::runtime_error("Unknown column: " + sc.column);
-            new_row[idx] = evaluateExpression(sc.value.get(), row, s, nullptr, outer_schema_, outer_row_).val;
+            new_row[static_cast<size_t>(idx)] =
+                value_to_cell(s.columns[static_cast<size_t>(idx)],
+                              evaluateExpression(sc.value.get(), row, s, nullptr, outer_schema_,
+                                                 outer_row_));
             mod = true;
         }
         if (mod) {
@@ -558,15 +644,17 @@ void Executor::performUpdate(const std::string& db_name, const std::string& tabl
                 int child_idx = colIndex(child_s, "", child_col.name);
                 if (parent_idx < 0 || child_idx < 0) continue;
                 
-                if (old_row[parent_idx] != new_row[parent_idx]) {
+                if (cell_to_where_string(old_row[parent_idx]) !=
+                    cell_to_where_string(new_row[parent_idx])) {
                     auto child_rows = storage_.readAllRows(db_name, child_table_name);
                     for (auto& cr : child_rows) {
-                        if (cr[child_idx] == old_row[parent_idx]) {
+                        if (cell_to_where_string(cr[child_idx]) ==
+                            cell_to_where_string(old_row[parent_idx])) {
                             Row old_cr = cr;
                             if (child_col.on_update == OnUpdateAction::CASCADE) {
                                 cr[child_idx] = new_row[parent_idx];
                             } else if (child_col.on_update == OnUpdateAction::SET_NULL) {
-                                cr[child_idx] = "";
+                                cr[child_idx] = std::nullopt;
                             } else {
                                 throw std::runtime_error("FOREIGN KEY violation: ON UPDATE RESTRICT/NO_ACTION");
                             }
@@ -613,12 +701,13 @@ void Executor::performDelete(const std::string& db_name, const std::string& tabl
                 if (parent_idx < 0 || child_idx < 0) continue;
 
                 for (const auto& prow : rows_to_delete) {
-                    const std::string& pval = prow[parent_idx];
-                    
-                    // Find rows in child table that point to this parent value
+                    const std::string pval = cell_to_where_string(prow[parent_idx]);
+
                     auto child_rows = storage_.readAllRows(db_name, child_table_name);
                     std::vector<Row> referencing_rows;
-                    for (const auto& cr : child_rows) if (cr[child_idx] == pval) referencing_rows.push_back(cr);
+                    for (const auto& cr : child_rows)
+                        if (cell_to_where_string(cr[child_idx]) == pval)
+                            referencing_rows.push_back(cr);
 
                     if (referencing_rows.empty()) continue;
 
@@ -626,9 +715,9 @@ void Executor::performDelete(const std::string& db_name, const std::string& tabl
                         performDelete(db_name, child_table_name, referencing_rows, total_deleted);
                     } else if (child_col.on_delete == OnDeleteAction::SET_NULL) {
                         for (auto& cr : child_rows) {
-                            if (cr[child_idx] == pval) {
+                            if (cell_to_where_string(cr[child_idx]) == pval) {
                                 Row old_cr = cr;
-                                cr[child_idx] = "";
+                                cr[child_idx] = std::nullopt;
                                 storage_.upsertClusterRowWal(db_name, child_table_name, child_s,
                                                             &old_cr, cr);
                             }
@@ -720,7 +809,10 @@ bool Executor::tryIndexScan(const SelectStatement* q, const TableSchema& s, std:
         
         // Final filter for strict inequalities if needed
         if (op == TokenType::OP_GT || op == TokenType::OP_LT) {
-            Value v = {row[colIndex(s, "", col->column)], ""};
+            int cix = colIndex(s, "", col->column);
+            Value v = {cell_to_where_string((cix >= 0 && cix < (int)row.size()) ? row[cix]
+                                                                         : CellValue{}),
+                       cix >= 0 ? s.columns[cix].type : "TEXT"};
             Value lv = {lit->value, ""};
             int cmp = compareValues(v, lv);
             if (op == TokenType::OP_GT && cmp <= 0) continue;
@@ -751,8 +843,14 @@ json Executor::execSelect(const SelectStatement* q) {
         }
         for (auto& r_json : sub_res["rows"]) {
             Row r;
-            for (auto& val : r_json) r.push_back(val.get<std::string>());
-            rows.push_back(r);
+            size_t j = 0;
+            for (auto& val : r_json) {
+                if (j < m.columns.size())
+                    r.push_back(coerce_string_to_cell_column(m.columns[j], val.get<std::string>(),
+                                                             false));
+                ++j;
+            }
+            rows.push_back(std::move(r));
         }
     } else {
         requireDB();
@@ -811,7 +909,7 @@ json Executor::execSelect(const SelectStatement* q) {
             }
         } else if (use_index_join) {
             for (auto& lr : rows) {
-                std::string key = lr[li];
+                std::string key = cell_to_where_string(lr[li]);
                 bool matched = false;
 
                 if (is_pk) {
@@ -832,7 +930,10 @@ json Executor::execSelect(const SelectStatement* q) {
                 }
 
                 if (!matched && jc.join_type == JoinClause::LEFT) {
-                    Row c = lr; c.insert(c.end(), rs.columns.size(), ""); res.push_back(std::move(c));
+                    Row c = lr;
+                    Row pad(rs.columns.size());
+                    c.insert(c.end(), pad.begin(), pad.end());
+                    res.push_back(std::move(c));
                 }
             }
         } else if (USE_HASH_JOIN) {
@@ -840,13 +941,13 @@ json Executor::execSelect(const SelectStatement* q) {
             auto rr = storage_.readAllRows(current_db_, jc.table_name);
             std::unordered_map<std::string, std::vector<size_t>> hash_map;
             for (size_t i = 0; i < rows.size(); ++i) {
-                hash_map[rows[i][li]].push_back(i);
+                hash_map[cell_to_where_string(rows[i][li])].push_back(i);
             }
             std::vector<bool> left_matched(rows.size(), false);
             std::vector<bool> right_matched(rr.size(), false);
 
             for (size_t i = 0; i < rr.size(); ++i) {
-                std::string r_key = rr[i][ri];
+                std::string r_key = cell_to_where_string(rr[i][ri]);
                 auto it = hash_map.find(r_key);
                 if (it != hash_map.end()) {
                     for (size_t l_idx : it->second) {
@@ -861,14 +962,19 @@ json Executor::execSelect(const SelectStatement* q) {
             if (jc.join_type == JoinClause::LEFT || jc.join_type == JoinClause::FULL) {
                 for (size_t i = 0; i < rows.size(); ++i) {
                     if (!left_matched[i]) {
-                        Row c = rows[i]; c.insert(c.end(), rs.columns.size(), ""); res.push_back(std::move(c));
+                        Row c = rows[i];
+                        Row pad(rs.columns.size());
+                        c.insert(c.end(), pad.begin(), pad.end());
+                        res.push_back(std::move(c));
                     }
                 }
             }
             if (jc.join_type == JoinClause::RIGHT || jc.join_type == JoinClause::FULL) {
                 for (size_t i = 0; i < rr.size(); ++i) {
                     if (!right_matched[i]) {
-                        Row c(m.columns.size(), ""); c.insert(c.end(), rr[i].begin(), rr[i].end()); res.push_back(std::move(c));
+                        Row c(m.columns.size());
+                        c.insert(c.end(), rr[i].begin(), rr[i].end());
+                        res.push_back(std::move(c));
                     }
                 }
             }
@@ -879,19 +985,23 @@ json Executor::execSelect(const SelectStatement* q) {
             for (auto& lr : rows) {
                 bool matched = false;
                 for (size_t i = 0; i < rr.size(); ++i) {
-                    if (lr[li] == rr[i][ri]) {
+                    if (cell_to_where_string(lr[li]) == cell_to_where_string(rr[i][ri])) {
                         Row c = lr; c.insert(c.end(), rr[i].begin(), rr[i].end());
                         res.push_back(std::move(c)); matched = true; rm[i] = true;
                     }
                 }
                 if (!matched && (jc.join_type == JoinClause::LEFT || jc.join_type == JoinClause::FULL)) {
-                    Row c = lr; c.insert(c.end(), rs.columns.size(), ""); res.push_back(std::move(c));
+                    Row c = lr;
+                    Row pad(rs.columns.size());
+                    c.insert(c.end(), pad.begin(), pad.end());
+                    res.push_back(std::move(c));
                 }
             }
             if (jc.join_type == JoinClause::RIGHT || jc.join_type == JoinClause::FULL) {
                 for (size_t i = 0; i < rr.size(); ++i) {
                     if (!rm[i]) {
-                        Row c(m.columns.size(), ""); c.insert(c.end(), rr[i].begin(), rr[i].end());
+                        Row c(m.columns.size());
+                        c.insert(c.end(), rr[i].begin(), rr[i].end());
                         res.push_back(std::move(c));
                     }
                 }
@@ -936,7 +1046,11 @@ json Executor::execSelect(const SelectStatement* q) {
 
         std::map<std::string, Group> g_map;
         for (auto& row : rows) {
-            std::string k; for (auto& gb : q->group_by) { int i = colIndex(m, "", gb); k += (i >= 0 ? row[i] : "") + "|"; }
+            std::string k;
+            for (auto& gb : q->group_by) {
+                int i = colIndex(m, "", gb);
+                k += (i >= 0 ? cell_to_where_string(row[i]) : "") + "|";
+            }
             auto& g = g_map[k]; if (g.rep.empty()) g.rep = row;
             for (auto& aggr_pair : unique_aggr_exprs) {
                 auto& aggr = aggr_pair.first;
@@ -947,7 +1061,7 @@ json Executor::execSelect(const SelectStatement* q) {
                 if (aggr.second == "*") val_to_add = "*";
                 else {
                     int i = colIndex(m, "", aggr.second);
-                    if (i >= 0) val_to_add = row[i];
+                    if (i >= 0) val_to_add = cell_to_where_string(row[i]);
                 }
 
                 if (is_distinct) {
@@ -968,7 +1082,7 @@ json Executor::execSelect(const SelectStatement* q) {
         }
         if (g_map.empty() && q->group_by.empty()) {
             Group& g = g_map[""];
-            g.rep = Row(m.columns.size(), "");
+            g.rep = Row(m.columns.size());
             for (auto& aggr_pair : unique_aggr_exprs) {
                 auto& st = g.st[aggr_pair.first];
                 st.count = 0;
@@ -993,7 +1107,8 @@ json Executor::execSelect(const SelectStatement* q) {
         });
     }
 
-    std::vector<Row> res_r; std::vector<std::string> cn;
+    std::vector<std::vector<std::string>> res_r;
+    std::vector<std::string> cn;
     if (q->select_all) for (auto& c : m.columns) cn.push_back(c.name);
     else for (auto& sc : q->select_columns) {
         if (!sc.alias.empty()) cn.push_back(sc.alias);
@@ -1003,16 +1118,22 @@ json Executor::execSelect(const SelectStatement* q) {
     }
 
     for (auto& g : groups) {
-        Row r; if (q->select_all) r = g.rep;
-        else for (auto& sc : q->select_columns) {
-            r.push_back(evaluateExpression(sc.expr.get(), g.rep, m, &g.st, outer_schema_, outer_row_).val);
+        std::vector<std::string> out;
+        if (q->select_all) {
+            out.reserve(g.rep.size());
+            for (auto& cv : g.rep) out.push_back(cell_to_where_string(cv));
+        } else {
+            for (auto& sc : q->select_columns) {
+                out.push_back(
+                    evaluateExpression(sc.expr.get(), g.rep, m, &g.st, outer_schema_, outer_row_).val);
+            }
         }
-        res_r.push_back(std::move(r));
+        res_r.push_back(std::move(out));
     }
 
     if (q->distinct) {
-        std::set<Row> unique_rows;
-        std::vector<Row> distinct_rows;
+        std::set<std::vector<std::string>> unique_rows;
+        std::vector<std::vector<std::string>> distinct_rows;
         for (auto& r : res_r) {
             if (unique_rows.find(r) == unique_rows.end()) {
                 unique_rows.insert(r);
@@ -1024,14 +1145,39 @@ json Executor::execSelect(const SelectStatement* q) {
 
     json res; res["success"] = true; res["type"] = "select"; res["columns"] = cn; res["rows"] = json::array();
     int s_i = std::max(0, q->offset), count = q->limit >= 0 ? q->limit : (int)res_r.size(), e_i = std::min((int)res_r.size(), s_i + count);
-    for (int i = s_i; i < e_i; ++i) { json jr = json::array(); for (auto& v : res_r[i]) jr.push_back(v); res["rows"].push_back(jr); }
+    for (int i = s_i; i < e_i; ++i) {
+        json jr = json::array();
+        for (auto& v : res_r[i]) jr.push_back(v);
+        res["rows"].push_back(jr);
+    }
     return res;
 }
 
 std::vector<Row> Executor::execute_subquery(const SelectStatement* q, const TableSchema* os, const Row* orow) {
     const TableSchema* ps = outer_schema_; const Row* pr = outer_row_; outer_schema_ = os; outer_row_ = orow;
     auto r = execSelect(q); outer_schema_ = ps; outer_row_ = pr; std::vector<Row> rws;
-    if (r["success"]) for (auto& rr : r["rows"]) { Row row; for (auto& v : rr) row.push_back(v.get<std::string>()); rws.push_back(row); }
+    if (r["success"]) {
+        TableSchema inferred;
+        inferred.table_name = "";
+        inferred.columns.reserve(r["columns"].size());
+        for (auto& cname : r["columns"]) {
+            ColumnDef d;
+            d.name = cname.get<std::string>();
+            d.type = "TEXT";
+            inferred.columns.push_back(std::move(d));
+        }
+        for (auto& rr : r["rows"]) {
+            Row row;
+            size_t j = 0;
+            for (auto& v : rr) {
+                if (j < inferred.columns.size())
+                    row.push_back(
+                        coerce_string_to_cell_column(inferred.columns[j], v.get<std::string>(), false));
+                ++j;
+            }
+            rws.push_back(std::move(row));
+        }
+    }
     return rws;
 }
 

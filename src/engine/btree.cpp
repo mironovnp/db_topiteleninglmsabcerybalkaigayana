@@ -1,9 +1,25 @@
 #include "engine/btree.hpp"
+#include "engine/cell_value.hpp"
+#include "engine/row_codec.hpp"
+#include "engine/storage.hpp"
 #include <algorithm>
 #include <stdexcept>
 #include <cmath>
 
 namespace db {
+
+namespace {
+
+std::string row_lex_key_col(const TableSchema* sch, const Row& row, uint32_t key_col) {
+    if (!sch || key_col >= row.size())
+        return "";
+    CellValue cv = row[key_col];
+    if (!cv.has_value())
+        return "";
+    return cell_primitive_to_lexical_for_key(*cv);
+}
+
+} // namespace
 
 // Row-level WAL is handled by Storage; keep physical page snapshots disabled.
 static void walLogPageImage(BufferPool& pool, PageId page_id, Page& pg) {
@@ -12,13 +28,30 @@ static void walLogPageImage(BufferPool& pool, PageId page_id, Page& pg) {
     (void)pg;
 }
 
-// ════════════════════════════════════════════════════════════════════════
-//  Constructor
-// ════════════════════════════════════════════════════════════════════════
+std::string BPlusTree::pack_row_blob(const Row& row) const {
+    std::string s = serialize_row_disk(*row_schema_, row);
+    if (s.size() > 65535u)
+        throw std::runtime_error("BPlusTree: row serialized blob exceeds 65535 bytes");
+    return s;
+}
 
-BPlusTree::BPlusTree(BufferPool& pool, PageId root_page_id,
-                     const std::string& key_type)
-    : pool_(pool), root_(root_page_id), key_type_(key_type) {}
+Row BPlusTree::unpack_row_blob(const uint8_t* blob, uint32_t blob_len) const {
+    Row out;
+    if (!deserialize_row_disk(*row_schema_, blob, blob_len, out))
+        throw std::runtime_error("BPlusTree: failed to deserialize typed row blob");
+    return out;
+}
+
+std::string BPlusTree::row_key_lexical(size_t key_col_idx, const Row& row) const {
+    return row_lex_key_col(row_schema_, row, static_cast<uint32_t>(key_col_idx));
+}
+
+BPlusTree::BPlusTree(BufferPool& pool, PageId root_page_id, const std::string& key_type,
+                       const TableSchema* row_schema)
+    : pool_(pool), root_(root_page_id), key_type_(key_type), row_schema_(row_schema) {
+    if (!row_schema_)
+        throw std::runtime_error("BPlusTree: row_schema is required for typed persistence");
+}
 
 // ════════════════════════════════════════════════════════════════════════
 //  Key comparison (type-aware)
@@ -209,7 +242,8 @@ std::optional<Row> BPlusTree::search(const std::string& key) const {
     for (uint32_t i = 0; i < n; ++i) {
         auto cv = readCell(*pg, i);
         if (compareKeys(cv.key, key) == 0) {
-            Row row = deserializeRow(cv.row_ptr, cv.row_len);
+            Row row = unpack_row_blob(reinterpret_cast<const uint8_t*>(cv.row_ptr),
+                                      static_cast<uint32_t>(cv.row_len));
             pool_.unpinPage(lid, false);
             return row;
         }
@@ -230,7 +264,9 @@ std::vector<Row> BPlusTree::scanAll() const {
         uint32_t n = pg->getNumRecords();
         for (uint32_t i = 0; i < n; ++i) {
             auto cv = readCell(*pg, i);
-            result.push_back(deserializeRow(cv.row_ptr, cv.row_len));
+            result.push_back(
+                unpack_row_blob(reinterpret_cast<const uint8_t*>(cv.row_ptr),
+                                static_cast<uint32_t>(cv.row_len)));
         }
         PageId next = leafGetNextId(*pg);
         pool_.unpinPage(cur, false);
@@ -273,7 +309,9 @@ std::vector<Row> BPlusTree::scanPrefix(const std::string& prefix) const {
             if (cmp < 0) continue;
             if (cmp > 0) { done = true; break; }
             
-            result.push_back(deserializeRow(cv.row_ptr, cv.row_len));
+            result.push_back(
+                unpack_row_blob(reinterpret_cast<const uint8_t*>(cv.row_ptr),
+                                static_cast<uint32_t>(cv.row_len)));
         }
         PageId next = leafGetNextId(*pg);
         pool_.unpinPage(cur, false);
@@ -294,7 +332,9 @@ std::vector<Row> BPlusTree::scanRange(const std::string* low, const std::string*
             auto cv = readCell(*pg, i);
             if (low && compareKeys(cv.key, *low) < 0) continue;
             if (high && compareKeys(cv.key, *high) > 0) { done = true; break; }
-            result.push_back(deserializeRow(cv.row_ptr, cv.row_len));
+            result.push_back(
+                unpack_row_blob(reinterpret_cast<const uint8_t*>(cv.row_ptr),
+                                static_cast<uint32_t>(cv.row_len)));
         }
         PageId next = leafGetNextId(*pg);
         pool_.unpinPage(cur, false);
@@ -308,7 +348,7 @@ std::vector<Row> BPlusTree::scanRange(const std::string* low, const std::string*
 // ════════════════════════════════════════════════════════════════════════
 
 bool BPlusTree::upsert(const std::string& key, const Row& row) {
-    std::string row_data = serializeRow(row);
+    std::string row_data = pack_row_blob(row);
     PageId lid = findLeaf(key);
     Page* pg = pool_.fetchPage(lid);
 
@@ -355,7 +395,7 @@ bool BPlusTree::upsert(const std::string& key, const Row& row) {
 }
 
 bool BPlusTree::insert(const std::string& key, const Row& row) {
-    std::string row_data = serializeRow(row);
+    std::string row_data = pack_row_blob(row);
     PageId lid = findLeaf(key);
     Page* pg = pool_.fetchPage(lid);
 
@@ -646,10 +686,12 @@ bool BPlusTree::remove(const std::string& key) {
 //  Bulk Load — bottom-up construction from sorted rows
 // ════════════════════════════════════════════════════════════════════════
 
-PageId BPlusTree::bulkLoad(BufferPool& pool,
-                           const std::vector<Row>& sorted_rows,
-                           uint32_t key_col,
-                           const std::string& key_type) {
+PageId BPlusTree::bulkLoad(BufferPool& pool, const std::vector<Row>& sorted_rows,
+                           uint32_t key_col, const std::string& key_type,
+                           const TableSchema* rs) {
+    if (!rs)
+        throw std::runtime_error("BPlusTree::bulkLoad: row_schema required");
+
     if (sorted_rows.empty()) {
         // Create a single empty leaf as root
         PageId id;
@@ -672,12 +714,12 @@ PageId BPlusTree::bulkLoad(BufferPool& pool,
     cur_pg->setPageId(cur_id);
     leafSetContentStart(*cur_pg, PAGE_SIZE);
     leafSetNextId(*cur_pg, INVALID_PAGE_ID);
-    std::string first_key_of_leaf = sorted_rows[0][key_col];
+    std::string first_key_of_leaf = row_lex_key_col(rs, sorted_rows.front(), key_col);
 
     for (size_t r = 0; r < sorted_rows.size(); ++r) {
         const Row& row = sorted_rows[r];
-        std::string key = row[key_col];
-        std::string rd  = serializeRow(row);
+        std::string key = row_lex_key_col(rs, row, key_col);
+        std::string rd = serialize_row_disk(*rs, row);
         int pos = static_cast<int>(cur_pg->getNumRecords());
 
         if (!leafInsertCell(*cur_pg, key, rd, pos)) {

@@ -1,5 +1,5 @@
 #pragma once
-#include "engine/page.hpp"      // Row lives here now
+#include "engine/page.hpp"      // pulls in cell_value.hpp (Row / CellValue)
 #include "engine/wal.hpp"
 #include "engine/buffer_pool.hpp"
 #include <string>

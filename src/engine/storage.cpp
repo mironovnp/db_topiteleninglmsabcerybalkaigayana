@@ -1,6 +1,8 @@
 #include "engine/storage.hpp"
 #include "engine/buffer_pool.hpp"
 #include "engine/btree.hpp"
+#include "engine/cell_value.hpp"
+#include "engine/row_codec.hpp"
 #include <fstream>
 #include <sstream>
 #include <algorithm>
@@ -8,6 +10,93 @@
 #include <stdexcept>
 
 namespace db {
+
+namespace {
+
+TableSchema mini_index_row_schema(const TableSchema& sch, int col_idx) {
+    TableSchema x;
+    x.table_name = sch.table_name;
+    ColumnDef ck;
+    ck.name = sch.columns[col_idx].name + "__composite";
+    ck.type = "TEXT";
+    x.columns.push_back(ck);
+    x.columns.push_back(sch.columns[sch.primary_key_index]);
+    x.primary_key_index = 1;
+    return x;
+}
+
+std::string tree_cell_lex(const CellValue& cv) {
+    if (!cv.has_value())
+        return "";
+    return cell_primitive_to_lexical_for_key(*cv);
+}
+
+bool skip_index_source_cell(const CellValue& c) {
+    return cell_to_where_string(c).empty();
+}
+
+Row pack_index_leaf_row(const CellValue& col_cell, const CellValue& pk_cell) {
+    Row ir;
+    std::string composite = cell_to_where_string(col_cell) + std::string(1, '\0') +
+                            cell_to_where_string(pk_cell);
+    ir.emplace_back(CellPrimitive{std::move(composite)});
+    ir.push_back(pk_cell);
+    return ir;
+}
+
+/// Lexicographic btree key ordering (matches BPlusTree::compareKeys semantics).
+int cmp_typed_key_strings(const std::string& key_type, const std::string& a, const std::string& b) {
+    size_t null_a = a.find('\0');
+    size_t null_b = b.find('\0');
+
+    std::string val_a = (null_a == std::string::npos) ? a : a.substr(0, null_a);
+    std::string val_b = (null_b == std::string::npos) ? b : b.substr(0, null_b);
+
+    int cmp = 0;
+    if (key_type == "INT") {
+        long la = 0, lb = 0;
+        try {
+            if (!val_a.empty()) la = std::stol(val_a);
+        } catch (...) {
+        }
+        try {
+            if (!val_b.empty()) lb = std::stol(val_b);
+        } catch (...) {
+        }
+        cmp = (la < lb) ? -1 : (la > lb) ? 1 : 0;
+    } else if (key_type == "FLOAT") {
+        double da = 0, db = 0;
+        try {
+            if (!val_a.empty()) da = std::stod(val_a);
+        } catch (...) {
+        }
+        try {
+            if (!val_b.empty()) db = std::stod(val_b);
+        } catch (...) {
+        }
+        cmp = (da < db) ? -1 : (da > db) ? 1 : 0;
+    } else {
+        cmp = val_a.compare(val_b);
+    }
+
+    if (cmp != 0)
+        return cmp;
+
+    if (null_a != std::string::npos && null_b != std::string::npos)
+        return static_cast<int>(a.substr(null_a + 1).compare(b.substr(null_b + 1)));
+    return 0;
+}
+
+static const std::string& index_leaf_composite_blob(const Row& r) {
+    static const std::string empty;
+    if (r.empty() || !r[0].has_value())
+        return empty;
+    const CellPrimitive* p = &*r[0];
+    const auto* ps = std::get_if<std::string>(p);
+    return ps ? *ps : empty;
+}
+
+} // namespace
 
 static constexpr uint64_t WAL_CHECKPOINT_THRESHOLD_BYTES = 4ull * 1024 * 1024; // 4 MiB
 
@@ -93,18 +182,23 @@ void Storage::replayWalLogicalRecord(LogRecordType type, std::string abs_path,
             }
         if (col_idx < 0) return;
         std::string col_type = sch.columns[col_idx].type;
+        TableSchema mini = mini_index_row_schema(sch, col_idx);
 
         Page* meta = replayPool.fetchPage(0);
         PageId root_id;
         memcpy(&root_id, meta->data + 16, 4);
         replayPool.unpinPage(0, false);
 
-        BPlusTree tree(replayPool, root_id, col_type);
+        BPlusTree tree(replayPool, root_id, col_type, &mini);
         if (type == LogRecordType::ROW_DELETE) {
             tree.remove(key);
         } else if (type == LogRecordType::ROW_UPSERT) {
-            Row rw = deserializeRowBlob(row_blob);
-            if (!rw.empty()) {
+            Row rw;
+            if (deserialize_row_disk(mini,
+                                    reinterpret_cast<const uint8_t*>(row_blob.data()),
+                                    static_cast<uint32_t>(row_blob.size()),
+                                    rw) &&
+                !rw.empty()) {
                 tree.upsert(key, rw);
             }
         }
@@ -126,12 +220,16 @@ void Storage::replayWalLogicalRecord(LogRecordType type, std::string abs_path,
 
     std::string key_type = s.columns.empty() ? "TEXT"
                            : s.columns[s.primary_key_index].type;
-    BPlusTree tree(replayPool, root_id, key_type);
+    BPlusTree tree(replayPool, root_id, key_type, &s);
     if (type == LogRecordType::ROW_DELETE) {
         tree.remove(key);
     } else if (type == LogRecordType::ROW_UPSERT) {
-        Row rw = deserializeRowBlob(row_blob);
-        if (!rw.empty()) {
+        Row rw;
+        if (deserialize_row_disk(s,
+                                reinterpret_cast<const uint8_t*>(row_blob.data()),
+                                static_cast<uint32_t>(row_blob.size()),
+                                rw) &&
+            !rw.empty()) {
             tree.upsert(key, rw);
         }
     }
@@ -154,12 +252,13 @@ void Storage::indexRemovePhysical(const std::string& db_name, const std::string&
                 break;
             }
         if (col_idx < 0 || col_idx >= (int)row.size()) continue;
-        if (row[col_idx].empty()) continue;
+        if (skip_index_source_cell(row[col_idx])) continue;
 
         auto ip = indexPath(db_name, table_name, idx.column_name);
         if (!std::filesystem::exists(ip)) continue;
 
         std::string col_type = schema.columns[col_idx].type;
+        TableSchema mini = mini_index_row_schema(schema, col_idx);
 
         BufferPool& pool = getPool(ip.string());
         Page* meta = pool.fetchPage(0);
@@ -167,8 +266,10 @@ void Storage::indexRemovePhysical(const std::string& db_name, const std::string&
         memcpy(&root_id, meta->data + 16, 4);
         pool.unpinPage(0, false);
 
-        BPlusTree tree(pool, root_id, col_type);
-        std::string composite_key = row[col_idx] + std::string(1, '\0') + row[pk_idx];
+        BPlusTree tree(pool, root_id, col_type, &mini);
+        std::string composite_key =
+            cell_to_where_string(row[col_idx]) + std::string(1, '\0') +
+            cell_to_where_string(row[pk_idx]);
         tree.remove(composite_key);
 
         PageId new_root = tree.getRootPageId();
@@ -181,7 +282,7 @@ void Storage::indexRemovePhysical(const std::string& db_name, const std::string&
 void Storage::deleteClusterRowWal(const std::string& db_name, const std::string& table_name,
                                   const TableSchema& schema, const Row& row) {
     const int pk_idx = schema.primary_key_index;
-    std::string pk = row[pk_idx];
+    std::string pk = tree_cell_lex(pk_idx < (int)row.size() ? row[pk_idx] : CellValue{});
     const std::string tpath = tablePath(db_name, table_name).string();
 
     for (const auto& idx : schema.indexes) {
@@ -192,12 +293,13 @@ void Storage::deleteClusterRowWal(const std::string& db_name, const std::string&
                 break;
             }
         if (col_idx < 0 || col_idx >= (int)row.size()) continue;
-        if (row[col_idx].empty()) continue;
+        if (skip_index_source_cell(row[col_idx])) continue;
 
         auto ip = indexPath(db_name, table_name, idx.column_name);
         if (!std::filesystem::exists(ip)) continue;
 
-        std::string composite_key = row[col_idx] + std::string(1, '\0') + row[pk_idx];
+        std::string composite_key = cell_to_where_string(row[col_idx]) + std::string(1, '\0') +
+                                    cell_to_where_string(row[pk_idx]);
         walAppendRowDelete(ip.string(), composite_key);
     }
 
@@ -217,7 +319,7 @@ void Storage::deleteClusterRowWal(const std::string& db_name, const std::string&
     std::string key_type = s.columns.empty() ? "TEXT"
                            : s.columns[s.primary_key_index].type;
 
-    BPlusTree tree(pool, root_id, key_type);
+    BPlusTree tree(pool, root_id, key_type, &s);
     tree.remove(pk);
 
     PageId new_root = tree.getRootPageId();
@@ -233,10 +335,15 @@ void Storage::upsertClusterRowWal(const std::string& db_name, const std::string&
                                   const TableSchema& schema, const Row* old_row,
                                   const Row& new_row) {
     const int pk_idx = schema.primary_key_index;
-    const std::string new_pk = new_row[pk_idx];
+    const CellValue new_pk_cell =
+        (pk_idx >= 0 && pk_idx < (int)new_row.size()) ? new_row[pk_idx] : CellValue{};
+    const std::string new_pk = tree_cell_lex(new_pk_cell);
     const std::string tpath = tablePath(db_name, table_name).string();
 
     if (old_row) {
+        const std::string old_pk =
+            tree_cell_lex((pk_idx >= 0 && pk_idx < (int)old_row->size()) ? (*old_row)[pk_idx]
+                                                                         : CellValue{});
         for (const auto& idx : schema.indexes) {
             int col_idx = -1;
             for (int i = 0; i < (int)schema.columns.size(); ++i)
@@ -245,21 +352,22 @@ void Storage::upsertClusterRowWal(const std::string& db_name, const std::string&
                     break;
                 }
             if (col_idx < 0 || col_idx >= (int)old_row->size()) continue;
-            if ((*old_row)[col_idx].empty()) continue;
+            if (skip_index_source_cell((*old_row)[col_idx])) continue;
 
             auto ip = indexPath(db_name, table_name, idx.column_name);
             if (!std::filesystem::exists(ip)) continue;
 
             std::string composite_old =
-                (*old_row)[col_idx] + std::string(1, '\0') + (*old_row)[pk_idx];
+                cell_to_where_string((*old_row)[col_idx]) + std::string(1, '\0') +
+                cell_to_where_string((*old_row)[pk_idx]);
             walAppendRowDelete(ip.string(), composite_old);
         }
 
-        if ((*old_row)[pk_idx] != new_pk)
-            walAppendRowDelete(tpath, (*old_row)[pk_idx]);
+        if (old_pk != new_pk)
+            walAppendRowDelete(tpath, old_pk);
     }
 
-    walAppendRowUpsert(tpath, new_pk, serializeRow(new_row));
+    walAppendRowUpsert(tpath, new_pk, serialize_row_disk(schema, new_row));
 
     for (const auto& idx : schema.indexes) {
         int col_idx = -1;
@@ -269,15 +377,16 @@ void Storage::upsertClusterRowWal(const std::string& db_name, const std::string&
                 break;
             }
         if (col_idx < 0 || col_idx >= (int)new_row.size()) continue;
-        if (new_row[col_idx].empty()) continue;
+        if (skip_index_source_cell(new_row[col_idx])) continue;
 
         auto ip = indexPath(db_name, table_name, idx.column_name);
         if (!std::filesystem::exists(ip)) continue;
 
-        Row idx_row = {new_row[col_idx], new_pk};
-        std::string composite_new =
-            new_row[col_idx] + std::string(1, '\0') + new_pk;
-        walAppendRowUpsert(ip.string(), composite_new, serializeRow(idx_row));
+        TableSchema mini = mini_index_row_schema(schema, col_idx);
+        Row idx_row = pack_index_leaf_row(new_row[col_idx], new_row[pk_idx]);
+        std::string composite_new = cell_to_where_string(new_row[col_idx]) + std::string(1, '\0') +
+                                    cell_to_where_string(new_row[pk_idx]);
+        walAppendRowUpsert(ip.string(), composite_new, serialize_row_disk(mini, idx_row));
     }
 
     walFlushDurably();
@@ -295,9 +404,14 @@ void Storage::upsertClusterRowWal(const std::string& db_name, const std::string&
     std::string key_type = s.columns.empty() ? "TEXT"
                            : s.columns[s.primary_key_index].type;
 
-    BPlusTree tree(pool, root_id, key_type);
-    if (old_row && (*old_row)[pk_idx] != new_pk)
-        tree.remove((*old_row)[pk_idx]);
+    BPlusTree tree(pool, root_id, key_type, &s);
+    if (old_row) {
+        const std::string old_pk_tree =
+            tree_cell_lex((pk_idx >= 0 && pk_idx < (int)old_row->size()) ? (*old_row)[pk_idx]
+                                                                         : CellValue{});
+        if (old_pk_tree != new_pk)
+            tree.remove(old_pk_tree);
+    }
 
     tree.upsert(new_pk, new_row);
 
@@ -315,12 +429,13 @@ void Storage::upsertClusterRowWal(const std::string& db_name, const std::string&
                 break;
             }
         if (col_idx < 0 || col_idx >= (int)new_row.size()) continue;
-        if (new_row[col_idx].empty()) continue;
+        if (skip_index_source_cell(new_row[col_idx])) continue;
 
         auto ip = indexPath(db_name, table_name, idx.column_name);
         if (!std::filesystem::exists(ip)) continue;
 
         std::string col_type = schema.columns[col_idx].type;
+        TableSchema mini = mini_index_row_schema(s, col_idx);
 
         BufferPool& ipool = getPool(ip.string());
         Page* im = ipool.fetchPage(0);
@@ -328,11 +443,11 @@ void Storage::upsertClusterRowWal(const std::string& db_name, const std::string&
         memcpy(&iroot, im->data + 16, 4);
         ipool.unpinPage(0, false);
 
-        Row idx_row = {new_row[col_idx], new_pk};
-        std::string composite_key =
-            new_row[col_idx] + std::string(1, '\0') + new_pk;
+        Row idx_row = pack_index_leaf_row(new_row[col_idx], new_row[pk_idx]);
+        std::string composite_key = cell_to_where_string(new_row[col_idx]) + std::string(1, '\0') +
+                                    cell_to_where_string(new_row[pk_idx]);
 
-        BPlusTree itree(ipool, iroot, col_type);
+        BPlusTree itree(ipool, iroot, col_type, &mini);
         itree.upsert(composite_key, idx_row);
 
         PageId nr = itree.getRootPageId();
@@ -645,7 +760,7 @@ std::vector<Row> Storage::readAllRows(const std::string& db_name,
     std::string key_type = s.columns.empty() ? "TEXT"
                            : s.columns[s.primary_key_index].type;
 
-    BPlusTree tree(pool, root_id, key_type);
+    BPlusTree tree(pool, root_id, key_type, &s);
     return tree.scanAll();
 }
 
@@ -667,22 +782,24 @@ int Storage::appendRows(const std::string& db_name,
     std::string key_type = s.columns.empty() ? "TEXT"
                            : s.columns[s.primary_key_index].type;
 
-    BPlusTree tree(pool, root_id, key_type);
+    BPlusTree tree(pool, root_id, key_type, &s);
 
     const std::string abs_table = p.string();
 
     // ROW_UPSERT in WAL before mutating pages (skip duplicates like plain insert).
     for (const auto& row : rows) {
-        std::string key = row[s.primary_key_index];
+        int pix = s.primary_key_index;
+        std::string key = tree_cell_lex(pix < (int)row.size() ? row[pix] : CellValue{});
         if (tree.search(key)) continue;
-        std::string blob = serializeRow(row);
+        std::string blob = serialize_row_disk(s, row);
         walAppendRowUpsert(abs_table, key, blob);
     }
     walFlushDurably();
 
     int count = 0;
     for (const auto& row : rows) {
-        std::string key = row[s.primary_key_index];
+        int pix = s.primary_key_index;
+        std::string key = tree_cell_lex(pix < (int)row.size() ? row[pix] : CellValue{});
         if (tree.insert(key, row)) ++count;
     }
 
@@ -731,22 +848,11 @@ bool Storage::writeAllRows(const std::string& db_name,
     int pk = schema.primary_key_index;
 
     std::vector<Row> sorted = rows;
-    std::sort(sorted.begin(), sorted.end(),
-              [&](const Row& a, const Row& b) {
-                  if (key_type == "INT") {
-                      long la = 0, lb = 0;
-                      try { la = std::stol(a[pk]); } catch (...) {}
-                      try { lb = std::stol(b[pk]); } catch (...) {}
-                      return la < lb;
-                  }
-                  if (key_type == "FLOAT") {
-                      double da = 0, db2 = 0;
-                      try { da = std::stod(a[pk]); } catch (...) {}
-                      try { db2 = std::stod(b[pk]); } catch (...) {}
-                      return da < db2;
-                  }
-                  return a[pk] < b[pk];
-              });
+    std::sort(sorted.begin(), sorted.end(), [&](const Row& a, const Row& b) {
+        std::string ka = tree_cell_lex(pk < (int)a.size() ? a[pk] : CellValue{});
+        std::string kb = tree_cell_lex(pk < (int)b.size() ? b[pk] : CellValue{});
+        return cmp_typed_key_strings(key_type, ka, kb) < 0;
+    });
 
     // Create new file with meta page
     BufferPool& pool = getPool(p.string());
@@ -757,9 +863,8 @@ bool Storage::writeAllRows(const std::string& db_name,
     meta->setPageId(meta_id);
 
     // Bulk load the B+ tree
-    PageId root_id = BPlusTree::bulkLoad(pool, sorted,
-                                          static_cast<uint32_t>(pk),
-                                          key_type);
+    PageId root_id =
+        BPlusTree::bulkLoad(pool, sorted, static_cast<uint32_t>(pk), key_type, &schema);
 
     // Write schema with correct root_id
     std::string payload = serializeSchema(schema);
@@ -791,7 +896,7 @@ Row Storage::findRow(const std::string& db_name,
     std::string key_type = s.columns.empty() ? "TEXT"
                            : s.columns[s.primary_key_index].type;
 
-    BPlusTree tree(pool, root_id, key_type);
+    BPlusTree tree(pool, root_id, key_type, &s);
     auto result = tree.search(key);
     if (result.has_value()) return result.value();
     return Row{}; // empty = not found
@@ -817,9 +922,15 @@ bool Storage::alterTableAddColumn(const std::string& db_name,
     // 4. Add new column to schema
     schema.columns.push_back(new_col);
 
-    // 5. Extend each row with default empty string
-    for (auto& row : rows)
-        row.push_back("");
+    // 5. Extend each row (legacy: empty string cell; typed: TEXT "" or NULL for non-TEXT)
+    for (auto& row : rows) {
+        if (new_col.has_default && !new_col.default_value.empty())
+            row.push_back(coerce_string_to_cell_column(new_col, new_col.default_value, false));
+        else if (new_col.type == "TEXT")
+            row.push_back(CellPrimitive{std::string{}});
+        else
+            row.push_back(std::nullopt);
+    }
 
     // 6. Rewrite file with new schema and extended rows
     return writeAllRows(db_name, table_name, rows, schema);
@@ -900,46 +1011,21 @@ bool Storage::createIndex(const std::string& db_name, const std::string& table_n
     // Read all rows
     auto rows = readAllRows(db_name, table_name);
 
-    // Build index entries: key = column value, row = [primary_key]
+    // Index leaf rows: [TEXT composite(prefix + '\0' + pk lexical), typed PK cell]
     int pk_idx = schema.primary_key_index;
     std::string col_type = schema.columns[col_idx].type;
+    TableSchema mini = mini_index_row_schema(schema, col_idx);
 
-    // Sort by composite key for bulk load
     std::vector<Row> idx_rows;
     for (const auto& row : rows) {
-        if (col_idx < (int)row.size() && !row[col_idx].empty()) {
-            std::string composite = row[col_idx] + std::string(1, '\0') + row[pk_idx];
-            idx_rows.push_back({composite, row[pk_idx]});
-        }
+        if (col_idx >= (int)row.size()) continue;
+        if (skip_index_source_cell(row[col_idx])) continue;
+        idx_rows.push_back(pack_index_leaf_row(row[col_idx], row[pk_idx]));
     }
-    std::sort(idx_rows.begin(), idx_rows.end(),
-              [&](const Row& a, const Row& b) {
-                  size_t na = a[0].find('\0');
-                  size_t nb = b[0].find('\0');
-                  std::string va = (na == std::string::npos) ? a[0] : a[0].substr(0, na);
-                  std::string vb = (nb == std::string::npos) ? b[0] : b[0].substr(0, nb);
-                  
-                  int cmp = 0;
-                  if (col_type == "INT") {
-                      long la = 0, lb = 0;
-                      try { if (!va.empty()) la = std::stol(va); } catch (...) {}
-                      try { if (!vb.empty()) lb = std::stol(vb); } catch (...) {}
-                      cmp = (la < lb) ? -1 : (la > lb) ? 1 : 0;
-                  } else if (col_type == "FLOAT") {
-                      double da = 0, db = 0;
-                      try { if (!va.empty()) da = std::stod(va); } catch (...) {}
-                      try { if (!vb.empty()) db = std::stod(vb); } catch (...) {}
-                      cmp = (da < db) ? -1 : (da > db) ? 1 : 0;
-                  } else {
-                      cmp = va.compare(vb);
-                  }
-                  
-                  if (cmp != 0) return cmp < 0;
-                  
-                  std::string sa = (na == std::string::npos) ? "" : a[0].substr(na + 1);
-                  std::string sb = (nb == std::string::npos) ? "" : b[0].substr(nb + 1);
-                  return sa < sb;
-              });
+    std::sort(idx_rows.begin(), idx_rows.end(), [&](const Row& a, const Row& b) {
+        return cmp_typed_key_strings(col_type, index_leaf_composite_blob(a),
+                                    index_leaf_composite_blob(b)) < 0;
+    });
 
     // Create the .idx file with meta page + bulk-loaded tree
     BufferPool& pool = getPool(ip.string());
@@ -949,7 +1035,7 @@ bool Storage::createIndex(const std::string& db_name, const std::string& table_n
     meta->setPageType(META_PAGE);
     meta->setPageId(meta_id);
 
-    PageId root_id = BPlusTree::bulkLoad(pool, idx_rows, 0, col_type);
+    PageId root_id = BPlusTree::bulkLoad(pool, idx_rows, 0, col_type, &mini);
 
     // Store root_id in meta page
     memcpy(meta->data + 16, &root_id, 4);
@@ -1012,11 +1098,16 @@ std::vector<std::string> Storage::indexLookup(const std::string& db_name,
     auto ip = indexPath(db_name, table_name, column_name);
     if (!std::filesystem::exists(ip)) return {};
 
-    // Determine column type
     TableSchema schema = getTableSchema(db_name, table_name);
-    std::string col_type = "TEXT";
-    for (const auto& col : schema.columns)
-        if (col.name == column_name) { col_type = col.type; break; }
+    int col_idx = -1;
+    for (int i = 0; i < (int)schema.columns.size(); ++i)
+        if (schema.columns[i].name == column_name) {
+            col_idx = i;
+            break;
+        }
+    if (col_idx < 0) return {};
+    std::string col_type = schema.columns[col_idx].type;
+    TableSchema mini = mini_index_row_schema(schema, col_idx);
 
     BufferPool& pool = getPool(ip.string());
     Page* meta = pool.fetchPage(0);
@@ -1024,13 +1115,13 @@ std::vector<std::string> Storage::indexLookup(const std::string& db_name,
     memcpy(&root_id, meta->data + 16, 4);
     pool.unpinPage(0, false);
 
-    BPlusTree tree(pool, root_id, col_type);
+    BPlusTree tree(pool, root_id, col_type, &mini);
     auto matches = tree.scanPrefix(value);
     
     std::vector<std::string> pks;
     for (const auto& row : matches) {
         if (row.size() >= 2) {
-            pks.push_back(row[1]); // Row in index is [composite, pk]
+            pks.push_back(tree_cell_lex(row[1]));
         }
     }
     return pks;
@@ -1045,21 +1136,27 @@ std::vector<std::string> Storage::indexScan(const std::string& db_name,
     if (!std::filesystem::exists(ip)) return {};
 
     TableSchema schema = getTableSchema(db_name, table_name);
-    std::string col_type = "TEXT";
-    for (const auto& col : schema.columns)
-        if (col.name == column_name) { col_type = col.type; break; }
+    int col_idx = -1;
+    for (int i = 0; i < (int)schema.columns.size(); ++i)
+        if (schema.columns[i].name == column_name) {
+            col_idx = i;
+            break;
+        }
+    if (col_idx < 0) return {};
+    std::string col_type = schema.columns[col_idx].type;
+    TableSchema mini = mini_index_row_schema(schema, col_idx);
 
     BufferPool& pool = getPool(ip.string());
     Page* meta = pool.fetchPage(0);
     PageId root_id; memcpy(&root_id, meta->data + 16, 4);
     pool.unpinPage(0, false);
 
-    BPlusTree tree(pool, root_id, col_type);
+    BPlusTree tree(pool, root_id, col_type, &mini);
     auto matches = tree.scanRange(low, high);
     
     std::vector<std::string> pks;
     for (const auto& row : matches) {
-        if (row.size() >= 2) pks.push_back(row[1]);
+        if (row.size() >= 2) pks.push_back(tree_cell_lex(row[1]));
     }
     return pks;
 }
@@ -1076,15 +1173,16 @@ void Storage::indexInsertRow(const std::string& db_name, const std::string& tabl
                 break;
             }
         if (col_idx < 0 || col_idx >= (int)row.size()) continue;
-        if (row[col_idx].empty()) continue;
+        if (skip_index_source_cell(row[col_idx])) continue;
 
         auto ip = indexPath(db_name, table_name, idx.column_name);
         if (!std::filesystem::exists(ip)) continue;
 
-        Row idx_row = {row[col_idx], row[pk_idx]};
-        std::string composite_key =
-            row[col_idx] + std::string(1, '\0') + row[pk_idx];
-        walAppendRowUpsert(ip.string(), composite_key, serializeRow(idx_row));
+        TableSchema mini = mini_index_row_schema(schema, col_idx);
+        Row idx_row = pack_index_leaf_row(row[col_idx], row[pk_idx]);
+        std::string composite_key = cell_to_where_string(row[col_idx]) + std::string(1, '\0') +
+                                    cell_to_where_string(row[pk_idx]);
+        walAppendRowUpsert(ip.string(), composite_key, serialize_row_disk(mini, idx_row));
     }
     walFlushDurably();
 
@@ -1096,12 +1194,13 @@ void Storage::indexInsertRow(const std::string& db_name, const std::string& tabl
                 break;
             }
         if (col_idx < 0 || col_idx >= (int)row.size()) continue;
-        if (row[col_idx].empty()) continue;
+        if (skip_index_source_cell(row[col_idx])) continue;
 
         auto ip = indexPath(db_name, table_name, idx.column_name);
         if (!std::filesystem::exists(ip)) continue;
 
         std::string col_type = schema.columns[col_idx].type;
+        TableSchema mini = mini_index_row_schema(schema, col_idx);
 
         BufferPool& pool = getPool(ip.string());
         Page* meta = pool.fetchPage(0);
@@ -1109,11 +1208,11 @@ void Storage::indexInsertRow(const std::string& db_name, const std::string& tabl
         memcpy(&root_id, meta->data + 16, 4);
         pool.unpinPage(0, false);
 
-        Row idx_row = {row[col_idx], row[pk_idx]};
-        std::string composite_key =
-            row[col_idx] + std::string(1, '\0') + row[pk_idx];
+        Row idx_row = pack_index_leaf_row(row[col_idx], row[pk_idx]);
+        std::string composite_key = cell_to_where_string(row[col_idx]) + std::string(1, '\0') +
+                                    cell_to_where_string(row[pk_idx]);
 
-        BPlusTree tree(pool, root_id, col_type);
+        BPlusTree tree(pool, root_id, col_type, &mini);
         tree.upsert(composite_key, idx_row);
 
         PageId new_root = tree.getRootPageId();

@@ -1,4 +1,5 @@
 #pragma once
+#include "engine/cell_value.hpp"
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -13,7 +14,6 @@ constexpr uint32_t POOL_SIZE        = 256;           // 256 frames = 2 MB
 constexpr uint32_t INVALID_PAGE_ID  = 0xFFFFFFFF;
 
 using PageId = uint32_t;
-using Row    = std::vector<std::string>;
 
 // ── Page types ─────────────────────────────────────────────────────────
 
@@ -98,48 +98,6 @@ inline PageId internalGetFirstChild(const Page& p) {
 }
 inline void internalSetFirstChild(Page& p, PageId id) {
     memcpy(p.data + 16, &id, 4);
-}
-
-// ── Row serialization ──────────────────────────────────────────────────
-//  Format: num_fields(2) { field_len(2) field_data } ...
-
-inline std::string serializeRow(const Row& row) {
-    std::string buf;
-    uint16_t n = static_cast<uint16_t>(row.size());
-    buf.append(reinterpret_cast<const char*>(&n), 2);
-    for (const auto& f : row) {
-        uint16_t len = static_cast<uint16_t>(f.size());
-        buf.append(reinterpret_cast<const char*>(&len), 2);
-        buf.append(f.data(), f.size());
-    }
-    return buf;
-}
-
-// Full blob (e.g. WAL); total size is not limited to 16 bits.
-inline Row deserializeRowBytes(const char* ptr, size_t total) {
-    Row row;
-    const char* end = ptr + total;
-    if (ptr + 2 > end) return row;
-    uint16_t n;
-    memcpy(&n, ptr, 2);
-    ptr += 2;
-    for (uint16_t i = 0; i < n && ptr + 2 <= end; ++i) {
-        uint16_t len;
-        memcpy(&len, ptr, 2);
-        ptr += 2;
-        if (ptr + len > end) break;
-        row.emplace_back(ptr, len);
-        ptr += len;
-    }
-    return row;
-}
-
-inline Row deserializeRow(const char* ptr, uint16_t total) {
-    return deserializeRowBytes(ptr, static_cast<size_t>(total));
-}
-
-inline Row deserializeRowBlob(const std::string& blob) {
-    return deserializeRowBytes(blob.data(), blob.size());
 }
 
 } // namespace db

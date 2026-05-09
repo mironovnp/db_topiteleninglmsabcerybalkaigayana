@@ -1,6 +1,8 @@
 #include "engine/executor.hpp"
 #include "engine/wal.hpp"
 #include "engine/page.hpp"
+#include "engine/cell_value.hpp"
+#include "engine/row_codec.hpp"
 #include <iostream>
 #include <string>
 #include <vector>
@@ -85,6 +87,9 @@ public:
 
         std::cout << "\n>>> ФАЗА 19: Logical WAL Recovery (Row-level)" << std::endl;
         test_logical_wal_recovery();
+
+        std::cout << "\n>>> ФАЗА 20: Типизированное хранение и NULL" << std::endl;
+        test_cell_value_and_nulls();
 
         std::cout << "\n" << std::string(40, '=') << std::endl;
         std::cout << "ИТОГО: " << passed_count << "/" << total_count << " тестов пройдено." << std::endl;
@@ -645,7 +650,9 @@ private:
                 table_path = (dir / db_name / "items.db").string();
 
                 // Вставим строку физически для теста удаления
-                db::Row row2 = {"20", "ToDelete"};
+                db::Row row2;
+                row2.push_back(db::CellPrimitive{int64_t{20}});
+                row2.push_back(db::CellPrimitive{std::string{"ToDelete"}});
                 storage.appendRows(db_name, "items", {row2});
                 storage.indexInsertRow(db_name, "items", storage.getTableSchema(db_name, "items"), row2);
             } // Сброс всех BufferPool на диск
@@ -658,18 +665,32 @@ private:
             table_path = (dir / db_name / "items.db").string();
             std::string index_path = (dir / db_name / "items.val.idx").string();
             std::string key1 = "10";
-            db::Row row1 = {"10", "RecoveredValue"};
-            std::string blob1 = db::serializeRow(row1);
+            db::TableSchema tbl_sch;
+            tbl_sch.table_name = "items";
+            tbl_sch.columns = {{"id", "INT"}, {"val", "TEXT"}};
+            tbl_sch.primary_key_index = 0;
+
+            db::Row row1;
+            row1.push_back(db::CellPrimitive{int64_t{10}});
+            row1.push_back(db::CellPrimitive{std::string{"RecoveredValue"}});
+            std::string blob1 = db::serialize_row_disk(tbl_sch, row1);
             
             // Пишем записи в WAL вручную (таблица + индекс)
             db::LogRecord rec1_tbl(0, 0, db::LogRecordType::ROW_UPSERT, 0, 
                                db::LogRecord::encodeRowPayload(table_path, key1, blob1));
             wal.appendRecord(rec1_tbl);
 
-            db::Row idx_row1 = {"RecoveredValue", "10"};
+            db::TableSchema mini_ix;
+            mini_ix.table_name = "items";
+            mini_ix.columns = {{"val__composite", "TEXT"}, {"id", "INT"}};
+            mini_ix.primary_key_index = 1;
+
+            db::Row idx_row1;
+            idx_row1.push_back(db::CellPrimitive{std::string{"RecoveredValue" + std::string(1, '\0') + "10"}});
+            idx_row1.push_back(db::CellPrimitive{int64_t{10}});
             std::string idx_key1 = "RecoveredValue" + std::string(1, '\0') + "10";
             db::LogRecord rec1_idx(0, 0, db::LogRecordType::ROW_UPSERT, 0,
-                               db::LogRecord::encodeRowPayload(index_path, idx_key1, db::serializeRow(idx_row1)));
+                               db::LogRecord::encodeRowPayload(index_path, idx_key1, db::serialize_row_disk(mini_ix, idx_row1)));
             wal.appendRecord(rec1_idx);
 
             // 2. Тест ROW_DELETE (Восстановление удаления)
@@ -692,8 +713,10 @@ private:
             bool found_10 = false;
             bool found_20 = false;
             for (const auto& r : rows) {
-                if (r[0] == "10" && r[1] == "RecoveredValue") found_10 = true;
-                if (r[0] == "20") found_20 = true;
+                if (db::cell_to_where_string(r[0]) == "10" &&
+                    db::cell_to_where_string(r[1]) == "RecoveredValue")
+                    found_10 = true;
+                if (db::cell_to_where_string(r[0]) == "20") found_20 = true;
             }
 
             // Проверка индекса (должен обновиться при логическом реплее)
@@ -714,6 +737,65 @@ private:
         } catch (const std::exception& e) {
             std::cerr << "  [FAIL] test_logical_wal_recovery exception: " << e.what() << std::endl;
         }
+    }
+
+    void test_cell_value_and_nulls() {
+        assert_success("Создание БД для типов", "CREATE DATABASE types_db;");
+        assert_success("Использование БД для типов", "USE types_db;");
+        assert_success("Создание таблицы для типов", "CREATE TABLE types_test (id INT PRIMARY KEY, val TEXT, num FLOAT, b BOOL);");
+        
+        // 1. Тест NULL vs Empty String
+        assert_success("Вставка NULL и пустой строки", 
+            "INSERT INTO types_test (id, val, num, b) VALUES (1, NULL, 10.5, TRUE), (2, '', 20.0, FALSE);");
+        
+        assert_rows("Поиск IS NULL", "SELECT id FROM types_test WHERE val IS NULL;", 1, {{"1"}});
+        assert_rows("Поиск по пустой строке", "SELECT id FROM types_test WHERE val = '';", 1, {{"2"}});
+        assert_rows("NULL не равен пустой строке", "SELECT count(*) FROM types_test WHERE val = NULL;", 1, {{"0"}});
+
+        // 2. Тест точности INT/FLOAT
+        std::string large_int_str = "123456789012345678"; 
+        assert_success("Вставка большого INT", 
+            "INSERT INTO types_test (id, val, num) VALUES (" + large_int_str + ", 'LargeInt', 0);");
+        assert_rows("Проверка точности большого INT", 
+            "SELECT id FROM types_test WHERE val = 'LargeInt';", 1, {{large_int_str}});
+
+        // 3. Тест Legacy Migration (Эмуляция v1 формата)
+        total_count++;
+        try {
+            // Берем любую схему для теста кодека (кодек - чистая функция, это безопасно)
+            db::TableSchema s;
+            s.columns = {{"id", "INT"}, {"val", "TEXT"}, {"num", "FLOAT"}, {"b", "BOOL"}};
+            
+            // Ручно собираем v1-строку: [num_fields(2)][len(2) data][len(2) data]...
+            std::string legacy_blob;
+            uint16_t nf = 4;
+            legacy_blob.append((char*)&nf, 2);
+            
+            auto add_f = [&](std::string v) {
+                uint16_t l = v.size();
+                legacy_blob.append((char*)&l, 2);
+                legacy_blob.append(v);
+            };
+            add_f("500");        // id
+            add_f("LegacyData"); // val
+            add_f("123.456");    // num
+            add_f("1");          // b
+            
+            db::Row recovered;
+            bool ok = db::deserialize_row_disk(s, (const uint8_t*)legacy_blob.data(), legacy_blob.size(), recovered);
+            
+            if (ok && recovered.size() == 4 && db::cell_to_where_string(recovered[1]) == "LegacyData") {
+                std::cout << "  [OK] Legacy Row Migration (v1 -> v2) успешна" << std::endl;
+                passed_count++;
+            } else {
+                std::cerr << "  [FAIL] Legacy Row Migration не сработала" << std::endl;
+            }
+        } catch(...) {
+            std::cerr << "  [FAIL] Ошибка в тесте миграции" << std::endl;
+        }
+
+        executor.execute("DROP TABLE types_test;");
+        executor.execute("DROP DATABASE types_db;");
     }
 };
 
