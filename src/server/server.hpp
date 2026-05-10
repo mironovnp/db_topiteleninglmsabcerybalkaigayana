@@ -1,6 +1,7 @@
 #pragma once
 #include "engine/executor.hpp"
 #include <string>
+#include <shared_mutex>
 
 namespace db {
 
@@ -13,6 +14,9 @@ private:
     std::string host_;
     int port_;
     Executor executor_;
+
+    // Мьютекс для разделения блокировок на чтение и запись
+    std::shared_mutex db_rw_mutex_;
 };
 
 } // namespace db

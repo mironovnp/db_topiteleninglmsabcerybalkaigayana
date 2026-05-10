@@ -24,12 +24,10 @@ BufferPool::~BufferPool() {
 }
 
 void BufferPool::openFile() {
-    // Create parent dirs if needed
     auto parent = std::filesystem::path(file_path_).parent_path();
     if (!parent.empty())
         std::filesystem::create_directories(parent);
 
-    // Open or create file
     if (!std::filesystem::exists(file_path_)) {
         std::ofstream create(file_path_, std::ios::binary);
         create.close();
@@ -39,7 +37,6 @@ void BufferPool::openFile() {
     if (!file_.is_open())
         throw std::runtime_error("BufferPool: cannot open " + file_path_);
 
-    // Determine how many pages already exist
     file_.seekg(0, std::ios::end);
     auto size = file_.tellg();
     next_page_id_ = static_cast<uint32_t>(size / PAGE_SIZE);
@@ -53,17 +50,14 @@ void BufferPool::readFromDisk(PageId id, Page& pg) {
     file_.seekg(static_cast<std::streamoff>(id) * PAGE_SIZE);
     file_.read(pg.data, PAGE_SIZE);
     if (!file_)
-        throw std::runtime_error("BufferPool: read failed for page " +
-                                 std::to_string(id));
+        throw std::runtime_error("BufferPool: read failed for page " + std::to_string(id));
 }
 
 void BufferPool::writeToDisk(PageId id, const Page& pg) {
-    // Extend file if necessary
     auto offset = static_cast<std::streamoff>(id) * PAGE_SIZE;
     file_.seekp(0, std::ios::end);
     auto end = file_.tellp();
     if (offset >= end) {
-        // Fill gap with zeroes
         auto gap = offset + PAGE_SIZE - end;
         std::vector<char> zeros(gap, 0);
         file_.write(zeros.data(), gap);
@@ -78,13 +72,11 @@ void BufferPool::writeToDisk(PageId id, const Page& pg) {
 // ════════════════════════════════════════════════════════════════════════
 
 uint32_t BufferPool::getFrame() {
-    // 1) Try free list first
     if (!free_list_.empty()) {
         uint32_t idx = free_list_.front();
         free_list_.pop_front();
         return idx;
     }
-    // 2) Evict from LRU (front = least recently used)
     if (lru_list_.empty())
         throw std::runtime_error("BufferPool: all frames pinned, cannot evict");
 
@@ -93,9 +85,7 @@ uint32_t BufferPool::getFrame() {
     lru_map_.erase(idx);
 
     Frame& f = frames_[idx];
-    // Flush dirty page before evicting
     if (f.dirty) {
-        // With row-logging, page LSN is not authoritative; flush all appended WAL before page write.
         if (wal_mgr_) wal_mgr_->flushTo(wal_mgr_->getNextLSN() - 1);
         writeToDisk(f.page_id, f.page);
         f.dirty = false;
@@ -110,12 +100,12 @@ uint32_t BufferPool::getFrame() {
 // ════════════════════════════════════════════════════════════════════════
 
 Page* BufferPool::fetchPage(PageId page_id) {
-    // Already in pool?
+    std::lock_guard<std::mutex> lock(latch_); // Блокировка
+
     auto it = page_table_.find(page_id);
     if (it != page_table_.end()) {
         Frame& f = frames_[it->second];
         if (f.pin_count == 0) {
-            // Remove from LRU (no longer evictable)
             auto lru_it = lru_map_.find(it->second);
             if (lru_it != lru_map_.end()) {
                 lru_list_.erase(lru_it->second);
@@ -126,7 +116,6 @@ Page* BufferPool::fetchPage(PageId page_id) {
         return &f.page;
     }
 
-    // Cache miss — bring from disk
     uint32_t idx = getFrame();
     Frame& f = frames_[idx];
     f.page.reset();
@@ -140,6 +129,8 @@ Page* BufferPool::fetchPage(PageId page_id) {
 }
 
 Page* BufferPool::newPage(PageId* out_id) {
+    std::lock_guard<std::mutex> lock(latch_); // Блокировка
+
     PageId id = next_page_id_++;
     *out_id = id;
 
@@ -160,12 +151,13 @@ Page* BufferPool::newPage(PageId* out_id) {
         wal_mgr_->flushTo(lsn);
     }
 
-    // Write an empty page to extend the file
     writeToDisk(id, f.page);
     return &f.page;
 }
 
 void BufferPool::unpinPage(PageId page_id, bool dirty) {
+    std::lock_guard<std::mutex> lock(latch_); // Блокировка
+
     auto it = page_table_.find(page_id);
     if (it == page_table_.end()) return;
 
@@ -175,7 +167,6 @@ void BufferPool::unpinPage(PageId page_id, bool dirty) {
     if (dirty) f.dirty = true;
     f.pin_count--;
 
-    // Became unpinned → add to LRU (back = most recently used)
     if (f.pin_count == 0) {
         lru_list_.push_back(it->second);
         lru_map_[it->second] = std::prev(lru_list_.end());
@@ -183,6 +174,8 @@ void BufferPool::unpinPage(PageId page_id, bool dirty) {
 }
 
 void BufferPool::flushPage(PageId page_id) {
+    std::lock_guard<std::mutex> lock(latch_); // Блокировка
+
     auto it = page_table_.find(page_id);
     if (it == page_table_.end()) return;
     Frame& f = frames_[it->second];
@@ -194,6 +187,8 @@ void BufferPool::flushPage(PageId page_id) {
 }
 
 void BufferPool::flushAll() {
+    std::lock_guard<std::mutex> lock(latch_); // Блокировка
+
     for (auto& f : frames_) {
         if (f.in_use && f.dirty) {
             if (wal_mgr_) wal_mgr_->flushTo(wal_mgr_->getNextLSN() - 1);

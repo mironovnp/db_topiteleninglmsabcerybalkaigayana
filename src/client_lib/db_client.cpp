@@ -41,6 +41,7 @@ QueryResult DBClient::executeQuery(const std::string& sql, bool dry_run) {
         nlohmann::json body;
         body["sql"] = sql;
         body["dry_run"] = dry_run;
+        body["current_db"] = current_db_; // Отправляем серверу текущую базу клиента
 
         auto res = cli.Post("/query", body.dump(), "application/json");
         if (!res) {
@@ -53,6 +54,11 @@ QueryResult DBClient::executeQuery(const std::string& sql, bool dry_run) {
         qr.message = j.value("message", "");
         qr.type = j.value("type", "");
         qr.affected_rows = j.value("affected_rows", 0);
+
+        // Если сервер подтвердил смену базы (USE или DROP), запоминаем это
+        if (j.contains("current_db")) {
+            current_db_ = j["current_db"].get<std::string>();
+        }
 
         if (j.contains("columns")) {
             for (const auto& c : j["columns"])

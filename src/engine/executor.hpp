@@ -5,7 +5,6 @@
 #include <string>
 #include <map>
 #include <vector>
-
 #include <set>
 
 namespace db {
@@ -20,12 +19,18 @@ public:
     explicit Executor(const std::string& data_dir = "data");
     nlohmann::json execute(const std::string& sql);
 
+    // Установка контекста БД для текущего потока HTTP-сервера
+    void setThreadLocalContext(const std::string& db) {
+        current_db_ = db;
+    }
+
 private:
     Storage storage_;
-    std::string current_db_;
 
-    const TableSchema* outer_schema_ = nullptr;
-    const Row* outer_row_ = nullptr;
+    // МНОГОПОТОЧНОСТЬ: Потоко-локальные переменные контекста.
+    inline thread_local static std::string current_db_;
+    inline thread_local static const TableSchema* outer_schema_ = nullptr;
+    inline thread_local static const Row* outer_row_ = nullptr;
 
     nlohmann::json execCreateDB(const CreateDatabaseStatement* q);
     nlohmann::json execDropDB(const DropDatabaseStatement* q);
@@ -43,7 +48,6 @@ private:
     nlohmann::json execLoadCsv(const LoadCsvStatement* q);
     nlohmann::json execAlterTableAddColumnFromCsv(const AlterTableStatement* q);
 
-    /// UNIQUE/PK/FK checks and physical insert (same path as INSERT tail).
     nlohmann::json insertValidatedRows(const std::string& table_name, const TableSchema& s,
                                        std::vector<Row> evaluated_rows);
     void applyDefaultsAndAutoincrement(const TableSchema& s, const std::string& table_name, Row& r,
@@ -65,10 +69,9 @@ private:
         bool initialized = false;
         std::set<std::string> seen_values;
     };
-    
-    // Core expression evaluation method
-    Value evaluateExpression(const Expression* expr, 
-                             const Row& row, 
+
+    Value evaluateExpression(const Expression* expr,
+                             const Row& row,
                              const TableSchema& schema,
                              const std::map<std::pair<AggrFunc, std::string>, AggrState>* aggrs = nullptr,
                              const TableSchema* outer_schema = nullptr,

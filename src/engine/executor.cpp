@@ -444,23 +444,31 @@ json Executor::execCreateDB(const CreateDatabaseStatement* q) {
     if (storage_.createDatabase(q->database_name)) return ok("Database '" + q->database_name + "' created.");
     return err("Failed to create database.");
 }
+
+json Executor::execUse(const UseDatabaseStatement* q) {
+    if (storage_.databaseExists(q->database_name)) {
+        current_db_ = q->database_name;
+        json res = ok("Using database '" + q->database_name + "'.");
+        res["current_db"] = current_db_; // Сообщаем клиенту об успешной смене
+        return res;
+    }
+    return err("Database '" + q->database_name + "' does not exist.");
+}
+
 json Executor::execDropDB(const DropDatabaseStatement* q) {
     if (!storage_.databaseExists(q->database_name)) {
         if (q->if_exists) return ok("Dropped database '" + q->database_name + "' (if existed).");
         return err("Database '" + q->database_name + "' does not exist.");
     }
     if (storage_.dropDatabase(q->database_name)) {
-        if (current_db_ == q->database_name) current_db_.clear();
-        return ok("Dropped database '" + q->database_name + "'.");
+        json res = ok("Dropped database '" + q->database_name + "'.");
+        if (current_db_ == q->database_name) {
+            current_db_.clear();
+            res["current_db"] = ""; // Приказываем клиенту "забыть" удаленную БД
+        }
+        return res;
     }
     return err("Failed to drop database.");
-}
-json Executor::execUse(const UseDatabaseStatement* q) {
-    if (storage_.databaseExists(q->database_name)) {
-        current_db_ = q->database_name;
-        return ok("Using database '" + q->database_name + "'.");
-    }
-    return err("Database '" + q->database_name + "' does not exist.");
 }
 json Executor::execCreateTable(const CreateTableStatement* q) {
     TableSchema s; s.table_name = q->table_name;
@@ -695,7 +703,7 @@ json Executor::execShowColumns(const std::string& table_name) {
         const auto& c = s.columns[i];
         std::string extra;
         if (c.is_autoincrement) extra = "auto_increment";
-        
+
         std::string key;
         if ((int)i == s.primary_key_index) key = "PRI";
         else if (c.unique) key = "UNI";
@@ -718,7 +726,7 @@ json Executor::execShowIndex(const std::string& table_name) {
     json rows = json::array();
     // Primary key is an implicit index
     rows.push_back({table_name, "0", "PRIMARY", "1", s.columns[s.primary_key_index].name, "A", "NULL", "", ""});
-    
+
     for (const auto& idx : s.indexes) {
         rows.push_back({table_name, "1", idx.index_name, "1", idx.column_name, "A", "NULL", "", ""});
     }
@@ -751,7 +759,7 @@ json Executor::execShowCreateTable(const std::string& table_name) {
         sql << "\n";
     }
     sql << ");";
-    
+
     json rows = json::array();
     rows.push_back({table_name, sql.str()});
     return {{"success", true}, {"columns", {"Table", "Create Table"}}, {"rows", rows}};
@@ -1065,7 +1073,7 @@ void Executor::performUpdate(const std::string& db_name, const std::string& tabl
                 int parent_idx = colIndex(s, "", child_col.fk_ref_column);
                 int child_idx = colIndex(child_s, "", child_col.name);
                 if (parent_idx < 0 || child_idx < 0) continue;
-                
+
                 if (cell_to_where_string(old_row[parent_idx]) !=
                     cell_to_where_string(new_row[parent_idx])) {
                     auto child_rows = storage_.readAllRows(db_name, child_table_name);
@@ -1091,15 +1099,15 @@ void Executor::performUpdate(const std::string& db_name, const std::string& tabl
     }
 }
 json Executor::execDelete(const DeleteStatement* q) {
-    auto s = storage_.getTableSchema(current_db_, q->table_name); 
-    auto rows = storage_.readAllRows(current_db_, q->table_name); 
+    auto s = storage_.getTableSchema(current_db_, q->table_name);
+    auto rows = storage_.readAllRows(current_db_, q->table_name);
     std::vector<Row> to_delete;
     for (auto& row : rows) {
         if (!q->where || evalCondition(q->where.get(), row, s, nullptr, outer_schema_, outer_row_)) {
             to_delete.push_back(row);
         }
     }
-    
+
     int total_deleted = 0;
     performDelete(current_db_, q->table_name, to_delete, total_deleted);
     return {{"success", true}, {"rows_affected", total_deleted}, {"message", std::to_string(total_deleted) + " deleted."}};
@@ -1114,7 +1122,7 @@ void Executor::performDelete(const std::string& db_name, const std::string& tabl
     for (const auto& child_table_name : tables) {
         if (child_table_name == table_name) continue; // Skip self for now (unless self-referencing)
         auto child_s = storage_.getTableSchema(db_name, child_table_name);
-        
+
         for (const auto& child_col : child_s.columns) {
             if (child_col.fk_ref_table == table_name) {
                 // This column references the table we are deleting from
@@ -1178,7 +1186,7 @@ bool Executor::tryIndexScan(const SelectStatement* q, const TableSchema& s, std:
     }
 
     // Handle Binary Operations (=, <, <=, >, >=)
-    auto b = dynamic_cast<BinaryExpression*>(q->where.get()); 
+    auto b = dynamic_cast<BinaryExpression*>(q->where.get());
     if (!b) return false;
 
     ColumnExpression* col = nullptr;
@@ -1225,10 +1233,10 @@ bool Executor::tryIndexScan(const SelectStatement* q, const TableSchema& s, std:
 
     if (pks.empty()) return true; // Return true as we used the index (even if no matches found)
 
-    for (auto& pk : pks) { 
-        Row row = storage_.findRow(current_db_, q->table_name, pk); 
+    for (auto& pk : pks) {
+        Row row = storage_.findRow(current_db_, q->table_name, pk);
         if (row.empty()) continue;
-        
+
         // Final filter for strict inequalities if needed
         if (op == TokenType::OP_GT || op == TokenType::OP_LT) {
             int cix = colIndex(s, "", col->column);
@@ -1240,7 +1248,7 @@ bool Executor::tryIndexScan(const SelectStatement* q, const TableSchema& s, std:
             if (op == TokenType::OP_GT && cmp <= 0) continue;
             if (op == TokenType::OP_LT && cmp >= 0) continue;
         }
-        o.push_back(std::move(row)); 
+        o.push_back(std::move(row));
     }
     return true;
 }
@@ -1254,7 +1262,7 @@ json Executor::execSelect(const SelectStatement* q) {
     if (q->from_subquery) {
         json sub_res = execSelect(q->from_subquery.get());
         if (!sub_res["success"]) throw std::runtime_error("Subquery failed");
-        
+
         effective_root_table = q->from_alias;
         m.table_name = effective_root_table;
         for (auto& col_name : sub_res["columns"]) {
@@ -1292,7 +1300,7 @@ json Executor::execSelect(const SelectStatement* q) {
             }
             if (rows.empty() && !sorted_by_index) rows = storage_.readAllRows(current_db_, q->table_name);
         }
-        
+
         m = s;
         effective_root_table = q->alias.empty() ? q->table_name : q->alias;
         m.table_name = effective_root_table;
@@ -1430,11 +1438,11 @@ json Executor::execSelect(const SelectStatement* q) {
             }
         }
 
-        for (auto& c : rs.columns) { 
-            ColumnDef cd = c; 
+        for (auto& c : rs.columns) {
+            ColumnDef cd = c;
             std::string effective_join_table = jc.alias.empty() ? jc.table_name : jc.alias;
-            cd.name = effective_join_table + "." + c.name; 
-            m.columns.push_back(std::move(cd)); 
+            cd.name = effective_join_table + "." + c.name;
+            m.columns.push_back(std::move(cd));
         }
         rows = std::move(res);
     }
@@ -1478,7 +1486,7 @@ json Executor::execSelect(const SelectStatement* q) {
                 auto& aggr = aggr_pair.first;
                 bool is_distinct = aggr_pair.second;
                 auto& st = g.st[aggr];
-                
+
                 std::string val_to_add;
                 if (aggr.second == "*") val_to_add = "*";
                 else {
@@ -1491,7 +1499,7 @@ json Executor::execSelect(const SelectStatement* q) {
                     st.seen_values.insert(val_to_add);
                 }
 
-                st.count++; 
+                st.count++;
                 if (val_to_add == "*") continue;
                 if (!val_to_add.empty()) {
                     try {

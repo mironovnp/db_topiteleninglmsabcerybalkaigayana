@@ -8,7 +8,6 @@
 
 static void printTable(const std::vector<std::string>& columns,
                        const std::vector<std::vector<std::string>>& rows) {
-    // Calculate column widths
     std::vector<size_t> widths(columns.size());
     for (size_t i = 0; i < columns.size(); ++i)
         widths[i] = columns[i].size();
@@ -17,7 +16,6 @@ static void printTable(const std::vector<std::string>& columns,
         for (size_t i = 0; i < row.size() && i < widths.size(); ++i)
             widths[i] = std::max(widths[i], row[i].size());
 
-    // Top border
     auto printBorder = [&]() {
         std::cout << "+";
         for (size_t w : widths)
@@ -27,7 +25,6 @@ static void printTable(const std::vector<std::string>& columns,
 
     printBorder();
 
-    // Header
     std::cout << "|";
     for (size_t i = 0; i < columns.size(); ++i)
         std::cout << " " << std::left << std::setw(static_cast<int>(widths[i]))
@@ -36,7 +33,6 @@ static void printTable(const std::vector<std::string>& columns,
 
     printBorder();
 
-    // Data rows
     for (const auto& row : rows) {
         std::cout << "|";
         for (size_t i = 0; i < columns.size(); ++i) {
@@ -72,7 +68,6 @@ int main(int argc, char* argv[]) {
     std::cout << "╔══════════════════════════════════════╗\n";
     std::cout << "║       databasetopit CLI v1.0         ║\n";
     std::cout << "║  Connected to " << host << ":" << port;
-    // Pad to align
     int pad = 22 - static_cast<int>(host.size()) - static_cast<int>(std::to_string(port).size());
     for (int i = 0; i < pad; ++i) std::cout << " ";
     std::cout << "║\n";
@@ -87,7 +82,6 @@ int main(int argc, char* argv[]) {
 
         if (!std::getline(std::cin, line)) break;
 
-        // Trim
         while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
             line.pop_back();
 
@@ -102,7 +96,6 @@ int main(int argc, char* argv[]) {
 
         query += (query.empty() ? "" : " ") + line;
 
-        // Check if the first word is a valid SQL command to avoid buffering garbage
         std::string first_word;
         for (char c : query) {
             if (c == ' ' || c == ';' || c == '\n' || c == '\t') break;
@@ -110,10 +103,12 @@ int main(int argc, char* argv[]) {
         }
 
         if (!first_word.empty()) {
+            // ДОБАВЛЕНЫ КЛЮЧЕВЫЕ СЛОВА SHOW И LOAD
             bool valid_start = (first_word == "SELECT" || first_word == "CREATE" ||
                                 first_word == "DROP" || first_word == "INSERT" ||
                                 first_word == "UPDATE" || first_word == "DELETE" ||
-                                first_word == "USE" || first_word == "ALTER");
+                                first_word == "USE" || first_word == "ALTER" ||
+                                first_word == "SHOW" || first_word == "LOAD");
             if (!valid_start) {
                 std::cout << "\033[31m[ERROR]\033[0m Unexpected keyword: " << first_word << "\n\n";
                 query.clear();
@@ -121,7 +116,6 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Check if it ends with a semicolon (ignoring trailing spaces)
         bool has_semi = false;
         for (auto it = query.rbegin(); it != query.rend(); ++it) {
             if (*it == ' ' || *it == '\t' || *it == '\r' || *it == '\n') continue;
@@ -129,16 +123,13 @@ int main(int argc, char* argv[]) {
             break;
         }
 
-        // If it doesn't have a semicolon, we validate syntax (dry_run)
         auto result = client.executeQuery(query, !has_semi);
 
         if (!has_semi) {
             if (!result.success) {
-                // It's a REAL syntax error (not just EOF)
                 std::cout << "\033[31m[ERROR]\033[0m " << result.message << "\n\n";
                 query.clear();
             }
-            // If success (type == "incomplete"), just show -> and wait for more
             continue;
         }
 
