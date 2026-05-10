@@ -402,6 +402,32 @@ bool Executor::evalCondition(const Expression* expr, const Row& row, const Table
     return evaluateExpression(expr, row, schema, aggrs, select_cols, outer_schema, outer_row).val == "1";
 }
 
+void Executor::checkPermission(const std::string& table_name, const std::string& privilege) {
+    if (current_db_.empty()) return; 
+
+    // Only users with ALL permission are allowed to rewrite sys. tables
+    if (table_name.substr(0, 4) == "sys_" && privilege != "ALL" && privilege != "SELECT") {
+        throw std::runtime_error("Permission denied: cannot directly modify system catalogs");
+    }
+
+    std::string cache_key = current_db_ + ":" + current_user_ + ":" + table_name + ":" + privilege;
+    
+    // 1. Checking cache
+    if (priv_cache_.find(cache_key) != priv_cache_.end()) {
+        if (!priv_cache_[cache_key]) 
+            throw std::runtime_error("Permission denied: " + privilege + " on " + table_name);
+        return;
+    }
+
+    // 2. Идем в Storage, если в кэше пусто (предполагаем, что Storage::checkPrivilege реализован)
+    bool has_priv = storage_.checkPrivilege(current_db_, current_user_, table_name, privilege);
+    priv_cache_[cache_key] = has_priv;
+    
+    if (!has_priv) {
+        throw std::runtime_error("Permission denied: " + privilege + " on " + table_name);
+    }
+}
+
 json Executor::execute(const std::string& sql) {
     try {
         Lexer l(sql); auto tokens = l.tokenize();
@@ -444,6 +470,12 @@ json Executor::execute(const std::string& sql) {
         if (auto q = dynamic_cast<UpdateStatement*>(query.get())) return execUpdate(q);
         if (auto q = dynamic_cast<DeleteStatement*>(query.get())) return execDelete(q);
         if (auto q = dynamic_cast<ShowStatement*>(query.get())) return execShow(q);
+
+        if (auto q = dynamic_cast<CreateUserStatement*>(query.get())) return execCreateUser(q);
+        if (auto q = dynamic_cast<CreateRoleStatement*>(query.get())) return execCreateRole(q);
+        if (auto q = dynamic_cast<SetUserStatement*>(query.get())) return execSetUser(q);
+        if (auto q = dynamic_cast<GrantRoleStatement*>(query.get())) return execGrantRole(q);
+        if (auto q = dynamic_cast<GrantStatement*>(query.get())) return execGrant(q);
         return err("Unknown query type");
     } catch (const std::exception& e) { return err(e.what()); }
 }
@@ -480,6 +512,9 @@ json Executor::execDropDB(const DropDatabaseStatement* q) {
     return err("Failed to drop database.");
 }
 json Executor::execCreateTable(const CreateTableStatement* q) {
+    requireDB();
+    checkPermission("*", "CREATE");
+
     TableSchema s; s.table_name = q->table_name;
     for (auto& cd : q->column_defs) { ColumnDef c; c.name = cd.name; c.type = cd.type; c.not_null = cd.not_null; c.unique = cd.unique; c.has_default = cd.has_default; c.is_autoincrement = cd.is_autoincrement; c.default_value = cd.default_value; c.fk_ref_table = cd.fk_ref_table; c.fk_ref_column = cd.fk_ref_column; c.on_delete = cd.on_delete; c.on_update = cd.on_update; s.columns.push_back(c); }
     s.primary_key_index = q->primary_key_index >= 0 ? q->primary_key_index : 0;
@@ -487,12 +522,17 @@ json Executor::execCreateTable(const CreateTableStatement* q) {
     throw std::runtime_error("Table '" + q->table_name + "' already exists");
 }
 json Executor::execDropTable(const DropTableStatement* q) {
+    requireDB();
+    checkPermission(q->table_name, "DROP");
+
     if (storage_.dropTable(current_db_, q->table_name)) return ok("Dropped.");
     if (q->if_exists) return ok("Dropped.");
     throw std::runtime_error("Table '" + q->table_name + "' does not exist");
 }
 json Executor::execAlterTable(const AlterTableStatement* q) {
     requireDB();
+    checkPermission(q->table_name, "ALTER");
+
     if (q->alter_action == AlterAction::ADD_COL) {
         if (!q->add_column_csv_path.empty())
             return execAlterTableAddColumnFromCsv(q);
@@ -675,8 +715,20 @@ json Executor::execAlterTableAddColumnFromCsv(const AlterTableStatement* q) {
 
     return ok("Added column and updated " + std::to_string(updates.size()) + " row(s) from CSV.");
 }
-json Executor::execCreateIndex(const CreateIndexStatement* q) { if (storage_.createIndex(current_db_, q->table_name, q->index_name, q->column_name)) return ok("Created."); return err("Failed."); }
-json Executor::execDropIndex(const DropIndexStatement* q) { if (storage_.dropIndex(current_db_, q->table_name, q->index_name)) return ok("Dropped."); return err("Failed."); }
+json Executor::execCreateIndex(const CreateIndexStatement* q) { 
+    requireDB();
+    checkPermission(q->table_name, "ALTER");
+
+    if (storage_.createIndex(current_db_, q->table_name, q->index_name, q->column_name)) return ok("Created.");
+     return err("Failed."); 
+}
+json Executor::execDropIndex(const DropIndexStatement* q) { 
+    requireDB();
+    checkPermission(q->table_name, "ALTER");
+
+    if (storage_.dropIndex(current_db_, q->table_name, q->index_name)) return ok("Dropped."); 
+    return err("Failed."); 
+}
 
 json Executor::execShow(const ShowStatement* q) {
     switch (q->type) {
@@ -898,6 +950,9 @@ json Executor::insertValidatedRows(const std::string& table_name, const TableSch
 }
 
 json Executor::execInsert(const InsertStatement* q) {
+    requireDB();
+    checkPermission(q->table_name, "INSERT");
+
     auto s = storage_.getTableSchema(current_db_, q->table_name);
     std::vector<Row> evaluated_rows;
 
@@ -934,6 +989,7 @@ json Executor::execInsert(const InsertStatement* q) {
 
 json Executor::execLoadCsv(const LoadCsvStatement* q) {
     requireDB();
+    checkPermission(q->table_name, "INSERT");
     if (!storage_.tableExists(current_db_, q->table_name))
         return err("Table does not exist: " + q->table_name);
 
@@ -1048,6 +1104,8 @@ json Executor::execLoadCsv(const LoadCsvStatement* q) {
 }
 json Executor::execUpdate(const UpdateStatement* q) {
     requireDB();
+    checkPermission(q->table_name, "UPDATE");
+
     auto s = storage_.getTableSchema(current_db_, q->table_name);
     auto rows = storage_.readAllRows(current_db_, q->table_name);
     int u = 0;
@@ -1108,8 +1166,11 @@ void Executor::performUpdate(const std::string& db_name, const std::string& tabl
     }
 }
 json Executor::execDelete(const DeleteStatement* q) {
-    auto s = storage_.getTableSchema(current_db_, q->table_name);
-    auto rows = storage_.readAllRows(current_db_, q->table_name);
+    requireDB();
+    checkPermission(q->table_name, "DELETE");
+
+    auto s = storage_.getTableSchema(current_db_, q->table_name); 
+    auto rows = storage_.readAllRows(current_db_, q->table_name); 
     std::vector<Row> to_delete;
     for (auto& row : rows) {
         if (!q->where || evalCondition(q->where.get(), row, s, nullptr, nullptr, outer_schema_, outer_row_)) {
@@ -1293,6 +1354,7 @@ json Executor::execSelect(const SelectStatement* q) {
         }
     } else {
         requireDB();
+        checkPermission(q->table_name, "SELECT");
         auto s = storage_.getTableSchema(current_db_, q->table_name);
         if (!tryIndexScan(q, s, rows)) {
             if (!q->where && q->order_by.size() == 1 && !q->distinct && q->group_by.empty()) {
@@ -1316,6 +1378,7 @@ json Executor::execSelect(const SelectStatement* q) {
         for (auto& c : m.columns) c.name = effective_root_table + "." + c.name;
     }
     for (auto& jc : q->joins) {
+        checkPermission(jc.table_name, "SELECT");
         auto rs = storage_.getTableSchema(current_db_, jc.table_name);
         std::string rs_effective_name = jc.alias.empty() ? jc.table_name : jc.alias;
         rs.table_name = rs_effective_name; // Set effective name for colIndex resolution
@@ -1618,6 +1681,133 @@ std::vector<Row> Executor::execute_subquery(const SelectStatement* q, const Tabl
         }
     }
     return rws;
+}
+
+json Executor::execCreateUser(const CreateUserStatement* q) {
+    requireDB();
+    checkPermission("sys_users", "ALL");
+
+    auto existing = storage_.indexLookup(current_db_, "sys_users", "username", q->username);
+    if (!existing.empty()) return err("User already exists.");
+
+    auto sch = storage_.getTableSchema(current_db_, "sys_users");
+    
+    Row row(sch.columns.size());
+    row[1] = coerce_string_to_cell_column(sch.columns[1], q->username, false);
+    row[2] = coerce_string_to_cell_column(sch.columns[2], q->password, false);
+
+    std::map<int, long> dummy_last_ids;
+    applyDefaultsAndAutoincrement(sch, "sys_users", row, dummy_last_ids);
+
+    storage_.appendRows(current_db_, "sys_users", {row});
+    storage_.indexInsertRow(current_db_, "sys_users", sch, row);
+
+    return ok("User '" + q->username + "' created.");
+}
+
+json Executor::execCreateRole(const CreateRoleStatement* q) {
+    requireDB();
+    checkPermission("sys_roles", "ALL");
+
+    auto existing = storage_.indexLookup(current_db_, "sys_roles", "role_name", q->rolename);
+    if (!existing.empty()) return err("Role already exists.");
+
+    auto sch = storage_.getTableSchema(current_db_, "sys_roles");
+    
+    Row row(sch.columns.size());
+    row[1] = coerce_string_to_cell_column(sch.columns[1], q->rolename, false);
+
+    // Автоматическая генерация ID
+    std::map<int, long> dummy_last_ids;
+    applyDefaultsAndAutoincrement(sch, "sys_roles", row, dummy_last_ids);
+
+    storage_.appendRows(current_db_, "sys_roles", {row});
+    storage_.indexInsertRow(current_db_, "sys_roles", sch, row); // Обязательно обновляем индекс!
+
+    return ok("Role '" + q->rolename + "' created.");
+}
+
+nlohmann::json Executor::execSetUser(const SetUserStatement* q) {
+    if (!current_db_.empty()) {
+        auto users = storage_.indexLookup(current_db_, "sys_users", "username", q->username);
+        if (users.empty() && q->username != "admin") {
+            return err("User '" + q->username + "' does not exist in database '" + current_db_ + "'");
+        }
+
+        if (!users.empty() && q->username != "admin") {
+            Row user_row = storage_.findRow(current_db_, "sys_users", users[0]);
+            std::string stored_pass = "";
+            // Третья колонка (индекс 2) - это password_hash
+            if (user_row.size() > 2 && user_row[2].has_value()) {
+                stored_pass = cell_to_where_string(user_row[2]);
+            }
+            if (stored_pass != q->password) {
+                return err("Invalid password for user '" + q->username + "'.");
+            }
+        }
+    } else if (q->username != "admin") {
+        // Защита: нельзя авторизоваться, не выбрав БД, т.к. системные таблицы лежат внутри конкретной БД
+        return err("Select a database first (USE <database>;) to authenticate users.");
+    }
+
+    current_user_ = q->username;
+
+    priv_cache_.clear();
+
+    return ok("Context switched to user: " + current_user_);
+}
+
+json Executor::execGrantRole(const GrantRoleStatement* q) {
+    requireDB();
+    checkPermission("sys_user_roles", "ALL");
+
+    auto user_pks = storage_.indexLookup(current_db_, "sys_users", "username", q->user_name);
+    if (user_pks.empty()) return err("User not found: " + q->user_name);
+    std::string user_id = user_pks[0];
+
+    auto role_pks = storage_.indexLookup(current_db_, "sys_roles", "role_name", q->role_name);
+    if (role_pks.empty()) return err("Role not found: " + q->role_name);
+    std::string role_id = role_pks[0];
+
+    auto sch = storage_.getTableSchema(current_db_, "sys_user_roles");
+    
+    Row row(sch.columns.size());
+    row[1] = coerce_string_to_cell_column(sch.columns[1], user_id, false);
+    row[2] = coerce_string_to_cell_column(sch.columns[2], role_id, false);
+
+    std::map<int, long> dummy_last_ids;
+    applyDefaultsAndAutoincrement(sch, "sys_user_roles", row, dummy_last_ids);
+
+    storage_.appendRows(current_db_, "sys_user_roles", {row});
+    storage_.indexInsertRow(current_db_, "sys_user_roles", sch, row);
+    
+    priv_cache_.clear(); 
+    return ok("Granted role '" + q->role_name + "' to user '" + q->user_name + "'.");
+}
+
+json Executor::execGrant(const GrantStatement* q) {
+    requireDB();
+    checkPermission("sys_grants", "ALL");
+
+    auto role_pks = storage_.indexLookup(current_db_, "sys_roles", "role_name", q->role_name);
+    if (role_pks.empty()) return err("Role not found: " + q->role_name);
+    std::string role_id = role_pks[0];
+
+    auto sch = storage_.getTableSchema(current_db_, "sys_grants");
+    
+    Row row(sch.columns.size());
+    row[1] = coerce_string_to_cell_column(sch.columns[1], role_id, false);
+    row[2] = coerce_string_to_cell_column(sch.columns[2], q->object_name, false);
+    row[3] = coerce_string_to_cell_column(sch.columns[3], q->privilege, false);
+
+    std::map<int, long> dummy_last_ids;
+    applyDefaultsAndAutoincrement(sch, "sys_grants", row, dummy_last_ids);
+
+    storage_.appendRows(current_db_, "sys_grants", {row});
+    storage_.indexInsertRow(current_db_, "sys_grants", sch, row);
+    
+    priv_cache_.clear();
+    return ok("Granted " + q->privilege + " on " + q->object_name + " to " + q->role_name + ".");
 }
 
 } // namespace db

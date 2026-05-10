@@ -53,6 +53,12 @@ class Storage {
 public:
     explicit Storage(const std::string& data_dir = "data");
 
+    // RBAC (Role-Based Access Control)
+    bool checkPrivilege(const std::string& db_name, 
+                        const std::string& username,
+                        const std::string& object_name, 
+                        const std::string& privilege) const;
+    
     // Database
     bool createDatabase(const std::string& db_name);
     bool dropDatabase(const std::string& db_name);
@@ -131,6 +137,8 @@ private:
     // Protects pools_ from concurrent access (HTTP server runs queries in parallel).
     mutable std::mutex pools_latch_;
     mutable std::unordered_map<std::string, std::unique_ptr<BufferPool>> pools_;
+
+    void initializeSystemTables(const std::string& db_name);
 
     void walAppendRowDelete(const std::string& abs_path, const std::string& key);
     void walAppendRowUpsert(const std::string& abs_path, const std::string& key,

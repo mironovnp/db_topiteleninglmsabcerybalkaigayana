@@ -37,7 +37,11 @@ static const std::unordered_map<std::string, TokenType> KEYWORDS = {
     {"DISTINCT",TokenType::KW_DISTINCT},{"IS",TokenType::KW_IS},
     {"FOREIGN",TokenType::KW_FOREIGN},{"REFERENCES",TokenType::KW_REFERENCES},
     {"LIKE",TokenType::KW_LIKE},{"BETWEEN",TokenType::KW_BETWEEN},{"AUTOINCREMENT",TokenType::KW_AUTOINCREMENT},
-    {"SHOW",TokenType::KW_SHOW},
+    {"SHOW",TokenType::KW_SHOW}, 
+    {"USER",TokenType::KW_USER}, {"ROLE",TokenType::KW_ROLE},
+    {"GRANT",TokenType::KW_GRANT}, {"REVOKE",TokenType::KW_REVOKE},
+    {"TO",TokenType::KW_TO}, {"PASSWORD",TokenType::KW_PASSWORD},
+    {"ALL",TokenType::KW_ALL}, {"PRIVILEGES",TokenType::KW_PRIVILEGES},
 };
 
 using enum TokenType;
@@ -178,7 +182,9 @@ std::unique_ptr<Statement> Parser::parse() {
         if (check(KW_DATABASE)) return parseCreateDB();
         if (check(KW_TABLE))    return parseCreateTable();
         if (check(KW_INDEX))    return parseCreateIndex();
-        throw std::runtime_error("Expected DATABASE, TABLE or INDEX after CREATE, got: " + cur().value);
+        if (check(KW_USER))     return parseCreateUser();
+        if (check(KW_ROLE))     return parseCreateRole();
+        throw std::runtime_error("Expected DATABASE, TABLE, INDEX, USER or ROLE after CREATE, got: " + cur().value);
     }
     if (check(KW_DROP)) {
         consume();
@@ -199,6 +205,12 @@ std::unique_ptr<Statement> Parser::parse() {
     if (check(KW_DELETE)) { consume(); return parseDelete(); }
     if (check(KW_USE))    { consume(); return parseUse(); }
     if (check(KW_SHOW))   { consume(); return parseShow(); }
+    if (check(KW_GRANT))  { consume(); return parseGrant(); }
+    if (check(KW_SET)) {
+        consume(); 
+        if (check(KW_USER)) return parseSetUser();
+        throw std::runtime_error("Expected USER after SET");
+    }
     throw std::runtime_error("Unknown query, got: " + cur().value);
 }
 
@@ -400,6 +412,65 @@ std::unique_ptr<AlterTableStatement> Parser::parseAlterTable() {
 
     match(SEMICOLON);
     return q;
+}
+
+// ── DCL (Data Control Language) ────────────────────────────────────────
+
+std::unique_ptr<CreateUserStatement> Parser::parseCreateUser() {
+    expect(KW_USER);
+    auto q = std::make_unique<CreateUserStatement>();
+    q->username = expect(IDENTIFIER).value;
+    
+    if (match(KW_PASSWORD)) {
+        q->password = expect(STRING_LITERAL).value;
+    }
+    match(SEMICOLON);
+    return q;
+}
+
+std::unique_ptr<CreateRoleStatement> Parser::parseCreateRole() {
+    expect(KW_ROLE);
+    auto q = std::make_unique<CreateRoleStatement>();
+    q->rolename = expect(IDENTIFIER).value;
+    match(SEMICOLON);
+    return q;
+}
+
+std::unique_ptr<Statement> Parser::parseGrant() {
+    // Branch 1: GRANT ROLE <role> TO <user>;
+    if (match(KW_ROLE)) {
+        auto q = std::make_unique<GrantRoleStatement>();
+        q->role_name = expect(IDENTIFIER).value;
+        expect(KW_TO);
+        q->user_name = expect(IDENTIFIER).value;
+        match(SEMICOLON);
+        return q;
+    } 
+    // Branch 2: GRANT <privilege> ON <object> TO <role>;
+    else {
+        auto q = std::make_unique<GrantStatement>();
+        
+        if (match(KW_ALL)) {
+            q->privilege = "ALL";
+            match(KW_PRIVILEGES); // Ignoring optional PRIVILEGES
+        } else {
+            // Getting the word (SELECT, INSERT, UPDATE)
+            q->privilege = consume().value; 
+        }
+        
+        expect(KW_ON);
+        
+        if (match(STAR)) {
+            q->object_name = "*";
+        } else {
+            q->object_name = expect(IDENTIFIER).value;
+        }
+        
+        expect(KW_TO);
+        q->role_name = expect(IDENTIFIER).value;
+        match(SEMICOLON);
+        return q;
+    }
 }
 
 // ── Helper: parse [table.]column ────────────────────────────────────────
@@ -866,6 +937,22 @@ std::unique_ptr<LoadCsvStatement> Parser::parseLoadCsv() {
     if (match(KW_APPEND))
         q->append = true;
     match(SEMICOLON);
+    return q;
+}
+
+std::unique_ptr<SetUserStatement> Parser::parseSetUser() {
+    expect(KW_USER);
+    auto q = std::make_unique<SetUserStatement>();
+    
+    if (check(TokenType::STRING_LITERAL)) {
+        q->username = consume().value;
+    } else {
+        q->username = expect(TokenType::IDENTIFIER).value;
+    }
+    if (match(TokenType::KW_PASSWORD)){
+        q->password = expect(TokenType::STRING_LITERAL).value;
+    }
+    match(TokenType::SEMICOLON);
     return q;
 }
 

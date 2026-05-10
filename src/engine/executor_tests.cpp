@@ -100,8 +100,11 @@ public:
         test_load_csv();
         test_load_csv_nonempty_and_append();
 
-        std::cout << "\n>>> ФАЗА 24: Многострочные запросы и Алиасы агрегатов" << std::endl;
+        std::cout << "\n>>> ФАЗА 23: Многострочные запросы и Алиасы агрегатов" << std::endl;
         test_multi_line_and_aggr_aliases();
+
+        std::cout << "\n>>> ФАЗА 24: Проверка RBAC" << std::endl;
+        test_rbac();
 
         std::cout << "\n" << std::string(40, '=') << std::endl;
         std::cout << "ИТОГО: " << passed_count << "/" << total_count << " тестов пройдено." << std::endl;
@@ -1083,6 +1086,65 @@ private:
             1, {{"10", "300.500"}});
 
         assert_success("Очистка multi_db", "DROP DATABASE multi_db;");
+    }
+    void test_rbac() {
+        std::cout << "\n>>> ФАЗА 3: Ролевая модель доступа (RBAC)" << std::endl;
+
+        // 1. Подготовка (от имени админа)
+        assert_success("RBAC: Создание базы", "CREATE DATABASE rbac_db;");
+        assert_success("RBAC: Выбор базы", "USE rbac_db;");
+        assert_success("RBAC: Настройка контекста админа", "SET USER admin;");
+        assert_success("RBAC: Создание таблицы", "CREATE TABLE vault (id INT PRIMARY KEY, secret_data VARCHAR(100));");
+        assert_success("RBAC: Вставка базовых данных", "INSERT INTO vault VALUES (1, 'Top Secret');");
+
+        // 2. Создание аккаунтов и ролей
+        assert_success("RBAC: Создание пользователей", "CREATE USER alice PASSWORD 'pass_a';");
+        assert_success("RBAC: Создание пользователей", "CREATE USER bob PASSWORD 'pass_b';");
+        assert_success("RBAC: Создание пользователей", "CREATE USER eve PASSWORD 'pass_e';"); // Хакер
+        
+        assert_success("RBAC: Создание ролей", "CREATE ROLE reader;");
+        assert_success("RBAC: Создание ролей", "CREATE ROLE writer;");
+
+        // 3. Выдача разрешений (Гранты)
+        assert_success("RBAC: Права на чтение", "GRANT SELECT ON vault TO reader;");
+        assert_success("RBAC: Права на запись", "GRANT INSERT ON vault TO writer;");
+        assert_success("RBAC: Права на обновление", "GRANT UPDATE ON vault TO writer;");
+        
+        assert_success("RBAC: Назначение ролей", "GRANT ROLE reader TO alice;");
+        assert_success("RBAC: Назначение ролей", "GRANT ROLE reader TO bob;"); // Боб может и читать
+        assert_success("RBAC: Назначение ролей", "GRANT ROLE writer TO bob;"); // ...и писать
+
+        // 4. Тестирование Аутентификации
+        assert_error("RBAC: Неверный юзер", "SET USER ghost PASSWORD '123';", "does not exist");
+        assert_error("RBAC: Неверный пароль", "SET USER alice PASSWORD 'wrong';", "Invalid password");
+
+        // 5. Тестирование Изоляции: ALICE (Только чтение)
+        assert_success("RBAC: Авторизация Alice", "SET USER alice PASSWORD 'pass_a';");
+        assert_rows("RBAC: Alice читает", "SELECT * FROM vault;", 1, {{"1", "Top Secret"}});
+        assert_error("RBAC: Alice пытается писать", "INSERT INTO vault VALUES (2, 'Alice data');", "Permission denied");
+        assert_error("RBAC: Alice пытается удалять", "DELETE FROM vault WHERE id = 1;", "Permission denied");
+        assert_error("RBAC: Alice пытается создать таблицу", "CREATE TABLE backdoor (id INT);", "Permission denied");
+
+        // 6. Тестирование Прав: BOB (Чтение и Запись)
+        assert_success("RBAC: Авторизация Bob", "SET USER bob PASSWORD 'pass_b';");
+        assert_success("RBAC: Bob пишет", "INSERT INTO vault VALUES (2, 'Bob data');");
+        assert_success("RBAC: Bob обновляет", "UPDATE vault SET secret_data = 'Updated' WHERE id = 1;");
+        assert_rows("RBAC: Bob читает изменения", "SELECT id FROM vault WHERE id = 2;", 1, {{"2"}});
+        // У Боба нет прав на DROP
+        assert_error("RBAC: Bob пытается удалить таблицу", "DROP TABLE vault;", "Permission denied");
+
+        // 7. Тестирование Безопасности: EVE (Без ролей)
+        assert_success("RBAC: Авторизация Eve", "SET USER eve PASSWORD 'pass_e';");
+        assert_error("RBAC: Eve пытается читать", "SELECT * FROM vault;", "Permission denied");
+        assert_error("RBAC: Eve пытается писать", "INSERT INTO vault VALUES (3, 'Malware');", "Permission denied");
+        
+        // 8. Защита системного каталога (Критически важно!)
+        assert_error("RBAC: Eve атакует sys_users", "INSERT INTO sys_users VALUES (99, 'root', 'pwd');", "Permission denied");
+        assert_error("RBAC: Eve атакует sys_grants", "INSERT INTO sys_grants VALUES (99, 1, '*', 'ALL');", "Permission denied");
+
+        // 9. Очистка и возврат к админу
+        assert_success("RBAC: Авторизация Admin", "SET USER admin;");
+        assert_success("RBAC: Админ удаляет базу", "DROP DATABASE rbac_db;");
     }
 };
 

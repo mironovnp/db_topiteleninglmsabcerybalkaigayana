@@ -53,6 +53,18 @@ private:
     void applyDefaultsAndAutoincrement(const TableSchema& s, const std::string& table_name, Row& r,
                                        std::map<int, long>& last_ids);
 
+    // --- Session & RBAC ---
+    std::string current_user_ = "admin"; 
+    std::unordered_map<std::string, bool> priv_cache_; // Кэш: "db:user:table:priv" -> true/false
+
+    void checkPermission(const std::string& table_name, const std::string& privilege);
+
+    nlohmann::json execCreateUser(const CreateUserStatement* q);
+    nlohmann::json execCreateRole(const CreateRoleStatement* q);
+    nlohmann::json execSetUser(const SetUserStatement* q);
+    nlohmann::json execGrantRole(const GrantRoleStatement* q);
+    nlohmann::json execGrant(const GrantStatement* q);
+
     nlohmann::json execShowDatabases();
     nlohmann::json execShowTables();
     nlohmann::json execShowColumns(const std::string& table_name);

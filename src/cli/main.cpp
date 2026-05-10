@@ -101,8 +101,12 @@ int main(int argc, char* argv[]) {
     std::string line;
     std::string query;
 
+    std::string prompt_user = "admin";
+    std::string prompt_db = "(none)";
+
     while (true) {
-        std::cout << (query.empty() ? "sql> " : "  -> ");
+        std::string sout = "\033[1;36m" + prompt_user + "@" + prompt_db + "\033[0m> ";
+        std::cout << (query.empty() ? sout : "  -> ");
 
         if (!std::getline(std::cin, line)) break;
 
@@ -138,7 +142,9 @@ int main(int argc, char* argv[]) {
                                 first_word == "DROP" || first_word == "INSERT" ||
                                 first_word == "UPDATE" || first_word == "DELETE" ||
                                 first_word == "USE" || first_word == "ALTER" ||
-                                first_word == "SHOW" || first_word == "LOAD");
+                                first_word == "GRANT" || first_word == "REVOKE" ||
+                                first_word == "SET" || first_word == "SHOW" ||
+                                first_word == "LOAD");
             if (!valid_start) {
                 std::cout << "\033[31m[ERROR]\033[0m Unexpected keyword: " << first_word << "\n\n";
                 query.clear();
@@ -169,8 +175,20 @@ int main(int argc, char* argv[]) {
 
         if (!result.columns.empty()) {
             printTable(result.columns, result.rows);
-        } else {
-            std::cout << "\033[32m[OK]\033[0m " << result.message << "\n";
+        } else if (result.type == "modify" || result.success) {
+            std::string msg = result.message;
+            if (msg.find("Using database '") == 0) {
+                size_t start = 16;
+                size_t end = msg.find("'", start);
+                if (end != std::string::npos) {
+                    prompt_db = "(" + msg.substr(start, end - start) + ")";
+                }
+            } else if (msg.find("Context switched to user: ") == 0) {
+                prompt_user = msg.substr(26);
+            }
+            if (!msg.empty() && result.type != "select") {
+                std::cout << "\033[32m[OK]\033[0m " << msg;
+            }
         }
         std::cout << "\n";
     }

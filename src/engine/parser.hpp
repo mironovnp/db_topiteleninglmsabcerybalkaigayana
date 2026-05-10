@@ -23,6 +23,7 @@ enum class TokenType {
     KW_LIMIT, KW_OFFSET,
     KW_IN, KW_EXISTS, KW_NULL, KW_UNIQUE, KW_DEFAULT, KW_FOREIGN, KW_REFERENCES, KW_CASCADE,
     KW_INDEX, KW_IF, KW_DISTINCT, KW_IS, KW_LIKE, KW_BETWEEN, KW_AUTOINCREMENT, KW_SHOW,
+    KW_USER, KW_ROLE, KW_GRANT, KW_REVOKE, KW_TO, KW_PASSWORD, KW_ALL, KW_PRIVILEGES,
     IDENTIFIER, STRING_LITERAL, NUMBER_LITERAL, BOOL_LITERAL,
     OP_EQ, OP_NEQ, OP_LT, OP_GT, OP_LTE, OP_GTE,
     OP_PLUS, OP_MINUS, OP_DIV, // OP_STAR is handled by STAR
@@ -301,6 +302,36 @@ public:
     std::string table_name; // used for COLUMNS, INDEX, CREATE_TABLE
 };
 
+class CreateUserStatement : public Statement {
+public:
+    std::string username;
+    std::string password;
+};
+
+class SetUserStatement : public Statement {
+public:
+    std::string username;
+    std::string password;
+};
+
+class CreateRoleStatement : public Statement {
+public:
+    std::string rolename;
+};
+
+class GrantRoleStatement : public Statement {
+public:
+    std::string role_name;
+    std::string user_name;
+};
+
+class GrantStatement : public Statement {
+public:
+    std::string privilege;   // "SELECT", "INSERT", etc.
+    std::string object_name; // Name of a table or all
+    std::string role_name;
+};
+
 // ── Lexer ──────────────────────────────────────────────────────────────
 
 class Lexer {
@@ -346,6 +377,10 @@ private:
     std::unique_ptr<DropIndexStatement> parseDropIndex();
     std::unique_ptr<ShowStatement> parseShow();
     std::unique_ptr<LoadCsvStatement> parseLoadCsv();
+    std::unique_ptr<CreateUserStatement> parseCreateUser();
+    std::unique_ptr<SetUserStatement> parseSetUser();
+    std::unique_ptr<CreateRoleStatement> parseCreateRole();
+    std::unique_ptr<Statement> parseGrant();
 
     QualifiedCol parseQualifiedCol();
     std::string parseIdentifier();
