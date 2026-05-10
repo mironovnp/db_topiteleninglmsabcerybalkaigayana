@@ -108,6 +108,10 @@ std::vector<Row> Storage::readAllRows(const std::string& db_name,
     Page* meta = pool.fetchPage(0);
     PageId root_id;
     memcpy(&root_id, meta->data + 16, 4);
+    if (root_id == 0 || root_id == INVALID_PAGE_ID) {
+        pool.unpinPage(0, false);
+        throw std::runtime_error("Table metadata corrupted: root_id is invalid (0 or -1)");
+    }
 
     uint32_t payload_len = meta->getNumRecords();
     TableSchema s = deserializeSchema(meta->data + 16, payload_len);
@@ -125,6 +129,10 @@ int Storage::appendRows(const std::string& db_name, const std::string& table_nam
     Page* meta = pool.fetchPage(0);
     PageId root_id;
     memcpy(&root_id, meta->data + 16, 4);
+    if (root_id == 0 || root_id == INVALID_PAGE_ID) {
+        pool.unpinPage(0, false);
+        throw std::runtime_error("Table metadata corrupted: root_id is invalid (0 or -1) in appendRows");
+    }
 
     uint32_t payload_len = meta->getNumRecords();
     TableSchema s = deserializeSchema(meta->data + 16, payload_len);
@@ -219,6 +227,10 @@ Row Storage::findRow(const std::string& db_name, const std::string& table_name,
     Page* meta = pool.fetchPage(0);
     PageId root_id;
     memcpy(&root_id, meta->data + 16, 4);
+    if (root_id == 0 || root_id == INVALID_PAGE_ID) {
+        pool.unpinPage(0, false);
+        throw std::runtime_error("Table metadata corrupted: root_id is invalid (0 or -1) in findRow");
+    }
     uint32_t payload_len = meta->getNumRecords();
     TableSchema s = deserializeSchema(meta->data + 16, payload_len);
     pool.unpinPage(0, false);

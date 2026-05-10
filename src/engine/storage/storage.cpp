@@ -1,11 +1,16 @@
 #include "engine/storage/storage.hpp"
+#include <iostream>
 
 namespace db {
 
 Storage::Storage(const std::string& data_dir) : data_dir_(data_dir) {
     std::filesystem::create_directories(data_dir_);
     wal_mgr_ = std::make_unique<WALManager>((data_dir_ / "wal.log").string());
-    wal_mgr_->recover(this);
+    try {
+        wal_mgr_->recover(this);
+    } catch (const std::exception& e) {
+        std::cerr << "[WAL] Recovery failed: " << e.what() << ". Some data may be lost." << std::endl;
+    }
 }
 
 std::filesystem::path Storage::databaseDirectory(const std::string& db_name) const {

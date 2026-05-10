@@ -244,6 +244,7 @@ int Executor::compareValues(const Value& a, const Value& b) const {
 
 Value Executor::evaluateExpression(const Expression* expr, const Row& row, const TableSchema& schema,
                                    const std::map<std::pair<AggrFunc, std::string>, AggrState>* aggrs,
+                                   const std::vector<SelectColumn>* select_cols,
                                    const TableSchema* outer_schema, const Row* outer_row) {
     if (!expr) return {"", "NULL"};
     if (auto lit = dynamic_cast<const LiteralExpression*>(expr)) {
@@ -265,6 +266,13 @@ Value Executor::evaluateExpression(const Expression* expr, const Row& row, const
             if (!cv.has_value())
                 return {"", "NULL"};
             return {cell_to_where_string(cv), schema.columns[static_cast<size_t>(idx)].type};
+        }
+        if (select_cols) {
+            for (auto& sc : *select_cols) {
+                if (sc.alias == col->column) {
+                    return evaluateExpression(sc.expr.get(), row, schema, aggrs, nullptr, outer_schema, outer_row);
+                }
+            }
         }
         if (outer_schema && outer_row) {
             idx = colIndex(*outer_schema, col->table, col->column);
@@ -293,23 +301,23 @@ Value Executor::evaluateExpression(const Expression* expr, const Row& row, const
         return {"0", "FLOAT"};
     }
     if (auto un = dynamic_cast<const UnaryExpression*>(expr)) {
-        if (un->op == TokenType::KW_NOT) return {evalCondition(un->operand.get(), row, schema, aggrs, outer_schema, outer_row) ? "0" : "1", "BOOL"};
+        if (un->op == TokenType::KW_NOT) return {evalCondition(un->operand.get(), row, schema, aggrs, select_cols, outer_schema, outer_row) ? "0" : "1", "BOOL"};
         if (un->op == TokenType::OP_MINUS) {
-            Value v = evaluateExpression(un->operand.get(), row, schema, aggrs, outer_schema, outer_row);
+            Value v = evaluateExpression(un->operand.get(), row, schema, aggrs, select_cols, outer_schema, outer_row);
             double d = v.val.empty() ? 0 : std::stod(v.val);
             return {formatFloat(-d), "FLOAT"};
         }
     }
     if (auto bin = dynamic_cast<const BinaryExpression*>(expr)) {
         if (bin->op == TokenType::KW_AND) {
-            if (!evalCondition(bin->left.get(), row, schema, aggrs, outer_schema, outer_row)) return {"0", "BOOL"};
-            return {evalCondition(bin->right.get(), row, schema, aggrs, outer_schema, outer_row) ? "1" : "0", "BOOL"};
+            if (!evalCondition(bin->left.get(), row, schema, aggrs, select_cols, outer_schema, outer_row)) return {"0", "BOOL"};
+            return {evalCondition(bin->right.get(), row, schema, aggrs, select_cols, outer_schema, outer_row) ? "1" : "0", "BOOL"};
         }
         if (bin->op == TokenType::KW_OR) {
-            if (evalCondition(bin->left.get(), row, schema, aggrs, outer_schema, outer_row)) return {"1", "BOOL"};
-            return {evalCondition(bin->right.get(), row, schema, aggrs, outer_schema, outer_row) ? "1" : "0", "BOOL"};
+            if (evalCondition(bin->left.get(), row, schema, aggrs, select_cols, outer_schema, outer_row)) return {"1", "BOOL"};
+            return {evalCondition(bin->right.get(), row, schema, aggrs, select_cols, outer_schema, outer_row) ? "1" : "0", "BOOL"};
         }
-        Value left = evaluateExpression(bin->left.get(), row, schema, aggrs, outer_schema, outer_row);
+        Value left = evaluateExpression(bin->left.get(), row, schema, aggrs, select_cols, outer_schema, outer_row);
         if (bin->op == TokenType::KW_IN) {
             if (auto in_sub =
                     dynamic_cast<const SubqueryExpression*>(bin->right.get())) {
@@ -325,7 +333,7 @@ Value Executor::evaluateExpression(const Expression* expr, const Row& row, const
                 return {(in_sub->negated ? !found : found) ? "1" : "0", "BOOL"};
             }
         }
-        Value right = evaluateExpression(bin->right.get(), row, schema, aggrs, outer_schema, outer_row);
+        Value right = evaluateExpression(bin->right.get(), row, schema, aggrs, select_cols, outer_schema, outer_row);
         if (bin->op == TokenType::OP_PLUS || bin->op == TokenType::OP_MINUS || bin->op == TokenType::STAR || bin->op == TokenType::OP_DIV) {
             double lv = left.val.empty() ? 0 : std::stod(left.val);
             double rv = right.val.empty() ? 0 : std::stod(right.val);
@@ -353,24 +361,24 @@ Value Executor::evaluateExpression(const Expression* expr, const Row& row, const
         return {res ? "1" : "0", "BOOL"};
     }
     if (auto in_list = dynamic_cast<const InListExpression*>(expr)) {
-        Value left = evaluateExpression(in_list->left.get(), row, schema, aggrs, outer_schema, outer_row);
+        Value left = evaluateExpression(in_list->left.get(), row, schema, aggrs, select_cols, outer_schema, outer_row);
         bool found = std::find(in_list->values.begin(), in_list->values.end(), left.val) != in_list->values.end();
         return {(in_list->negated ? !found : found) ? "1" : "0", "BOOL"};
     }
     if (auto is_null = dynamic_cast<const IsNullExpression*>(expr)) {
-        Value v = evaluateExpression(is_null->operand.get(), row, schema, aggrs, outer_schema, outer_row);
+        Value v = evaluateExpression(is_null->operand.get(), row, schema, aggrs, select_cols, outer_schema, outer_row);
         bool is_v_null = (v.type == "NULL");
         return {(is_null->is_not ? !is_v_null : is_v_null) ? "1" : "0", "BOOL"};
     }
     if (auto lk = dynamic_cast<const LikeExpression*>(expr)) {
-        Value v = evaluateExpression(lk->left.get(), row, schema, aggrs, outer_schema, outer_row);
+        Value v = evaluateExpression(lk->left.get(), row, schema, aggrs, select_cols, outer_schema, outer_row);
         bool res = likeMatch(v.val, lk->pattern);
         return {(lk->negated ? !res : res) ? "1" : "0", "BOOL"};
     }
     if (auto bt = dynamic_cast<const BetweenExpression*>(expr)) {
-        Value v = evaluateExpression(bt->val.get(), row, schema, aggrs, outer_schema, outer_row);
-        Value low = evaluateExpression(bt->low.get(), row, schema, aggrs, outer_schema, outer_row);
-        Value high = evaluateExpression(bt->high.get(), row, schema, aggrs, outer_schema, outer_row);
+        Value v = evaluateExpression(bt->val.get(), row, schema, aggrs, select_cols, outer_schema, outer_row);
+        Value low = evaluateExpression(bt->low.get(), row, schema, aggrs, select_cols, outer_schema, outer_row);
+        Value high = evaluateExpression(bt->high.get(), row, schema, aggrs, select_cols, outer_schema, outer_row);
         bool res = (compareValues(v, low) >= 0 && compareValues(v, high) <= 0);
         return {(bt->negated ? !res : res) ? "1" : "0", "BOOL"};
     }
@@ -388,9 +396,10 @@ Value Executor::evaluateExpression(const Expression* expr, const Row& row, const
 
 bool Executor::evalCondition(const Expression* expr, const Row& row, const TableSchema& schema,
                              const std::map<std::pair<AggrFunc, std::string>, AggrState>* aggrs,
+                             const std::vector<SelectColumn>* select_cols,
                              const TableSchema* outer_schema, const Row* outer_row) {
     if (!expr) return true;
-    return evaluateExpression(expr, row, schema, aggrs, outer_schema, outer_row).val == "1";
+    return evaluateExpression(expr, row, schema, aggrs, select_cols, outer_schema, outer_row).val == "1";
 }
 
 json Executor::execute(const std::string& sql) {
@@ -898,7 +907,7 @@ json Executor::execInsert(const InsertStatement* q) {
         Row r(s.columns.size());
         if (q->insert_columns.empty()) {
             for (size_t i = 0; i < ivs.size() && i < r.size(); ++i) {
-                r[i] = value_to_cell(s.columns[i], evaluateExpression(ivs[i].get(), Row(), s));
+                r[i] = value_to_cell(s.columns[i], evaluateExpression(ivs[i].get(), Row(), s, nullptr, nullptr));
             }
         } else {
             for (size_t i = 0; i < ivs.size() && i < q->insert_columns.size(); ++i) {
@@ -906,7 +915,7 @@ json Executor::execInsert(const InsertStatement* q) {
                 if (idx < 0) throw std::runtime_error("Unknown column: " + q->insert_columns[i]);
                 r[static_cast<size_t>(idx)] =
                     value_to_cell(s.columns[static_cast<size_t>(idx)],
-                                  evaluateExpression(ivs[i].get(), Row(), s));
+                                  evaluateExpression(ivs[i].get(), Row(), s, nullptr, nullptr));
             }
         }
 
@@ -1043,14 +1052,14 @@ json Executor::execUpdate(const UpdateStatement* q) {
     auto rows = storage_.readAllRows(current_db_, q->table_name);
     int u = 0;
     for (auto& row : rows) {
-        if (q->where && !evalCondition(q->where.get(), row, s, nullptr, outer_schema_, outer_row_)) continue;
+        if (q->where && !evalCondition(q->where.get(), row, s, nullptr, nullptr, outer_schema_, outer_row_)) continue;
         Row old = row; Row new_row = row; bool mod = false;
         for (auto& sc : q->set_clauses) {
             int idx = colIndex(s, "", sc.column);
             if (idx < 0) throw std::runtime_error("Unknown column: " + sc.column);
             new_row[static_cast<size_t>(idx)] =
                 value_to_cell(s.columns[static_cast<size_t>(idx)],
-                              evaluateExpression(sc.value.get(), row, s, nullptr, outer_schema_,
+                              evaluateExpression(sc.value.get(), row, s, nullptr, nullptr, outer_schema_,
                                                  outer_row_));
             mod = true;
         }
@@ -1103,7 +1112,7 @@ json Executor::execDelete(const DeleteStatement* q) {
     auto rows = storage_.readAllRows(current_db_, q->table_name);
     std::vector<Row> to_delete;
     for (auto& row : rows) {
-        if (!q->where || evalCondition(q->where.get(), row, s, nullptr, outer_schema_, outer_row_)) {
+        if (!q->where || evalCondition(q->where.get(), row, s, nullptr, nullptr, outer_schema_, outer_row_)) {
             to_delete.push_back(row);
         }
     }
@@ -1446,7 +1455,7 @@ json Executor::execSelect(const SelectStatement* q) {
         }
         rows = std::move(res);
     }
-    if (q->where) { std::vector<Row> f; for (auto& r : rows) if (evalCondition(q->where.get(), r, m, nullptr, outer_schema_, outer_row_)) f.push_back(r); rows = std::move(f); }
+    if (q->where) { std::vector<Row> f; for (auto& r : rows) if (evalCondition(q->where.get(), r, m, nullptr, nullptr, outer_schema_, outer_row_)) f.push_back(r); rows = std::move(f); }
 
     struct Group { Row rep; std::map<std::pair<AggrFunc, std::string>, AggrState> st; };
     std::vector<Group> groups; bool is_aggr = !q->group_by.empty();
@@ -1520,7 +1529,7 @@ json Executor::execSelect(const SelectStatement* q) {
                 st.initialized = false;
             }
         }
-        for (auto& kv : g_map) if (!q->having || evalCondition(q->having.get(), kv.second.rep, m, &kv.second.st, outer_schema_, outer_row_)) groups.push_back(std::move(kv.second));
+        for (auto& kv : g_map) if (!q->having || evalCondition(q->having.get(), kv.second.rep, m, &kv.second.st, &q->select_columns, outer_schema_, outer_row_)) groups.push_back(std::move(kv.second));
     } else {
         for (auto& r : rows) { Group g; g.rep = r; groups.push_back(std::move(g)); }
     }
@@ -1528,8 +1537,8 @@ json Executor::execSelect(const SelectStatement* q) {
     if (!q->order_by.empty() && !sorted_by_index) {
         std::sort(groups.begin(), groups.end(), [&](const Group& a, const Group& b) {
             for (auto& ob : q->order_by) {
-                Value va = evaluateExpression(ob.expr.get(), a.rep, m, &a.st, outer_schema_, outer_row_);
-                Value vb = evaluateExpression(ob.expr.get(), b.rep, m, &b.st, outer_schema_, outer_row_);
+                Value va = evaluateExpression(ob.expr.get(), a.rep, m, &a.st, &q->select_columns, outer_schema_, outer_row_);
+                Value vb = evaluateExpression(ob.expr.get(), b.rep, m, &b.st, &q->select_columns, outer_schema_, outer_row_);
                 int cmp = compareValues(va, vb);
                 if (cmp != 0) return ob.asc ? cmp < 0 : cmp > 0;
             }
@@ -1555,7 +1564,7 @@ json Executor::execSelect(const SelectStatement* q) {
         } else {
             for (auto& sc : q->select_columns) {
                 out.push_back(
-                    evaluateExpression(sc.expr.get(), g.rep, m, &g.st, outer_schema_, outer_row_).val);
+                    evaluateExpression(sc.expr.get(), g.rep, m, &g.st, &q->select_columns, outer_schema_, outer_row_).val);
             }
         }
         res_r.push_back(std::move(out));

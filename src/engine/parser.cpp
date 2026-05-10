@@ -150,6 +150,19 @@ Token Parser::expect(TokenType t) {
     return consume();
 }
 
+bool Parser::isIdentifier(TokenType t) const {
+    return t == IDENTIFIER || t == KW_COUNT || t == KW_SUM || 
+           t == KW_AVG || t == KW_MIN || t == KW_MAX || t == KW_INDEX;
+}
+
+std::string Parser::parseIdentifier() {
+    Token t = cur();
+    if (isIdentifier(t.type)) {
+        return consume().value;
+    }
+    throw std::runtime_error("Expected identifier, got: " + t.value);
+}
+
 bool Parser::match(TokenType t) {
     if (cur().type == t) { ++pos_; return true; }
     return false;
@@ -194,7 +207,7 @@ std::unique_ptr<Statement> Parser::parse() {
 std::unique_ptr<CreateDatabaseStatement> Parser::parseCreateDB() {
     expect(KW_DATABASE);
     auto q = std::make_unique<CreateDatabaseStatement>();
-    q->database_name = expect(IDENTIFIER).value;
+    q->database_name = parseIdentifier();
     match(SEMICOLON);
     return q;
 }
@@ -203,7 +216,7 @@ std::unique_ptr<DropDatabaseStatement> Parser::parseDropDB() {
     expect(KW_DATABASE);
     auto q = std::make_unique<DropDatabaseStatement>();
     if (match(KW_IF)) { expect(KW_EXISTS); q->if_exists = true; }
-    q->database_name = expect(IDENTIFIER).value;
+    q->database_name = parseIdentifier();
     match(SEMICOLON);
     return q;
 }
@@ -211,13 +224,53 @@ std::unique_ptr<DropDatabaseStatement> Parser::parseDropDB() {
 std::unique_ptr<CreateTableStatement> Parser::parseCreateTable() {
     expect(KW_TABLE);
     auto q = std::make_unique<CreateTableStatement>();
-    q->table_name = expect(IDENTIFIER).value;
+    q->table_name = parseIdentifier();
     expect(LPAREN);
 
     int col_idx = 0;
     do {
+        if (match(KW_FOREIGN)) {
+            expect(KW_KEY);
+            expect(LPAREN);
+            std::string col_name = parseIdentifier();
+            expect(RPAREN);
+            expect(KW_REFERENCES);
+            std::string ref_table = parseIdentifier();
+            expect(LPAREN);
+            std::string ref_col = parseIdentifier();
+            expect(RPAREN);
+
+            // Find the column to attach this FK to
+            bool found = false;
+            for (auto& existing_col : q->column_defs) {
+                if (existing_col.name == col_name) {
+                    existing_col.fk_ref_table = ref_table;
+                    existing_col.fk_ref_column = ref_col;
+                    
+                    // Parse ON DELETE / ON UPDATE
+                    while (match(KW_ON)) {
+                        if (match(KW_DELETE)) {
+                            if (match(KW_CASCADE)) existing_col.on_delete = OnDeleteAction::CASCADE;
+                            else if (match(KW_SET)) { expect(KW_NULL); existing_col.on_delete = OnDeleteAction::SET_NULL; }
+                            else throw std::runtime_error("Expected CASCADE or SET NULL after ON DELETE");
+                        } else if (match(KW_UPDATE)) {
+                            if (match(KW_CASCADE)) existing_col.on_update = OnUpdateAction::CASCADE;
+                            else if (match(KW_SET)) { expect(KW_NULL); existing_col.on_update = OnUpdateAction::SET_NULL; }
+                            else throw std::runtime_error("Expected CASCADE or SET NULL after ON UPDATE");
+                        } else {
+                            throw std::runtime_error("Expected DELETE or UPDATE after ON");
+                        }
+                    }
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) throw std::runtime_error("FOREIGN KEY column '" + col_name + "' not found in table definition");
+            continue;
+        }
+
         ColDef col;
-        col.name = expect(IDENTIFIER).value;
+        col.name = parseIdentifier();
 
         Token tt = consume();
         std::string tp = tt.value;
@@ -245,9 +298,9 @@ std::unique_ptr<CreateTableStatement> Parser::parseCreateTable() {
                 col.default_value = consume().value;
             } else if (check(KW_REFERENCES)) {
                 consume();
-                col.fk_ref_table = expect(IDENTIFIER).value;
+                col.fk_ref_table = parseIdentifier();
                 expect(LPAREN);
-                col.fk_ref_column = expect(IDENTIFIER).value;
+                col.fk_ref_column = parseIdentifier();
                 expect(RPAREN);
                 while (match(KW_ON)) {
                     if (match(KW_DELETE)) {
@@ -283,7 +336,7 @@ std::unique_ptr<DropTableStatement> Parser::parseDropTable() {
     expect(KW_TABLE);
     auto q = std::make_unique<DropTableStatement>();
     if (match(KW_IF)) { expect(KW_EXISTS); q->if_exists = true; }
-    q->table_name = expect(IDENTIFIER).value;
+    q->table_name = parseIdentifier();
     match(SEMICOLON);
     return q;
 }
@@ -291,7 +344,7 @@ std::unique_ptr<DropTableStatement> Parser::parseDropTable() {
 std::unique_ptr<UseDatabaseStatement> Parser::parseUse() {
     auto q = std::make_unique<UseDatabaseStatement>();
     if (check(KW_DATABASE)) consume();
-    q->database_name = expect(IDENTIFIER).value;
+    q->database_name = parseIdentifier();
     match(SEMICOLON);
     return q;
 }
@@ -299,13 +352,13 @@ std::unique_ptr<UseDatabaseStatement> Parser::parseUse() {
 std::unique_ptr<AlterTableStatement> Parser::parseAlterTable() {
     expect(KW_TABLE);
     auto q = std::make_unique<AlterTableStatement>();
-    q->table_name = expect(IDENTIFIER).value;
+    q->table_name = parseIdentifier();
 
     if (check(KW_ADD)) {
         consume();
         match(KW_COLUMN);
         q->alter_action = AlterAction::ADD_COL;
-        q->alter_col_name = expect(IDENTIFIER).value;
+        q->alter_col_name = parseIdentifier();
         Token tt = consume();
         std::string tp = tt.value;
         if (tp == "VARCHAR") {
@@ -323,8 +376,8 @@ std::unique_ptr<AlterTableStatement> Parser::parseAlterTable() {
             else if (check(KW_DEFAULT)) { consume(); cd.has_default = true; cd.default_value = consume().value; }
             else if (check(KW_REFERENCES)) {
                 consume();
-                cd.fk_ref_table = expect(IDENTIFIER).value;
-                expect(LPAREN); cd.fk_ref_column = expect(IDENTIFIER).value; expect(RPAREN);
+                cd.fk_ref_table = parseIdentifier();
+                expect(LPAREN); cd.fk_ref_column = parseIdentifier(); expect(RPAREN);
             }
             else break;
         }
@@ -340,7 +393,7 @@ std::unique_ptr<AlterTableStatement> Parser::parseAlterTable() {
         consume();
         match(KW_COLUMN);
         q->alter_action = AlterAction::DROP_COL;
-        q->alter_col_name = expect(IDENTIFIER).value;
+        q->alter_col_name = parseIdentifier();
     } else {
         throw std::runtime_error("Expected ADD or DROP after ALTER TABLE, got: " + cur().value);
     }
@@ -353,11 +406,11 @@ std::unique_ptr<AlterTableStatement> Parser::parseAlterTable() {
 
 QualifiedCol Parser::parseQualifiedCol() {
     QualifiedCol qc;
-    qc.column = expect(IDENTIFIER).value;
+    qc.column = parseIdentifier();
     if (check(DOT)) {
         consume();
         qc.table = qc.column;
-        qc.column = expect(IDENTIFIER).value;
+        qc.column = parseIdentifier();
     }
     return qc;
 }
@@ -374,7 +427,7 @@ std::unique_ptr<SelectStatement> Parser::parseSelect() {
         do {
             SelectColumn sc;
             sc.expr = parseExprOr();
-            if (match(KW_AS)) sc.alias = expect(IDENTIFIER).value;
+            if (match(KW_AS)) sc.alias = parseIdentifier();
             q->select_columns.push_back(std::move(sc));
         } while (match(COMMA));
     }
@@ -383,12 +436,12 @@ std::unique_ptr<SelectStatement> Parser::parseSelect() {
         expect(KW_SELECT);
         q->from_subquery = parseSelect();
         expect(RPAREN);
-        if (match(KW_AS)) q->from_alias = expect(IDENTIFIER).value;
-        else q->from_alias = expect(IDENTIFIER).value;
+        if (match(KW_AS)) q->from_alias = parseIdentifier();
+        else q->from_alias = parseIdentifier();
     } else {
-        q->table_name = expect(IDENTIFIER).value;
-        if (match(KW_AS)) q->alias = expect(IDENTIFIER).value;
-        else if (check(IDENTIFIER) && !check(KW_INNER) && !check(KW_LEFT) && !check(KW_RIGHT) && !check(KW_FULL) && !check(KW_CROSS) && !check(KW_JOIN) && !check(KW_WHERE) && !check(KW_GROUP) && !check(KW_ORDER) && !check(KW_LIMIT)) {
+        q->table_name = parseIdentifier();
+        if (match(KW_AS)) q->alias = parseIdentifier();
+        else if (isIdentifier(cur().type) && !check(KW_INNER) && !check(KW_LEFT) && !check(KW_RIGHT) && !check(KW_FULL) && !check(KW_CROSS) && !check(KW_JOIN) && !check(KW_WHERE) && !check(KW_GROUP) && !check(KW_ORDER) && !check(KW_LIMIT)) {
             q->alias = consume().value;
         }
     }
@@ -426,9 +479,9 @@ std::unique_ptr<SelectStatement> Parser::parseSelect() {
         }
         JoinClause jc;
         jc.join_type = jtype;
-        jc.table_name = expect(IDENTIFIER).value;
-        if (match(KW_AS)) jc.alias = expect(IDENTIFIER).value;
-        else if (check(IDENTIFIER) && !check(KW_ON) && !check(KW_INNER) && !check(KW_LEFT) && !check(KW_RIGHT) && !check(KW_FULL) && !check(KW_CROSS) && !check(KW_JOIN) && !check(KW_WHERE)) {
+        jc.table_name = parseIdentifier();
+        if (match(KW_AS)) jc.alias = parseIdentifier();
+        else if (isIdentifier(cur().type) && !check(KW_ON) && !check(KW_INNER) && !check(KW_LEFT) && !check(KW_RIGHT) && !check(KW_FULL) && !check(KW_CROSS) && !check(KW_JOIN) && !check(KW_WHERE)) {
             jc.alias = consume().value;
         }
 
@@ -445,7 +498,9 @@ std::unique_ptr<SelectStatement> Parser::parseSelect() {
     if (match(KW_GROUP)) {
         expect(KW_BY);
         do {
-            q->group_by.push_back(expect(IDENTIFIER).value);
+            auto qc = parseQualifiedCol();
+            std::string full_name = qc.table.empty() ? qc.column : qc.table + "." + qc.column;
+            q->group_by.push_back(full_name);
         } while (match(COMMA));
     }
     if (match(KW_HAVING)) q->having = parseExprOr();
@@ -473,11 +528,11 @@ std::unique_ptr<SelectStatement> Parser::parseSelect() {
 std::unique_ptr<InsertStatement> Parser::parseInsert() {
     auto q = std::make_unique<InsertStatement>();
     expect(KW_INTO);
-    q->table_name = expect(IDENTIFIER).value;
+    q->table_name = parseIdentifier();
     if (check(LPAREN)) {
         consume();
         do {
-            q->insert_columns.push_back(expect(IDENTIFIER).value);
+            q->insert_columns.push_back(parseIdentifier());
         } while (match(COMMA));
         expect(RPAREN);
     }
@@ -497,11 +552,11 @@ std::unique_ptr<InsertStatement> Parser::parseInsert() {
 
 std::unique_ptr<UpdateStatement> Parser::parseUpdate() {
     auto q = std::make_unique<UpdateStatement>();
-    q->table_name = expect(IDENTIFIER).value;
+    q->table_name = parseIdentifier();
     expect(KW_SET);
     do {
         SetClause sc;
-        sc.column = expect(IDENTIFIER).value;
+        sc.column = parseIdentifier();
         expect(OP_EQ);
         sc.value = parseExprOr();
         q->set_clauses.push_back(std::move(sc));
@@ -514,7 +569,7 @@ std::unique_ptr<UpdateStatement> Parser::parseUpdate() {
 std::unique_ptr<DeleteStatement> Parser::parseDelete() {
     auto q = std::make_unique<DeleteStatement>();
     expect(KW_FROM);
-    q->table_name = expect(IDENTIFIER).value;
+    q->table_name = parseIdentifier();
     if (match(KW_WHERE)) q->where = parseExprOr();
     match(SEMICOLON);
     return q;
@@ -694,16 +749,20 @@ std::unique_ptr<Expression> Parser::parseExprAtom() {
         bool d = match(KW_DISTINCT);
         std::string col;
         if (f == AggrFunc::COUNT && match(STAR)) col = "*";
-        else col = expect(IDENTIFIER).value;
+        else col = parseIdentifier();
         expect(RPAREN);
         return std::make_unique<AggregateExpression>(f, col, d);
     };
 
-    if (match(KW_COUNT)) return parse_aggr(AggrFunc::COUNT);
-    if (match(KW_SUM)) return parse_aggr(AggrFunc::SUM);
-    if (match(KW_AVG)) return parse_aggr(AggrFunc::AVG);
-    if (match(KW_MIN)) return parse_aggr(AggrFunc::MIN);
-    if (match(KW_MAX)) return parse_aggr(AggrFunc::MAX);
+    auto is_aggr_call = [&](TokenType t) {
+        return check(t) && pos_ + 1 < tokens_.size() && tokens_[pos_ + 1].type == LPAREN;
+    };
+
+    if (is_aggr_call(KW_COUNT)) { consume(); return parse_aggr(AggrFunc::COUNT); }
+    if (is_aggr_call(KW_SUM)) { consume(); return parse_aggr(AggrFunc::SUM); }
+    if (is_aggr_call(KW_AVG)) { consume(); return parse_aggr(AggrFunc::AVG); }
+    if (is_aggr_call(KW_MIN)) { consume(); return parse_aggr(AggrFunc::MIN); }
+    if (is_aggr_call(KW_MAX)) { consume(); return parse_aggr(AggrFunc::MAX); }
 
     Token t = cur();
     if (t.type == STRING_LITERAL || t.type == NUMBER_LITERAL || t.type == BOOL_LITERAL) {
@@ -716,13 +775,13 @@ std::unique_ptr<Expression> Parser::parseExprAtom() {
         return std::make_unique<LiteralExpression>("NULL", KW_NULL);
     }
 
-    if (t.type == IDENTIFIER) {
+    if (isIdentifier(t.type)) {
         std::string col = consume().value;
         std::string tbl = "";
         if (check(DOT)) {
             consume();
             tbl = col;
-            col = expect(IDENTIFIER).value;
+            col = parseIdentifier();
         }
         return std::make_unique<ColumnExpression>(tbl, col);
     }
@@ -735,11 +794,11 @@ std::unique_ptr<Expression> Parser::parseExprAtom() {
 std::unique_ptr<CreateIndexStatement> Parser::parseCreateIndex() {
     expect(KW_INDEX);
     auto q = std::make_unique<CreateIndexStatement>();
-    q->index_name = expect(IDENTIFIER).value;
+    q->index_name = parseIdentifier();
     expect(KW_ON);
-    q->table_name = expect(IDENTIFIER).value;
+    q->table_name = parseIdentifier();
     expect(LPAREN);
-    q->column_name = expect(IDENTIFIER).value;
+    q->column_name = parseIdentifier();
     expect(RPAREN);
     match(SEMICOLON);
     return q;
@@ -748,9 +807,9 @@ std::unique_ptr<CreateIndexStatement> Parser::parseCreateIndex() {
 std::unique_ptr<DropIndexStatement> Parser::parseDropIndex() {
     expect(KW_INDEX);
     auto q = std::make_unique<DropIndexStatement>();
-    q->index_name = expect(IDENTIFIER).value;
+    q->index_name = parseIdentifier();
     expect(KW_ON);
-    q->table_name = expect(IDENTIFIER).value;
+    q->table_name = parseIdentifier();
     match(SEMICOLON);
     return q;
 }
@@ -768,21 +827,21 @@ std::unique_ptr<ShowStatement> Parser::parseShow() {
     } else if (type == "COLUMNS") {
         q->type = ShowStatement::COLUMNS;
         if (match(KW_FROM) || match(KW_IN)) {
-            q->table_name = expect(IDENTIFIER).value;
+            q->table_name = parseIdentifier();
         } else {
             throw std::runtime_error("Expected FROM or IN after SHOW COLUMNS");
         }
     } else if (type == "INDEX" || t.type == KW_INDEX) {
         q->type = ShowStatement::INDEX;
         if (match(KW_FROM) || match(KW_IN)) {
-            q->table_name = expect(IDENTIFIER).value;
+            q->table_name = parseIdentifier();
         } else {
             throw std::runtime_error("Expected FROM or IN after SHOW INDEX");
         }
     } else if (type == "CREATE" || t.type == KW_CREATE) {
         expect(KW_TABLE);
         q->type = ShowStatement::CREATE_TABLE;
-        q->table_name = expect(IDENTIFIER).value;
+        q->table_name = parseIdentifier();
     } else {
         throw std::runtime_error("Unknown SHOW command: SHOW " + type);
     }
@@ -797,10 +856,10 @@ std::unique_ptr<LoadCsvStatement> Parser::parseLoadCsv() {
         throw std::runtime_error("LOAD CSV: expected file path string literal");
     q->file_path = consume().value;
     expect(KW_INTO);
-    q->table_name = expect(IDENTIFIER).value;
+    q->table_name = parseIdentifier();
     if (match(LPAREN)) {
         do {
-            q->columns.push_back(expect(IDENTIFIER).value);
+            q->columns.push_back(parseIdentifier());
         } while (match(COMMA));
         expect(RPAREN);
     }

@@ -74,11 +74,13 @@ private:
                              const Row& row,
                              const TableSchema& schema,
                              const std::map<std::pair<AggrFunc, std::string>, AggrState>* aggrs = nullptr,
+                             const std::vector<SelectColumn>* select_cols = nullptr,
                              const TableSchema* outer_schema = nullptr,
                              const Row* outer_row = nullptr);
 
     bool evalCondition(const Expression* expr, const Row& row, const TableSchema& schema,
                        const std::map<std::pair<AggrFunc, std::string>, AggrState>* aggrs = nullptr,
+                       const std::vector<SelectColumn>* select_cols = nullptr,
                        const TableSchema* outer_schema = nullptr,
                        const Row* outer_row = nullptr);
 

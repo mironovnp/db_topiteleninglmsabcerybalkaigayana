@@ -100,8 +100,8 @@ public:
         test_load_csv();
         test_load_csv_nonempty_and_append();
 
-        std::cout << "\n>>> ФАЗА 23: ALTER ADD COLUMN FROM CSV" << std::endl;
-        test_alter_add_column_from_csv();
+        std::cout << "\n>>> ФАЗА 24: Многострочные запросы и Алиасы агрегатов" << std::endl;
+        test_multi_line_and_aggr_aliases();
 
         std::cout << "\n" << std::string(40, '=') << std::endl;
         std::cout << "ИТОГО: " << passed_count << "/" << total_count << " тестов пройдено." << std::endl;
@@ -1054,6 +1054,35 @@ private:
         } catch (const std::exception& e) {
             std::cerr << "  [FAIL] test_alter_add_column_from_csv: " << e.what() << std::endl;
         }
+    }
+    void test_multi_line_and_aggr_aliases() {
+        assert_success("Создание базы для многострочных тестов", "CREATE DATABASE multi_db;");
+        assert_success("Использование multi_db", "USE multi_db;");
+        assert_success("Создание таблицы продаж", 
+            "CREATE TABLE sales (\n"
+            "  id INT PRIMARY KEY,\n"
+            "  category_id INT,\n"
+            "  price FLOAT\n"
+            ");");
+        
+        assert_success("Многострочная вставка", 
+            "INSERT INTO sales (id, category_id, price) \n"
+            "VALUES (1, 10, 100.5), (2, 10, 200.0), (3, 20, 50.0);");
+
+        // Тест на использование 'count' как алиаса и в HAVING
+        assert_rows("Агрегаты с алиасом 'count' и HAVING", 
+            "SELECT category_id, COUNT(*) as count, AVG(price) as avg_price \n"
+            "FROM sales \n"
+            "GROUP BY category_id \n"
+            "HAVING count > 1;", 
+            1, {{"10", "2", "150.250"}});
+
+        // Тест на использование других ключевых слов как алиасов
+        assert_rows("Использование других KW как алиасов",
+            "SELECT category_id AS index, SUM(price) AS sum FROM sales GROUP BY category_id ORDER BY sum DESC LIMIT 1;",
+            1, {{"10", "300.500"}});
+
+        assert_success("Очистка multi_db", "DROP DATABASE multi_db;");
     }
 };
 

@@ -10,10 +10,12 @@ namespace db {
 using json = nlohmann::json;
 
 Server::Server(const std::string& host, int port, const std::string& data_dir)
-    : host_(host), port_(port), executor_(data_dir) {}
+    : host_(host), port_(port), executor_(data_dir) {
+    svr_ptr_ = new httplib::Server();
+}
 
 void Server::start() {
-    httplib::Server svr;
+    auto& svr = *static_cast<httplib::Server*>(svr_ptr_);
 
     svr.Post("/query", [this](const httplib::Request& req, httplib::Response& res) {
         try {
@@ -85,6 +87,12 @@ void Server::start() {
 
     std::cout << "[databasetopit] Server listening on " << host_ << ":" << port_ << std::endl;
     svr.listen(host_, port_);
+}
+
+void Server::stop() {
+    if (svr_ptr_) {
+        static_cast<httplib::Server*>(svr_ptr_)->stop();
+    }
 }
 
 } // namespace db

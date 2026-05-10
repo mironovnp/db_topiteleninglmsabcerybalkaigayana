@@ -31,6 +31,8 @@ Row BPlusTree::unpack_row_blob(const uint8_t* blob, uint32_t blob_len) const {
 BPlusTree::BPlusTree(BufferPool& pool, PageId root_page_id, const TableSchema* row_schema,
                      uint8_t key_arity)
     : pool_(pool), root_(root_page_id), row_schema_(row_schema), key_arity_(key_arity) {
+    if (root_ == 0 || root_ == INVALID_PAGE_ID)
+        throw std::runtime_error("BPlusTree: invalid root_page_id (cannot be 0 or -1)");
     if (!row_schema_)
         throw std::runtime_error("BPlusTree: row_schema is required for typed persistence");
     if (key_arity_ != 1 && key_arity_ != 2)
@@ -189,6 +191,8 @@ void BPlusTree::writeInternalPage(Page& pg, PageId first_child, const std::vecto
 // ════════════════════════════════════════════════════════════════════════
 
 PageId BPlusTree::findLeaf(const BTreeKey& key) const {
+    if (root_ == 0 || root_ == INVALID_PAGE_ID)
+        throw std::runtime_error("BPlusTree::findLeaf: invalid root page ID");
     PageId cur = root_;
     int depth = 0;
     while (depth < 100) {

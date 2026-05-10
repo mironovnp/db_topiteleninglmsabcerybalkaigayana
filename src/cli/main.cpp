@@ -6,13 +6,37 @@
 
 // ── ASCII table formatting ─────────────────────────────────────────────
 
+// Helper to format string if it's a number
+static std::string formatValue(const std::string& val) {
+    if (val.empty()) return val;
+    try {
+        size_t pos = 0;
+        double d = std::stod(val, &pos);
+        if (pos == val.size()) { // Pure number
+            std::stringstream ss;
+            ss << std::fixed << std::setprecision(3) << d;
+            return ss.str();
+        }
+    } catch (...) {}
+    return val;
+}
+
 static void printTable(const std::vector<std::string>& columns,
                        const std::vector<std::vector<std::string>>& rows) {
     std::vector<size_t> widths(columns.size());
+    
+    // Pre-format rows to calculate widths correctly
+    std::vector<std::vector<std::string>> formatted_rows = rows;
+    for (auto& row : formatted_rows) {
+        for (auto& cell : row) {
+            cell = formatValue(cell);
+        }
+    }
+
     for (size_t i = 0; i < columns.size(); ++i)
         widths[i] = columns[i].size();
 
-    for (const auto& row : rows)
+    for (const auto& row : formatted_rows)
         for (size_t i = 0; i < row.size() && i < widths.size(); ++i)
             widths[i] = std::max(widths[i], row[i].size());
 
@@ -33,7 +57,7 @@ static void printTable(const std::vector<std::string>& columns,
 
     printBorder();
 
-    for (const auto& row : rows) {
+    for (const auto& row : formatted_rows) {
         std::cout << "|";
         for (size_t i = 0; i < columns.size(); ++i) {
             std::string val = (i < row.size()) ? row[i] : "";
@@ -82,8 +106,14 @@ int main(int argc, char* argv[]) {
 
         if (!std::getline(std::cin, line)) break;
 
-        while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
+        // Trim trailing whitespace
+        while (!line.empty() && std::isspace(static_cast<unsigned char>(line.back())))
             line.pop_back();
+        // Trim leading whitespace
+        size_t start = 0;
+        while (start < line.size() && std::isspace(static_cast<unsigned char>(line[start])))
+            start++;
+        if (start > 0) line = line.substr(start);
 
         if (line == "exit" || line == "quit" || line == "\\q") break;
         if (line.empty()) continue;
@@ -126,10 +156,7 @@ int main(int argc, char* argv[]) {
         auto result = client.executeQuery(query, !has_semi);
 
         if (!has_semi) {
-            if (!result.success) {
-                std::cout << "\033[31m[ERROR]\033[0m " << result.message << "\n\n";
-                query.clear();
-            }
+            // During multi-line entry, we don't show errors to avoid interrupting the user
             continue;
         }
 
@@ -140,10 +167,8 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
-        if (result.type == "select") {
+        if (!result.columns.empty()) {
             printTable(result.columns, result.rows);
-        } else if (result.type == "modify") {
-            std::cout << "\033[32m[OK]\033[0m " << result.message << "\n";
         } else {
             std::cout << "\033[32m[OK]\033[0m " << result.message << "\n";
         }

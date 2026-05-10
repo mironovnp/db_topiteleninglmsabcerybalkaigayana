@@ -348,6 +348,8 @@ private:
     std::unique_ptr<LoadCsvStatement> parseLoadCsv();
 
     QualifiedCol parseQualifiedCol();
+    std::string parseIdentifier();
+    bool isIdentifier(TokenType t) const;
 
     std::unique_ptr<Expression> parseExprOr();
     std::unique_ptr<Expression> parseExprAnd();
