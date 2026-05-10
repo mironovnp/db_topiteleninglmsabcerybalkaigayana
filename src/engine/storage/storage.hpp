@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <memory>
 #include <unordered_map>
+#include <mutex>
 
 namespace db {
 
@@ -127,6 +128,8 @@ public:
 private:
     std::filesystem::path data_dir_;
     std::unique_ptr<WALManager> wal_mgr_;
+    // Protects pools_ from concurrent access (HTTP server runs queries in parallel).
+    mutable std::mutex pools_latch_;
     mutable std::unordered_map<std::string, std::unique_ptr<BufferPool>> pools_;
 
     void walAppendRowDelete(const std::string& abs_path, const std::string& key);

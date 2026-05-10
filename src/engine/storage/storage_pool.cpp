@@ -4,12 +4,14 @@
 namespace db {
 
 void Storage::flushAllPools() const {
+    std::lock_guard<std::mutex> lock(pools_latch_);
     for (auto& [_, pool] : pools_) {
         if (pool) pool->flushAll();
     }
 }
 
 BufferPool& Storage::getPool(const std::string& path) const {
+    std::lock_guard<std::mutex> lock(pools_latch_);
     if (pools_.find(path) == pools_.end()) {
         pools_[path] = std::make_unique<BufferPool>(path, POOL_SIZE, wal_mgr_.get());
     }
@@ -17,6 +19,7 @@ BufferPool& Storage::getPool(const std::string& path) const {
 }
 
 void Storage::closePool(const std::string& path) const {
+    std::lock_guard<std::mutex> lock(pools_latch_);
     pools_.erase(path);
 }
 
