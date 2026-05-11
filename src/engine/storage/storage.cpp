@@ -94,7 +94,7 @@ void Storage::initializeSystemTables(const std::string& db_name) {
     };
 
     // Adding basic data
-    appendRows(db_name, "sys_users", { make_row(sys_users, {"1", "admin", "hash_placeholder"}) });
+    appendRows(db_name, "sys_users", { make_row(sys_users, {"1", "admin", "admin"}) });
     appendRows(db_name, "sys_roles", { make_row(sys_roles, {"1", "superuser"}) });
     appendRows(db_name, "sys_user_roles", { make_row(sys_ur, {"1", "1", "1"}) });
     appendRows(db_name, "sys_grants", { make_row(sys_grants, {"1", "1", "*", "ALL"}) });

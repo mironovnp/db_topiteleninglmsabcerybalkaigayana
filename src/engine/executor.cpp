@@ -186,7 +186,12 @@ static bool likeMatch(const std::string& str, std::string pattern) {
 
 using json = nlohmann::json;
 
-Executor::Executor(const std::string& data_dir) : storage_(data_dir) {}
+Executor::Executor(const std::string& data_dir) : storage_(data_dir) {
+    // Гарантируем, что существует хотя бы одна БД для первичной авторизации
+    if (!storage_.databaseExists("system")) {
+        storage_.createDatabase("system");
+    }
+}
 
 json Executor::ok(const std::string& msg) {
     return {{"success", true}, {"message", msg}, {"type", "ddl"}};
@@ -403,25 +408,36 @@ bool Executor::evalCondition(const Expression* expr, const Row& row, const Table
 }
 
 void Executor::checkPermission(const std::string& table_name, const std::string& privilege) {
-    if (current_db_.empty()) return; 
+    if (current_db_.empty()) {
+        throw std::runtime_error("Permission denied: No database context. Execute 'USE <database>;' first.");
+    }
+    if (current_user_.empty()) {
+        throw std::runtime_error("Permission denied: Not authenticated. Execute 'SET USER ... PASSWORD ...;' first.");
+    }
 
-    // Only users with ALL permission are allowed to rewrite sys. tables
     if (table_name.substr(0, 4) == "sys_" && privilege != "ALL" && privilege != "SELECT") {
         throw std::runtime_error("Permission denied: cannot directly modify system catalogs");
     }
 
     std::string cache_key = current_db_ + ":" + current_user_ + ":" + table_name + ":" + privilege;
     
-    // 1. Checking cache
-    if (priv_cache_.find(cache_key) != priv_cache_.end()) {
-        if (!priv_cache_[cache_key]) 
-            throw std::runtime_error("Permission denied: " + privilege + " on " + table_name);
-        return;
+    // Safe reading from cache
+    {
+        std::lock_guard<std::mutex> lock(priv_cache_mutex_);
+        if (priv_cache_.find(cache_key) != priv_cache_.end()) {
+            if (!priv_cache_[cache_key]) 
+                throw std::runtime_error("Permission denied: " + privilege + " on " + table_name);
+            return;
+        }
     }
 
-    // 2. Идем в Storage, если в кэше пусто (предполагаем, что Storage::checkPrivilege реализован)
     bool has_priv = storage_.checkPrivilege(current_db_, current_user_, table_name, privilege);
-    priv_cache_[cache_key] = has_priv;
+    
+    // Safe entry into cache 
+    {
+        std::lock_guard<std::mutex> lock(priv_cache_mutex_);
+        priv_cache_[cache_key] = has_priv;
+    }
     
     if (!has_priv) {
         throw std::runtime_error("Permission denied: " + privilege + " on " + table_name);
@@ -481,6 +497,7 @@ json Executor::execute(const std::string& sql) {
 }
 
 json Executor::execCreateDB(const CreateDatabaseStatement* q) {
+    checkPermission("*", "CREATE");
     if (storage_.databaseExists(q->database_name)) return err("Database '" + q->database_name + "' already exists.");
     if (storage_.createDatabase(q->database_name)) return ok("Database '" + q->database_name + "' created.");
     return err("Failed to create database.");
@@ -497,6 +514,7 @@ json Executor::execUse(const UseDatabaseStatement* q) {
 }
 
 json Executor::execDropDB(const DropDatabaseStatement* q) {
+    checkPermission("*", "DROP");
     if (!storage_.databaseExists(q->database_name)) {
         if (q->if_exists) return ok("Dropped database '" + q->database_name + "' (if existed).");
         return err("Database '" + q->database_name + "' does not exist.");
@@ -1728,31 +1746,31 @@ json Executor::execCreateRole(const CreateRoleStatement* q) {
 }
 
 nlohmann::json Executor::execSetUser(const SetUserStatement* q) {
-    if (!current_db_.empty()) {
-        auto users = storage_.indexLookup(current_db_, "sys_users", "username", q->username);
-        if (users.empty() && q->username != "admin") {
-            return err("User '" + q->username + "' does not exist in database '" + current_db_ + "'");
-        }
+    if (current_db_.empty()) {
+        return err("Select a database first (e.g., USE system;) to authenticate users.");
+    }
 
-        if (!users.empty() && q->username != "admin") {
-            Row user_row = storage_.findRow(current_db_, "sys_users", users[0]);
-            std::string stored_pass = "";
-            // Третья колонка (индекс 2) - это password_hash
-            if (user_row.size() > 2 && user_row[2].has_value()) {
-                stored_pass = cell_to_where_string(user_row[2]);
-            }
-            if (stored_pass != q->password) {
-                return err("Invalid password for user '" + q->username + "'.");
-            }
-        }
-    } else if (q->username != "admin") {
-        // Защита: нельзя авторизоваться, не выбрав БД, т.к. системные таблицы лежат внутри конкретной БД
-        return err("Select a database first (USE <database>;) to authenticate users.");
+    auto users = storage_.indexLookup(current_db_, "sys_users", "username", q->username);
+    if (users.empty()) {
+        return err("User '" + q->username + "' does not exist in database '" + current_db_ + "'");
+    }
+
+    Row user_row = storage_.findRow(current_db_, "sys_users", users[0]);
+    std::string stored_pass = "";
+    if (user_row.size() > 2 && user_row[2].has_value()) {
+        stored_pass = cell_to_where_string(user_row[2]);
+    }
+    
+    if (stored_pass != q->password) {
+        return err("Invalid password for user '" + q->username + "'.");
     }
 
     current_user_ = q->username;
 
-    priv_cache_.clear();
+    {
+        std::lock_guard<std::mutex> lock(priv_cache_mutex_);
+        priv_cache_.clear();
+    }
 
     return ok("Context switched to user: " + current_user_);
 }
@@ -1781,7 +1799,10 @@ json Executor::execGrantRole(const GrantRoleStatement* q) {
     storage_.appendRows(current_db_, "sys_user_roles", {row});
     storage_.indexInsertRow(current_db_, "sys_user_roles", sch, row);
     
-    priv_cache_.clear(); 
+    {
+        std::lock_guard<std::mutex> lock(priv_cache_mutex_);
+        priv_cache_.clear();
+    }
     return ok("Granted role '" + q->role_name + "' to user '" + q->user_name + "'.");
 }
 
@@ -1806,7 +1827,10 @@ json Executor::execGrant(const GrantStatement* q) {
     storage_.appendRows(current_db_, "sys_grants", {row});
     storage_.indexInsertRow(current_db_, "sys_grants", sch, row);
     
-    priv_cache_.clear();
+    {
+        std::lock_guard<std::mutex> lock(priv_cache_mutex_);
+        priv_cache_.clear();
+    }
     return ok("Granted " + q->privilege + " on " + q->object_name + " to " + q->role_name + ".");
 }
 

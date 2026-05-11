@@ -25,6 +25,9 @@ void Server::start() {
             if (body.contains("current_db")) {
                 executor_.setThreadLocalContext(body.value("current_db", ""));
             }
+            if (body.contains("current_user")) {
+                executor_.setThreadLocalUser(body.value("current_user", "admin"));
+            }
 
             std::string sql = body.value("sql", "");
             if (sql.empty()) {

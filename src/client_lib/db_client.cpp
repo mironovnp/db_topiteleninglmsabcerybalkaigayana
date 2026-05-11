@@ -42,6 +42,7 @@ QueryResult DBClient::executeQuery(const std::string& sql, bool dry_run) {
         body["sql"] = sql;
         body["dry_run"] = dry_run;
         body["current_db"] = current_db_; // Отправляем серверу текущую базу клиента
+        body["current_user"] = current_user_;
 
         auto res = cli.Post("/query", body.dump(), "application/json");
         if (!res) {
@@ -58,6 +59,9 @@ QueryResult DBClient::executeQuery(const std::string& sql, bool dry_run) {
         // Если сервер подтвердил смену базы (USE или DROP), запоминаем это
         if (j.contains("current_db")) {
             current_db_ = j["current_db"].get<std::string>();
+        }
+        if (j.contains("current_user")) {
+            current_user_ = j["current_user"].get<std::string>();
         }
 
         if (j.contains("columns")) {

@@ -6,6 +6,7 @@
 #include <map>
 #include <vector>
 #include <set>
+#include <mutex>
 
 namespace db {
 
@@ -24,6 +25,10 @@ public:
         current_db_ = db;
     }
 
+    void setThreadLocalUser(const std::string& user) {
+        current_user_ = user;
+    }
+
 private:
     Storage storage_;
 
@@ -31,6 +36,12 @@ private:
     inline thread_local static std::string current_db_;
     inline thread_local static const TableSchema* outer_schema_ = nullptr;
     inline thread_local static const Row* outer_row_ = nullptr;
+
+    inline thread_local static std::string current_user_ = ""; 
+
+    // --- Session & RBAC ---
+    std::unordered_map<std::string, bool> priv_cache_;
+    std::mutex priv_cache_mutex_; // <--- ЗАЩИТА КЭША ОТ ГОНКИ ДАННЫХ --->
 
     nlohmann::json execCreateDB(const CreateDatabaseStatement* q);
     nlohmann::json execDropDB(const DropDatabaseStatement* q);
