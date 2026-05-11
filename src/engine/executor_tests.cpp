@@ -10,26 +10,38 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <thread>
+#include <atomic>
+#include <shared_mutex>
+#include <vector>
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
 
 class TestSuite {
 public:
-    TestSuite(const std::string& data_dir) : executor(data_dir), data_dir(data_dir) {
-        setup();
+    std::string data_dir;
+    db::Executor executor;
+
+    // 1. Подготавливаем чистую папку
+    static std::string prepare_env(const std::string& dir) {
+        std::cout << "=== Подготовка тестового окружения ===" << std::endl;
+        if (std::filesystem::exists(dir)) {
+            std::filesystem::remove_all(dir);
+        }
+        std::filesystem::create_directory(dir);
+        return dir;
+    }
+
+    // 2. Инициализируем Executor
+    TestSuite(const std::string& dir) : data_dir(dir), executor(prepare_env(dir)) {
+        // 3. Устанавливаем глобальный контекст "суперпользователя" для тестов
+        executor.setThreadLocalContext("system");
+        executor.setThreadLocalUser("admin");
     }
 
     void setup() {
-        std::cout << "=== Подготовка тестового окружения ===" << std::endl;
-        try {
-            if (std::filesystem::exists(data_dir)) {
-                std::filesystem::remove_all(data_dir);
-            }
-            std::filesystem::create_directory(data_dir);
-        } catch (const std::exception& e) {
-            std::cerr << "Ошибка при подготовке папки данных: " << e.what() << std::endl;
-        }
+        // логика очистки перенесена в prepare_env
     }
 
     void run_all() {
@@ -106,6 +118,9 @@ public:
         std::cout << "\n>>> ФАЗА 24: Проверка RBAC" << std::endl;
         test_rbac();
 
+        std::cout << "\n>>> ФАЗА 25: Многопоточность и Изоляция контекста (RBAC)" << std::endl;
+        test_multithreading_rbac();
+
         std::cout << "\n" << std::string(40, '=') << std::endl;
         std::cout << "ИТОГО: " << passed_count << "/" << total_count << " тестов пройдено." << std::endl;
         if (passed_count < total_count) {
@@ -117,8 +132,6 @@ public:
     }
 
 private:
-    db::Executor executor;
-    std::string data_dir;
     int total_count = 0;
     int passed_count = 0;
 
@@ -205,8 +218,15 @@ private:
     }
 
     void test_ddl_and_errors() {
+        executor.setThreadLocalContext("");
+        executor.setThreadLocalUser("");
+
         assert_error("Запрос без базы данных", "CREATE TABLE t (id INT);", "No database selected");
         assert_error("SHOW TABLES без базы", "SHOW TABLES;", "No database selected");
+
+        executor.setThreadLocalContext("system");
+        executor.setThreadLocalUser("admin");
+        
         assert_success("Создание БД test_db", "CREATE DATABASE test_db;");
         assert_success("Использование БД", "USE test_db;");
         assert_success("Создание таблицы users", "CREATE TABLE users (id INT PRIMARY KEY, name TEXT, age INT);");
@@ -756,6 +776,9 @@ private:
     }
 
     void test_cell_value_and_nulls() {
+        executor.setThreadLocalContext("system");
+        executor.setThreadLocalUser("admin");
+
         assert_success("Создание БД для типов", "CREATE DATABASE types_db;");
         assert_success("Использование БД для типов", "USE types_db;");
         assert_success("Создание таблицы для типов", "CREATE TABLE types_test (id INT PRIMARY KEY, val TEXT, num FLOAT, b BOOL);");
@@ -900,6 +923,9 @@ private:
     }
 
     void test_load_csv() {
+        executor.setThreadLocalContext("system");
+        executor.setThreadLocalUser("admin");
+
         try {
             const std::string db_name = "csv_load_db";
             const std::string csv_name = "batch_import.csv";
@@ -949,6 +975,9 @@ private:
     }
 
     void test_load_csv_nonempty_and_append() {
+        executor.setThreadLocalContext("system");
+        executor.setThreadLocalUser("admin");
+
         try {
             const std::string db_name = "csv_append_db";
             const std::string csv_name = "more_rows.csv";
@@ -1059,6 +1088,9 @@ private:
         }
     }
     void test_multi_line_and_aggr_aliases() {
+        executor.setThreadLocalContext("system");
+        executor.setThreadLocalUser("admin");
+
         assert_success("Создание базы для многострочных тестов", "CREATE DATABASE multi_db;");
         assert_success("Использование multi_db", "USE multi_db;");
         assert_success("Создание таблицы продаж", 
@@ -1088,12 +1120,13 @@ private:
         assert_success("Очистка multi_db", "DROP DATABASE multi_db;");
     }
     void test_rbac() {
-        std::cout << "\n>>> ФАЗА 3: Ролевая модель доступа (RBAC)" << std::endl;
+        executor.setThreadLocalContext("system");
+        executor.setThreadLocalUser("admin");
 
         // 1. Подготовка (от имени админа)
         assert_success("RBAC: Создание базы", "CREATE DATABASE rbac_db;");
         assert_success("RBAC: Выбор базы", "USE rbac_db;");
-        assert_success("RBAC: Настройка контекста админа", "SET USER admin;");
+        assert_success("RBAC: Настройка контекста админа", "SET USER admin PASSWORD 'admin';");
         assert_success("RBAC: Создание таблицы", "CREATE TABLE vault (id INT PRIMARY KEY, secret_data VARCHAR(100));");
         assert_success("RBAC: Вставка базовых данных", "INSERT INTO vault VALUES (1, 'Top Secret');");
 
@@ -1143,8 +1176,120 @@ private:
         assert_error("RBAC: Eve атакует sys_grants", "INSERT INTO sys_grants VALUES (99, 1, '*', 'ALL');", "Permission denied");
 
         // 9. Очистка и возврат к админу
-        assert_success("RBAC: Авторизация Admin", "SET USER admin;");
+        assert_success("RBAC: Авторизация Admin", "SET USER admin PASSWORD 'admin';");
         assert_success("RBAC: Админ удаляет базу", "DROP DATABASE rbac_db;");
+    }
+
+    void test_multithreading_rbac() {
+        executor.setThreadLocalContext("system");
+        executor.setThreadLocalUser("admin");
+
+        // 1. Подготовка данных (выполняется последовательно)
+        assert_success("MT: Создание БД", "CREATE DATABASE mt_db;");
+        assert_success("MT: Выбор БД", "USE mt_db;");
+        assert_success("MT: Настройка контекста админа", "SET USER admin PASSWORD 'admin';");
+        
+        assert_success("MT: Создание таблицы", "CREATE TABLE mt_table (id INT PRIMARY KEY, val TEXT);");
+        assert_success("MT: Вставка", "INSERT INTO mt_table VALUES (1, 'init');");
+        
+        // Создаем Alice (Читатель)
+        assert_success("MT: Юзер Alice", "CREATE USER alice PASSWORD '123';");
+        assert_success("MT: Роль Reader", "CREATE ROLE mt_reader;");
+        assert_success("MT: Грант SELECT", "GRANT SELECT ON mt_table TO mt_reader;");
+        assert_success("MT: Назначение mt_reader", "GRANT ROLE mt_reader TO alice;");
+
+        // Создаем Bob (Писатель)
+        assert_success("MT: Юзер Bob", "CREATE USER bob PASSWORD '123';");
+        assert_success("MT: Роль Writer", "CREATE ROLE mt_writer;");
+        assert_success("MT: Грант INSERT", "GRANT INSERT ON mt_table TO mt_writer;");
+        assert_success("MT: Назначение mt_writer", "GRANT ROLE mt_writer TO bob;");
+
+        // 2. Многопоточный стресс-тест
+        std::cout << "  [TEST] Запуск конкурентных потоков (Стресс-тест RBAC)... -> ";
+        
+        const int NUM_THREADS = 20; // 20 одновременных подключений
+        const int ITERS = 50;       // По 50 запросов от каждого
+        
+        std::vector<std::thread> threads;
+        std::atomic<int> success_reads{0};
+        std::atomic<int> failed_writes{0};
+        std::atomic<int> success_writes{0};
+        std::atomic<bool> test_failed{false};
+
+        // Имитируем мьютекс из server.cpp для защиты самого B-дерева
+        std::shared_mutex server_rw_mutex; 
+
+        for (int i = 0; i < NUM_THREADS; ++i) {
+            threads.emplace_back([&, i]() {
+                try {
+                    // Половина потоков — это Alice (читатели), половина — Bob (писатели)
+                    bool is_alice = (i % 2 == 0);
+                    std::string user = is_alice ? "alice" : "bob";
+                    
+                    for (int j = 0; j < ITERS; ++j) {
+                        // ИМИТАЦИЯ HTTP-СЕССИИ: Устанавливаем контекст строго для текущего потока
+                        executor.setThreadLocalContext("mt_db");
+                        executor.setThreadLocalUser(user);
+
+                        if (is_alice) {
+                            // Блок чтения
+                            {
+                                std::shared_lock<std::shared_mutex> lock(server_rw_mutex);
+                                json res = executor.execute("SELECT * FROM mt_table;");
+                                if (res.value("success", false)) success_reads++;
+                                else test_failed = true;
+                            }
+
+                            // Блок записи
+                            {
+                                std::unique_lock<std::shared_mutex> wlock(server_rw_mutex);
+                                json res_w = executor.execute("INSERT INTO mt_table VALUES (99, 'hack');");
+                                
+                                if (!res_w.value("success", false)) {
+                                    std::string msg = res_w.value("message", "");
+                                    if (msg.find("Permission denied") != std::string::npos) {
+                                        failed_writes++; 
+                                    } else test_failed = true; 
+                                } else test_failed = true; 
+                            }
+                        } else {
+                            // Bob пытается писать
+                            int id = i * 1000 + j; 
+                            std::string sql = "INSERT INTO mt_table VALUES (" + std::to_string(id) + ", 'bob_data');";
+                            
+                            {
+                                std::unique_lock<std::shared_mutex> lock(server_rw_mutex);
+                                json res = executor.execute(sql);
+                                if (res.value("success", false)) success_writes++;
+                                else test_failed = true;
+                            }
+                        }
+                    }
+                } catch (...) {
+                    test_failed = true;
+                }
+            });
+        }
+
+        // Ждем завершения всех потоков
+        for (auto& t : threads) {
+            t.join();
+        }
+
+        // 3. Валидация результатов
+        if (test_failed) {
+            std::cout << "\033[31mFAIL (Произошла неожиданная ошибка или пробита безопасность)\033[0m\n";
+            exit(1);
+        } else {
+            std::cout << "\033[32mOK\033[0m\n";
+            std::cout << "    Успешных конкурентных чтений (Alice): " << success_reads.load() << "\n";
+            std::cout << "    Отбитых попыток взлома (Alice): " << failed_writes.load() << "\n";
+            std::cout << "    Успешных конкурентных записей (Bob): " << success_writes.load() << "\n";
+        }
+        
+        // 4. Уборка
+        executor.setThreadLocalUser("admin");
+        assert_success("MT: Удаление БД", "DROP DATABASE mt_db;");
     }
 };
 
