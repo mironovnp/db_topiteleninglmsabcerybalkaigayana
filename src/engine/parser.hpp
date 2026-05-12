@@ -24,6 +24,7 @@ enum class TokenType {
     KW_IN, KW_EXISTS, KW_NULL, KW_UNIQUE, KW_DEFAULT, KW_FOREIGN, KW_REFERENCES, KW_CASCADE,
     KW_INDEX, KW_IF, KW_DISTINCT, KW_IS, KW_LIKE, KW_BETWEEN, KW_AUTOINCREMENT, KW_SHOW,
     KW_USER, KW_ROLE, KW_GRANT, KW_REVOKE, KW_TO, KW_PASSWORD, KW_ALL, KW_PRIVILEGES,
+    KW_BEGIN, KW_COMMIT, KW_ROLLBACK,
     IDENTIFIER, STRING_LITERAL, NUMBER_LITERAL, BOOL_LITERAL,
     OP_EQ, OP_NEQ, OP_LT, OP_GT, OP_LTE, OP_GTE,
     OP_PLUS, OP_MINUS, OP_DIV, // OP_STAR is handled by STAR
@@ -331,6 +332,10 @@ public:
     std::string object_name; // Name of a table or all
     std::string role_name;
 };
+
+class BeginStatement : public Statement {};
+class CommitStatement : public Statement {};
+class RollbackStatement : public Statement {};
 
 // ── Lexer ──────────────────────────────────────────────────────────────
 

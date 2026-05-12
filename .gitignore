@@ -8,3 +8,8 @@ test_data/
 CaseChampGui/
 .ssh_known_hosts
 test_db_data_for_executor_tests/
+executor_tests
+.mistral_api_key
+.mistral_api_key.example
+mistral_api_key
+.env

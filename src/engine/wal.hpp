@@ -22,6 +22,8 @@ enum class LogRecordType : uint8_t {
     // Logical row redo: payload via encodeRowPayload / decodeRowPayload
     ROW_UPSERT,
     ROW_DELETE,
+    CLR_ROW_UPSERT,
+    CLR_ROW_DELETE,
     BEGIN_TXN,
     COMMIT_TXN,
     ABORT_TXN
@@ -82,6 +84,8 @@ public:
 
     // Crash recovery (redo): PAGE_IMAGE + ROW_* replay when storage != nullptr.
     void recover(Storage* storage = nullptr);
+
+    std::vector<LogRecord> readAllRecords();
 
     // Reset the WAL file to empty (used after a successful checkpoint).
     void reset();

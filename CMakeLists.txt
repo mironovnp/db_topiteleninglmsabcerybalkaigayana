@@ -23,6 +23,8 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(json)
 
+find_package(OpenSSL REQUIRED)
+
 # ── Engine (internal static lib) ──
 add_library(dbengine STATIC
     src/engine/storage/storage.cpp
@@ -64,6 +66,8 @@ add_executable(dbcli
 )
 target_link_libraries(dbcli PRIVATE dbclient)
 target_include_directories(dbcli PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(dbcli PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
+target_link_libraries(dbcli PRIVATE OpenSSL::SSL OpenSSL::Crypto nlohmann_json::nlohmann_json)
 
 # ── Tests executable ──
 add_executable(db_tests

@@ -115,10 +115,13 @@ public:
         std::cout << "\n>>> ФАЗА 23: Многострочные запросы и Алиасы агрегатов" << std::endl;
         test_multi_line_and_aggr_aliases();
 
-        std::cout << "\n>>> ФАЗА 24: Проверка RBAC" << std::endl;
+        std::cout << "\n>>> ФАЗА 24: WAL Undo и транзакции" << std::endl;
+        test_wal_undo_transactions();
+
+        std::cout << "\n>>> ФАЗА 25: Проверка RBAC" << std::endl;
         test_rbac();
 
-        std::cout << "\n>>> ФАЗА 25: Многопоточность и Изоляция контекста (RBAC)" << std::endl;
+        std::cout << "\n>>> ФАЗА 26: Многопоточность и Изоляция контекста (RBAC)" << std::endl;
         test_multithreading_rbac();
 
         std::cout << "\n" << std::string(40, '=') << std::endl;
@@ -143,6 +146,18 @@ private:
             passed_count++;
         } else {
             std::cerr << "  [FAIL] " << name << "\n       SQL: " << sql << "\n       Error: " << res["message"] << std::endl;
+        }
+    }
+
+    void assert_auth_user(const std::string& name, const std::string& sql, const std::string& expected_user) {
+        total_count++;
+        json res = executor.execute(sql);
+        if (res["success"].get<bool>() && res.value("current_user", "") == expected_user) {
+            std::cout << "  [OK] " << name << std::endl;
+            passed_count++;
+        } else {
+            std::cerr << "  [FAIL] " << name << "\n       SQL: " << sql
+                      << "\n       Response: " << res.dump() << std::endl;
         }
     }
 
@@ -1152,7 +1167,7 @@ private:
         assert_error("RBAC: Неверный пароль", "SET USER alice PASSWORD 'wrong';", "Invalid password");
 
         // 5. Тестирование Изоляции: ALICE (Только чтение)
-        assert_success("RBAC: Авторизация Alice", "SET USER alice PASSWORD 'pass_a';");
+        assert_auth_user("RBAC: Авторизация Alice", "SET USER alice PASSWORD 'pass_a';", "alice");
         assert_rows("RBAC: Alice читает", "SELECT * FROM vault;", 1, {{"1", "Top Secret"}});
         assert_error("RBAC: Alice пытается писать", "INSERT INTO vault VALUES (2, 'Alice data');", "Permission denied");
         assert_error("RBAC: Alice пытается удалять", "DELETE FROM vault WHERE id = 1;", "Permission denied");
@@ -1178,6 +1193,33 @@ private:
         // 9. Очистка и возврат к админу
         assert_success("RBAC: Авторизация Admin", "SET USER admin PASSWORD 'admin';");
         assert_success("RBAC: Админ удаляет базу", "DROP DATABASE rbac_db;");
+    }
+
+    void test_wal_undo_transactions() {
+        executor.setThreadLocalContext("system");
+        executor.setThreadLocalUser("admin");
+
+        assert_success("TXN: Создание базы", "CREATE DATABASE txn_db;");
+        assert_success("TXN: Выбор базы", "USE txn_db;");
+        assert_success("TXN: Таблица", "CREATE TABLE items (id INT PRIMARY KEY, val TEXT);");
+        assert_success("TXN: Индекс", "CREATE INDEX idx_val ON items(val);");
+        assert_success("TXN: Базовая строка", "INSERT INTO items VALUES (1, 'base');");
+
+        assert_success("TXN: BEGIN для отката", "BEGIN;");
+        assert_success("TXN: INSERT внутри транзакции", "INSERT INTO items VALUES (2, 'temp');");
+        assert_success("TXN: UPDATE внутри транзакции", "UPDATE items SET val = 'changed' WHERE id = 1;");
+        assert_success("TXN: DELETE внутри транзакции", "DELETE FROM items WHERE id = 1;");
+        assert_success("TXN: ROLLBACK", "ROLLBACK;");
+        assert_rows("TXN: INSERT отменен", "SELECT count(*) FROM items WHERE id = 2;", 1, {{"0"}});
+        assert_rows("TXN: UPDATE/DELETE отменены", "SELECT val FROM items WHERE id = 1;", 1, {{"base"}});
+        assert_rows("TXN: Индекс восстановлен после отката", "SELECT id FROM items WHERE val = 'base';", 1, {{"1"}});
+
+        assert_success("TXN: BEGIN для commit", "BEGIN;");
+        assert_success("TXN: INSERT перед commit", "INSERT INTO items VALUES (3, 'committed');");
+        assert_success("TXN: COMMIT", "COMMIT;");
+        assert_rows("TXN: commit сохранил строку", "SELECT val FROM items WHERE id = 3;", 1, {{"committed"}});
+
+        assert_success("TXN: DDL вне транзакции после commit", "DROP DATABASE txn_db;");
     }
 
     void test_multithreading_rbac() {

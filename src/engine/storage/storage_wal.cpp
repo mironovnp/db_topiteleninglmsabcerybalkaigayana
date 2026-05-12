@@ -5,6 +5,7 @@
 #include "engine/storage/storage_internal.hpp"
 
 #include <cstring>
+#include <stdexcept>
 
 namespace db {
 
@@ -30,6 +31,7 @@ using storage_i::wal_encode_btree_key;
 
 void Storage::maybeCheckpoint() {
     if (!wal_mgr_) return;
+    if (txn_active_) return;
     if (wal_mgr_->fileSizeBytes() < WAL_CHECKPOINT_THRESHOLD_BYTES) return;
 
     wal_mgr_->flushTo(wal_mgr_->getNextLSN() - 1);
@@ -37,10 +39,23 @@ void Storage::maybeCheckpoint() {
     wal_mgr_->reset();
 }
 
-void Storage::walAppendRowDelete(const std::string& abs_path, const std::string& key) {
+LSN Storage::walAppendRecord(LogRecord record) {
+    if (!wal_mgr_) return INVALID_LSN;
+    if (txn_active_) {
+        record.txn_id = current_txn_id_;
+        record.prev_lsn = current_txn_prev_lsn_;
+    }
+    LSN lsn = wal_mgr_->appendRecord(record);
+    if (txn_active_) current_txn_prev_lsn_ = lsn;
+    return lsn;
+}
+
+void Storage::walAppendRowDelete(const std::string& abs_path, const std::string& key,
+                                 const std::string& old_row_blob) {
     if (!wal_mgr_) return;
-    LogRecord r(0, 0, LogRecordType::ROW_DELETE, 0, LogRecord::encodeRowPayload(abs_path, key));
-    wal_mgr_->appendRecord(r);
+    LogRecord r(0, 0, LogRecordType::ROW_DELETE, 0,
+                LogRecord::encodeRowPayload(abs_path, key, old_row_blob));
+    walAppendRecord(std::move(r));
 }
 
 void Storage::walAppendRowUpsert(const std::string& abs_path, const std::string& key,
@@ -48,11 +63,88 @@ void Storage::walAppendRowUpsert(const std::string& abs_path, const std::string&
     if (!wal_mgr_) return;
     LogRecord r(0, 0, LogRecordType::ROW_UPSERT, 0,
                LogRecord::encodeRowPayload(abs_path, key, row_blob));
-    wal_mgr_->appendRecord(r);
+    walAppendRecord(std::move(r));
 }
 
 void Storage::walFlushDurably() {
     if (wal_mgr_) wal_mgr_->flushTo(wal_mgr_->getNextLSN() - 1);
+}
+
+bool Storage::transactionActive() const {
+    return txn_active_;
+}
+
+void Storage::beginTransaction() {
+    if (txn_active_) throw std::runtime_error("Transaction already active");
+    txn_active_ = true;
+    current_txn_id_ = next_txn_id_.fetch_add(1);
+    current_txn_prev_lsn_ = INVALID_LSN;
+    LogRecord begin(current_txn_id_, INVALID_LSN, LogRecordType::BEGIN_TXN, 0);
+    walAppendRecord(std::move(begin));
+}
+
+void Storage::commitTransaction() {
+    if (!txn_active_) throw std::runtime_error("No active transaction");
+    LogRecord commit(current_txn_id_, current_txn_prev_lsn_, LogRecordType::COMMIT_TXN, 0);
+    walAppendRecord(std::move(commit));
+    walFlushDurably();
+    txn_active_ = false;
+    current_txn_id_ = 0;
+    current_txn_prev_lsn_ = INVALID_LSN;
+    maybeCheckpoint();
+}
+
+void Storage::rollbackTransaction() {
+    if (!txn_active_) throw std::runtime_error("No active transaction");
+    if (!wal_mgr_) return;
+
+    walFlushDurably();
+    auto records = wal_mgr_->readAllRecords();
+    const TxnId txn_id = current_txn_id_;
+
+    for (auto it = records.rbegin(); it != records.rend(); ++it) {
+        const LogRecord& rec = *it;
+        if (rec.txn_id != txn_id) continue;
+        if (rec.type == LogRecordType::BEGIN_TXN) break;
+        if (rec.type == LogRecordType::COMMIT_TXN || rec.type == LogRecordType::ABORT_TXN ||
+            rec.type == LogRecordType::CLR_ROW_UPSERT || rec.type == LogRecordType::CLR_ROW_DELETE) {
+            continue;
+        }
+        if (rec.type != LogRecordType::ROW_UPSERT && rec.type != LogRecordType::ROW_DELETE) {
+            continue;
+        }
+
+        std::string path, key, row_blob;
+        if (!LogRecord::decodeRowPayload(rec.payload, path, key, row_blob)) continue;
+
+        LogRecordType clr_type = LogRecordType::CLR_ROW_DELETE;
+        std::string clr_blob;
+        if (rec.type == LogRecordType::ROW_DELETE) {
+            if (row_blob.empty()) continue;
+            clr_type = LogRecordType::CLR_ROW_UPSERT;
+            clr_blob = row_blob;
+        }
+
+        LogRecord clr(txn_id, current_txn_prev_lsn_, clr_type, 0,
+                      LogRecord::encodeRowPayload(path, key, clr_blob));
+        walAppendRecord(std::move(clr));
+        walFlushDurably();
+
+        closePool(path);
+        replayWalLogicalRecord(clr_type == LogRecordType::CLR_ROW_UPSERT ? LogRecordType::ROW_UPSERT
+                                                                         : LogRecordType::ROW_DELETE,
+                               path, key, clr_blob);
+        closePool(path);
+    }
+
+    LogRecord abort(txn_id, current_txn_prev_lsn_, LogRecordType::ABORT_TXN, 0);
+    walAppendRecord(std::move(abort));
+    walFlushDurably();
+
+    txn_active_ = false;
+    current_txn_id_ = 0;
+    current_txn_prev_lsn_ = INVALID_LSN;
+    maybeCheckpoint();
 }
 
 void Storage::replayWalLogicalRecord(LogRecordType type, std::string abs_path, std::string key,
@@ -96,9 +188,9 @@ void Storage::replayWalLogicalRecord(LogRecordType type, std::string abs_path, s
         if (!decode_btree_key_blob(reinterpret_cast<const uint8_t*>(key.data()),
                                    static_cast<uint32_t>(key.size()), 2, mini, bkey))
             return;
-        if (type == LogRecordType::ROW_DELETE) {
+        if (type == LogRecordType::ROW_DELETE || type == LogRecordType::CLR_ROW_DELETE) {
             tree.remove(bkey);
-        } else if (type == LogRecordType::ROW_UPSERT) {
+        } else if (type == LogRecordType::ROW_UPSERT || type == LogRecordType::CLR_ROW_UPSERT) {
             Row rw;
             if (deserialize_row_disk(mini,
                                     reinterpret_cast<const uint8_t*>(row_blob.data()),
@@ -128,9 +220,9 @@ void Storage::replayWalLogicalRecord(LogRecordType type, std::string abs_path, s
     if (!decode_btree_key_blob(reinterpret_cast<const uint8_t*>(key.data()),
                                static_cast<uint32_t>(key.size()), 1, s, bkey))
         return;
-    if (type == LogRecordType::ROW_DELETE) {
+    if (type == LogRecordType::ROW_DELETE || type == LogRecordType::CLR_ROW_DELETE) {
         tree.remove(bkey);
-    } else if (type == LogRecordType::ROW_UPSERT) {
+    } else if (type == LogRecordType::ROW_UPSERT || type == LogRecordType::CLR_ROW_UPSERT) {
         Row rw;
         if (deserialize_row_disk(s,
                                 reinterpret_cast<const uint8_t*>(row_blob.data()),
@@ -201,11 +293,14 @@ void Storage::deleteClusterRowWal(const std::string& db_name, const std::string&
         auto ip = indexPath(db_name, table_name, idx.column_name);
         if (!std::filesystem::exists(ip)) continue;
 
+        TableSchema mini = mini_index_row_schema(schema, col_idx);
+        Row idx_row = pack_index_leaf_row(row[col_idx], row[pk_idx]);
         std::string idx_key_wire = wal_encode_btree_key({row[col_idx], row[pk_idx]});
-        walAppendRowDelete(ip.string(), idx_key_wire);
+        walAppendRowDelete(ip.string(), idx_key_wire, serialize_row_disk(mini, idx_row));
     }
 
-    walAppendRowDelete(tpath, wal_encode_btree_key(cluster_key_from_row(schema, row)));
+    walAppendRowDelete(tpath, wal_encode_btree_key(cluster_key_from_row(schema, row)),
+                       serialize_row_disk(schema, row));
     walFlushDurably();
 
     indexRemovePhysical(db_name, table_name, schema, row);
@@ -250,13 +345,15 @@ void Storage::upsertClusterRowWal(const std::string& db_name, const std::string&
             auto ip = indexPath(db_name, table_name, idx.column_name);
             if (!std::filesystem::exists(ip)) continue;
 
+            TableSchema mini = mini_index_row_schema(schema, col_idx);
+            Row idx_row = pack_index_leaf_row((*old_row)[col_idx], (*old_row)[pk_idx]);
             walAppendRowDelete(ip.string(),
-                               wal_encode_btree_key({(*old_row)[col_idx], (*old_row)[pk_idx]}));
+                               wal_encode_btree_key({(*old_row)[col_idx], (*old_row)[pk_idx]}),
+                               serialize_row_disk(mini, idx_row));
         }
 
-        if (compare_btree_keys(cluster_key_from_row(schema, *old_row),
-                               cluster_key_from_row(schema, new_row)) != 0)
-            walAppendRowDelete(tpath, wal_encode_btree_key(cluster_key_from_row(schema, *old_row)));
+        walAppendRowDelete(tpath, wal_encode_btree_key(cluster_key_from_row(schema, *old_row)),
+                           serialize_row_disk(schema, *old_row));
     }
 
     walAppendRowUpsert(tpath, wal_encode_btree_key(cluster_key_from_row(schema, new_row)),

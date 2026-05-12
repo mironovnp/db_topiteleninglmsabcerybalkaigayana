@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <stdexcept>
 #include <iostream>
+#include <fstream>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -329,14 +330,18 @@ void WALManager::recover(Storage* storage) {
         LogRecordType type = static_cast<LogRecordType>(type_u8);
         if (payload_size == 0) continue;
 
-        if (type == LogRecordType::ROW_UPSERT || type == LogRecordType::ROW_DELETE) {
+        if (type == LogRecordType::ROW_UPSERT || type == LogRecordType::ROW_DELETE ||
+            type == LogRecordType::CLR_ROW_UPSERT || type == LogRecordType::CLR_ROW_DELETE) {
             std::string payload;
             payload.resize(payload_size);
             if (!readExact(payload.data(), payload.size())) break;
             if (storage) {
                 std::string pth, ky, blob;
                 if (LogRecord::decodeRowPayload(payload, pth, ky, blob)) {
-                    storage->replayWalLogicalRecord(type, std::move(pth), std::move(ky), std::move(blob));
+                    LogRecordType replay_type =
+                        (type == LogRecordType::CLR_ROW_UPSERT) ? LogRecordType::ROW_UPSERT :
+                        (type == LogRecordType::CLR_ROW_DELETE) ? LogRecordType::ROW_DELETE : type;
+                    storage->replayWalLogicalRecord(replay_type, std::move(pth), std::move(ky), std::move(blob));
                 }
             }
             continue;
@@ -403,6 +408,25 @@ void WALManager::recover(Storage* storage) {
     flushed_lsn_ = last_lsn;
     ::lseek(log_fd_, 0, SEEK_END);
 #endif
+}
+
+std::vector<LogRecord> WALManager::readAllRecords() {
+    flushTo(getNextLSN() - 1);
+
+    std::ifstream in(log_file_path_, std::ios::binary);
+    if (!in) return {};
+    std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+
+    std::vector<LogRecord> records;
+    uint32_t off = 0;
+    while (off < data.size()) {
+        auto [rec, consumed] = LogRecord::deserialize(data.data() + off,
+                                                      static_cast<uint32_t>(data.size() - off));
+        if (consumed == 0) break;
+        records.push_back(std::move(rec));
+        off += consumed;
+    }
+    return records;
 }
 
 void WALManager::reset() {

@@ -71,6 +71,9 @@ private:
     nlohmann::json execSetUser(const SetUserStatement* q);
     nlohmann::json execGrantRole(const GrantRoleStatement* q);
     nlohmann::json execGrant(const GrantStatement* q);
+    nlohmann::json execBegin();
+    nlohmann::json execCommit();
+    nlohmann::json execRollback();
 
     nlohmann::json execShowDatabases();
     nlohmann::json execShowTables();

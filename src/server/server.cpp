@@ -21,18 +21,47 @@ void Server::start() {
         try {
             auto body = json::parse(req.body);
 
-            // ВОССТАНОВЛЕНИЕ КОНТЕКСТА: сервер получает базу от клиента и настраивает поток
-            if (body.contains("current_db")) {
-                executor_.setThreadLocalContext(body.value("current_db", ""));
+            std::string session_id = body.value("session_id", "");
+            SessionContext session;
+            {
+                std::lock_guard<std::mutex> lock(sessions_mutex_);
+                if (session_id.empty()) {
+                    session_id = "s" + std::to_string(next_session_id_.fetch_add(1));
+                    SessionContext fresh;
+                    fresh.current_db = body.value("current_db", "");
+                    sessions_[session_id] = fresh;
+                }
+                auto it = sessions_.find(session_id);
+                if (it == sessions_.end()) {
+                    it = sessions_.emplace(session_id, SessionContext{}).first;
+                }
+                session = it->second;
             }
-            if (body.contains("current_user")) {
-                executor_.setThreadLocalUser(body.value("current_user", "admin"));
-            }
+
+            // Thread-local хранит только рабочий контекст текущего HTTP-потока.
+            // Пользователь берется из серверной сессии, а не из тела запроса.
+            executor_.setThreadLocalContext(session.current_db);
+            executor_.setThreadLocalUser(session.current_user);
+
+            auto attach_session_context = [&](json result) {
+                std::lock_guard<std::mutex> lock(sessions_mutex_);
+                auto& stored = sessions_[session_id];
+                if (result.contains("current_db")) {
+                    stored.current_db = result.value("current_db", "");
+                }
+                if (result.contains("current_user")) {
+                    stored.current_user = result.value("current_user", "");
+                }
+                result["session_id"] = session_id;
+                result["current_db"] = stored.current_db;
+                result["current_user"] = stored.current_user;
+                return result;
+            };
 
             std::string sql = body.value("sql", "");
             if (sql.empty()) {
                 res.set_content(
-                    json({{"success", false}, {"message", "Empty query"}}).dump(),
+                    attach_session_context(json({{"success", false}, {"message", "Empty query"}})).dump(),
                     "application/json");
                 return;
             }
@@ -46,13 +75,19 @@ void Server::start() {
                 } catch (const std::exception& e) {
                     std::string err = e.what();
                     if (err.find("<EOF>") != std::string::npos) {
-                        res.set_content(json({{"success", true}, {"type", "incomplete"}}).dump(), "application/json");
+                        res.set_content(
+                            attach_session_context(json({{"success", true}, {"type", "incomplete"}})).dump(),
+                            "application/json");
                     } else {
-                        res.set_content(json({{"success", false}, {"message", err}}).dump(), "application/json");
+                        res.set_content(
+                            attach_session_context(json({{"success", false}, {"message", err}})).dump(),
+                            "application/json");
                     }
                     return;
                 }
-                res.set_content(json({{"success", true}, {"type", "incomplete"}}).dump(), "application/json");
+                res.set_content(
+                    attach_session_context(json({{"success", true}, {"type", "incomplete"}})).dump(),
+                    "application/json");
                 return;
             }
 
@@ -76,7 +111,7 @@ void Server::start() {
                 result = executor_.execute(sql);
             }
 
-            res.set_content(result.dump(), "application/json");
+            res.set_content(attach_session_context(result).dump(), "application/json");
         } catch (const std::exception& e) {
             res.set_content(
                 json({{"success", false}, {"message", e.what()}}).dump(),

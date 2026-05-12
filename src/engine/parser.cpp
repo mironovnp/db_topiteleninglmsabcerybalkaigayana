@@ -42,6 +42,8 @@ static const std::unordered_map<std::string, TokenType> KEYWORDS = {
     {"GRANT",TokenType::KW_GRANT}, {"REVOKE",TokenType::KW_REVOKE},
     {"TO",TokenType::KW_TO}, {"PASSWORD",TokenType::KW_PASSWORD},
     {"ALL",TokenType::KW_ALL}, {"PRIVILEGES",TokenType::KW_PRIVILEGES},
+    {"BEGIN",TokenType::KW_BEGIN}, {"COMMIT",TokenType::KW_COMMIT},
+    {"ROLLBACK",TokenType::KW_ROLLBACK},
 };
 
 using enum TokenType;
@@ -206,6 +208,9 @@ std::unique_ptr<Statement> Parser::parse() {
     if (check(KW_USE))    { consume(); return parseUse(); }
     if (check(KW_SHOW))   { consume(); return parseShow(); }
     if (check(KW_GRANT))  { consume(); return parseGrant(); }
+    if (check(KW_BEGIN)) { consume(); match(SEMICOLON); return std::make_unique<BeginStatement>(); }
+    if (check(KW_COMMIT)) { consume(); match(SEMICOLON); return std::make_unique<CommitStatement>(); }
+    if (check(KW_ROLLBACK)) { consume(); match(SEMICOLON); return std::make_unique<RollbackStatement>(); }
     if (check(KW_SET)) {
         consume(); 
         if (check(KW_USER)) return parseSetUser();

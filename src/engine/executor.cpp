@@ -455,6 +455,9 @@ json Executor::execute(const std::string& sql) {
 
             if (t0 == TokenType::KW_USE) {
                 needs_db = false;
+            } else if (t0 == TokenType::KW_BEGIN || t0 == TokenType::KW_COMMIT ||
+                       t0 == TokenType::KW_ROLLBACK) {
+                needs_db = false;
             } else if (t0 == TokenType::KW_CREATE || t0 == TokenType::KW_DROP) {
                 if (tokens.size() > 1 && tokens[1].type == TokenType::KW_DATABASE) {
                     needs_db = false;
@@ -471,6 +474,18 @@ json Executor::execute(const std::string& sql) {
         }
 
         Parser p(tokens); auto query = p.parse();
+        if (dynamic_cast<BeginStatement*>(query.get())) return execBegin();
+        if (dynamic_cast<CommitStatement*>(query.get())) return execCommit();
+        if (dynamic_cast<RollbackStatement*>(query.get())) return execRollback();
+
+        if (storage_.transactionActive() &&
+            !dynamic_cast<SelectStatement*>(query.get()) &&
+            !dynamic_cast<InsertStatement*>(query.get()) &&
+            !dynamic_cast<UpdateStatement*>(query.get()) &&
+            !dynamic_cast<DeleteStatement*>(query.get())) {
+            return err("Only SELECT/INSERT/UPDATE/DELETE are supported inside a transaction");
+        }
+
         if (auto q = dynamic_cast<CreateDatabaseStatement*>(query.get())) return execCreateDB(q);
         if (auto q = dynamic_cast<DropDatabaseStatement*>(query.get())) return execDropDB(q);
         if (auto q = dynamic_cast<UseDatabaseStatement*>(query.get())) return execUse(q);
@@ -494,6 +509,21 @@ json Executor::execute(const std::string& sql) {
         if (auto q = dynamic_cast<GrantStatement*>(query.get())) return execGrant(q);
         return err("Unknown query type");
     } catch (const std::exception& e) { return err(e.what()); }
+}
+
+json Executor::execBegin() {
+    storage_.beginTransaction();
+    return ok("Transaction started.");
+}
+
+json Executor::execCommit() {
+    storage_.commitTransaction();
+    return ok("Transaction committed.");
+}
+
+json Executor::execRollback() {
+    storage_.rollbackTransaction();
+    return ok("Transaction rolled back.");
 }
 
 json Executor::execCreateDB(const CreateDatabaseStatement* q) {
@@ -1772,7 +1802,9 @@ nlohmann::json Executor::execSetUser(const SetUserStatement* q) {
         priv_cache_.clear();
     }
 
-    return ok("Context switched to user: " + current_user_);
+    json res = ok("Context switched to user: " + current_user_);
+    res["current_user"] = current_user_;
+    return res;
 }
 
 json Executor::execGrantRole(const GrantRoleStatement* q) {

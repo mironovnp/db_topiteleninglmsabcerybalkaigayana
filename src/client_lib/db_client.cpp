@@ -43,6 +43,9 @@ QueryResult DBClient::executeQuery(const std::string& sql, bool dry_run) {
         body["dry_run"] = dry_run;
         body["current_db"] = current_db_; // Отправляем серверу текущую базу клиента
         body["current_user"] = current_user_;
+        if (!session_id_.empty()) {
+            body["session_id"] = session_id_;
+        }
 
         auto res = cli.Post("/query", body.dump(), "application/json");
         if (!res) {
@@ -62,6 +65,9 @@ QueryResult DBClient::executeQuery(const std::string& sql, bool dry_run) {
         }
         if (j.contains("current_user")) {
             current_user_ = j["current_user"].get<std::string>();
+        }
+        if (j.contains("session_id")) {
+            session_id_ = j["session_id"].get<std::string>();
         }
 
         if (j.contains("columns")) {

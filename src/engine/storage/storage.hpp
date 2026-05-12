@@ -8,6 +8,7 @@
 #include <memory>
 #include <unordered_map>
 #include <mutex>
+#include <atomic>
 
 namespace db {
 
@@ -58,6 +59,12 @@ public:
                         const std::string& username,
                         const std::string& object_name, 
                         const std::string& privilege) const;
+
+    // Transaction control (logical WAL undo for row-level changes).
+    bool transactionActive() const;
+    void beginTransaction();
+    void commitTransaction();
+    void rollbackTransaction();
     
     // Database
     bool createDatabase(const std::string& db_name);
@@ -134,13 +141,19 @@ public:
 private:
     std::filesystem::path data_dir_;
     std::unique_ptr<WALManager> wal_mgr_;
+    std::atomic<TxnId> next_txn_id_{1};
+    inline thread_local static bool txn_active_ = false;
+    inline thread_local static TxnId current_txn_id_ = 0;
+    inline thread_local static LSN current_txn_prev_lsn_ = INVALID_LSN;
     // Protects pools_ from concurrent access (HTTP server runs queries in parallel).
     mutable std::mutex pools_latch_;
     mutable std::unordered_map<std::string, std::unique_ptr<BufferPool>> pools_;
 
     void initializeSystemTables(const std::string& db_name);
 
-    void walAppendRowDelete(const std::string& abs_path, const std::string& key);
+    LSN walAppendRecord(LogRecord record);
+    void walAppendRowDelete(const std::string& abs_path, const std::string& key,
+                            const std::string& old_row_blob = {});
     void walAppendRowUpsert(const std::string& abs_path, const std::string& key,
                             const std::string& row_blob);
     void walFlushDurably();

@@ -29,6 +29,7 @@ private:
     // СОСТОЯНИЕ: Клиент хранит имя своей текущей БД
     std::string current_db_;
     std::string current_user_;
+    std::string session_id_;
 };
 
 } // namespace db
