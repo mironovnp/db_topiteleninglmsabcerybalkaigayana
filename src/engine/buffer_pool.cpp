@@ -47,13 +47,15 @@ void BufferPool::openFile() {
 // ════════════════════════════════════════════════════════════════════════
 
 void BufferPool::readFromDisk(PageId id, Page& pg) {
+    file_.clear();
     file_.seekg(static_cast<std::streamoff>(id) * PAGE_SIZE);
     file_.read(pg.data, PAGE_SIZE);
     if (!file_)
-        throw std::runtime_error("BufferPool: read failed for page " + std::to_string(id));
+        throw std::runtime_error("BufferPool: read failed for page " + std::to_string(id) + " in " + file_path_);
 }
 
 void BufferPool::writeToDisk(PageId id, const Page& pg) {
+    file_.clear();
     auto offset = static_cast<std::streamoff>(id) * PAGE_SIZE;
     file_.seekp(0, std::ios::end);
     auto end = file_.tellp();

@@ -28,7 +28,7 @@ Row BPlusTree::unpack_row_blob(const uint8_t* blob, uint32_t blob_len) const {
     return out;
 }
 
-BPlusTree::BPlusTree(BufferPool& pool, PageId root_page_id, const TableSchema* row_schema,
+BPlusTree::BPlusTree(BufferPool& pool, PageId& root_page_id, const TableSchema* row_schema,
                      uint8_t key_arity)
     : pool_(pool), root_(root_page_id), row_schema_(row_schema), key_arity_(key_arity) {
     if (root_ == 0 || root_ == INVALID_PAGE_ID)

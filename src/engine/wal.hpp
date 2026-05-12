@@ -108,7 +108,7 @@ private:
     LSN next_lsn_ = 1;
     LSN flushed_lsn_ = 0;
     
-    std::mutex mutex_;
+    std::recursive_mutex mutex_;
     
     // In-memory buffer of records waiting to be flushed.
     // For a real system we'd use a fixed-size byte buffer, but a vector of strings is simpler for CaseChamp.

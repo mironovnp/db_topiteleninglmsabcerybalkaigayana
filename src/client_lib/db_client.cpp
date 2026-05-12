@@ -62,9 +62,11 @@ QueryResult DBClient::executeQuery(const std::string& sql, bool dry_run) {
         // Если сервер подтвердил смену базы (USE или DROP), запоминаем это
         if (j.contains("current_db")) {
             current_db_ = j["current_db"].get<std::string>();
+            qr.current_db = current_db_;
         }
         if (j.contains("current_user")) {
             current_user_ = j["current_user"].get<std::string>();
+            qr.current_user = current_user_;
         }
         if (j.contains("session_id")) {
             session_id_ = j["session_id"].get<std::string>();
@@ -81,6 +83,46 @@ QueryResult DBClient::executeQuery(const std::string& sql, bool dry_run) {
                     r.push_back(v.is_string() ? v.get<std::string>() : v.dump());
                 qr.rows.push_back(std::move(r));
             }
+        }
+    } catch (const std::exception& e) {
+        qr.message = std::string("Error: ") + e.what();
+    }
+
+    return qr;
+}
+
+QueryResult DBClient::executeText2Sql(const std::string& request) {
+    QueryResult qr;
+    qr.success = false;
+
+    if (!connected_) {
+        qr.message = "Not connected to server.";
+        return qr;
+    }
+
+    try {
+        httplib::Client cli(host_, port_);
+        cli.set_connection_timeout(10);
+        cli.set_read_timeout(120); // 120 seconds for LLM generation
+        nlohmann::json body = {
+            {"request", request},
+            {"current_db", current_db_},
+            {"current_user", current_user_},
+            {"session_id", session_id_}
+        };
+
+        auto res = cli.Post("/text2sql", body.dump(), "application/json");
+        if (!res) {
+            qr.message = "Connection failed.";
+            return qr;
+        }
+
+        auto j = nlohmann::json::parse(res->body);
+        qr.success = j.value("success", false);
+        qr.message = j.value("message", "");
+        
+        if (qr.success && j.contains("sql")) {
+            qr.message = j["sql"].get<std::string>(); // Reusing message field to return SQL
         }
     } catch (const std::exception& e) {
         qr.message = std::string("Error: ") + e.what();

@@ -54,11 +54,13 @@ class Storage {
 public:
     explicit Storage(const std::string& data_dir = "data");
 
-    // RBAC (Role-Based Access Control)
     bool checkPrivilege(const std::string& db_name, 
                         const std::string& username,
                         const std::string& object_name, 
                         const std::string& privilege) const;
+
+    std::string getDbOwner(const std::string& db_name) const;
+    bool hasDbDdlGrant(const std::string& db_name, const std::string& username) const;
 
     // Transaction control (logical WAL undo for row-level changes).
     bool transactionActive() const;
@@ -157,6 +159,7 @@ private:
     void walAppendRowUpsert(const std::string& abs_path, const std::string& key,
                             const std::string& row_blob);
     void walFlushDurably();
+    void walLogPageImage(const std::string& abs_path, PageId page_id, const Page& pg);
 
     void indexRemovePhysical(const std::string& db_name, const std::string& table_name,
                              const TableSchema& schema, const Row& row);

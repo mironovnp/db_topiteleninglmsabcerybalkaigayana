@@ -194,14 +194,17 @@ Executor::Executor(const std::string& data_dir) : storage_(data_dir) {
 }
 
 json Executor::ok(const std::string& msg) {
-    return {{"success", true}, {"message", msg}, {"type", "ddl"}};
+    return {{"success", true}, {"message", msg}, {"current_db", current_db_}, {"current_user", current_user_}};
 }
 
 json Executor::err(const std::string& msg) {
-    return {{"success", false}, {"message", msg}};
+    return {{"success", false}, {"message", msg}, {"current_db", current_db_}, {"current_user", current_user_}};
 }
 
 void Executor::requireDB() const {
+    if (current_user_.empty()) {
+        throw std::runtime_error("Not authenticated. Use LOGIN or REGISTER first.");
+    }
     if (current_db_.empty())
         throw std::runtime_error("No database selected. Use: USE <database>;");
 }
@@ -408,70 +411,39 @@ bool Executor::evalCondition(const Expression* expr, const Row& row, const Table
 }
 
 void Executor::checkPermission(const std::string& table_name, const std::string& privilege) {
-    if (current_db_.empty()) {
-        throw std::runtime_error("Permission denied: No database context. Execute 'USE <database>;' first.");
-    }
     if (current_user_.empty()) {
-        throw std::runtime_error("Permission denied: Not authenticated. Execute 'SET USER ... PASSWORD ...;' first.");
+        throw std::runtime_error("Not authenticated. Use LOGIN or REGISTER first.");
     }
 
-    if (table_name.substr(0, 4) == "sys_" && privilege != "ALL" && privilege != "SELECT") {
-        throw std::runtime_error("Permission denied: cannot directly modify system catalogs");
+    // Админ имеет полный доступ
+    if (current_user_ == "admin") return;
+
+    if (current_db_.empty()) {
+        throw std::runtime_error("No database selected. Use: USE <database>;");
     }
 
-    std::string cache_key = current_db_ + ":" + current_user_ + ":" + table_name + ":" + privilege;
-    
-    // Safe reading from cache
-    {
-        std::lock_guard<std::mutex> lock(priv_cache_mutex_);
-        if (priv_cache_.find(cache_key) != priv_cache_.end()) {
-            if (!priv_cache_[cache_key]) 
-                throw std::runtime_error("Permission denied: " + privilege + " on " + table_name);
-            return;
-        }
+    // Владелец БД имеет полный доступ
+    std::string owner = storage_.getDbOwner(current_db_);
+    if (owner == current_user_) return;
+
+    // DML разрешен всем
+    if (privilege == "SELECT" || privilege == "INSERT" || 
+        privilege == "UPDATE" || privilege == "DELETE") {
+        return;
     }
 
-    bool has_priv = storage_.checkPrivilege(current_db_, current_user_, table_name, privilege);
-    
-    // Safe entry into cache 
-    {
-        std::lock_guard<std::mutex> lock(priv_cache_mutex_);
-        priv_cache_[cache_key] = has_priv;
-    }
-    
-    if (!has_priv) {
-        throw std::runtime_error("Permission denied: " + privilege + " on " + table_name);
-    }
+    // DDL только с явным грантом
+    if (storage_.hasDbDdlGrant(current_db_, current_user_)) return;
+
+    throw std::runtime_error("Permission denied: " + privilege + " on " + table_name + 
+                             ". Only the owner of '" + current_db_ + "' can perform DDL operations.");
 }
 
 json Executor::execute(const std::string& sql) {
     try {
         Lexer l(sql); auto tokens = l.tokenize();
 
-        // Check for database requirement before parsing to provide better error messages
-        if (!tokens.empty() && tokens[0].type != TokenType::END_OF_INPUT) {
-            bool needs_db = true;
-            TokenType t0 = tokens[0].type;
-
-            if (t0 == TokenType::KW_USE) {
-                needs_db = false;
-            } else if (t0 == TokenType::KW_BEGIN || t0 == TokenType::KW_COMMIT ||
-                       t0 == TokenType::KW_ROLLBACK) {
-                needs_db = false;
-            } else if (t0 == TokenType::KW_CREATE || t0 == TokenType::KW_DROP) {
-                if (tokens.size() > 1 && tokens[1].type == TokenType::KW_DATABASE) {
-                    needs_db = false;
-                }
-            } else if (t0 == TokenType::KW_SHOW) {
-                if (tokens.size() > 1 && (tokens[1].value == "DATABASES" || tokens[1].value == "databases")) {
-                    needs_db = false;
-                }
-            }
-
-            if (needs_db && current_db_.empty()) {
-                return err("No database selected. Use: USE <database>;");
-            }
-        }
+        // Database and auth checks are now handled inside the individual exec* methods
 
         Parser p(tokens); auto query = p.parse();
         if (dynamic_cast<BeginStatement*>(query.get())) return execBegin();
@@ -485,6 +457,9 @@ json Executor::execute(const std::string& sql) {
             !dynamic_cast<DeleteStatement*>(query.get())) {
             return err("Only SELECT/INSERT/UPDATE/DELETE are supported inside a transaction");
         }
+
+        if (auto q = dynamic_cast<RegisterStatement*>(query.get())) return execRegister(q);
+        if (auto q = dynamic_cast<LoginStatement*>(query.get())) return execLogin(q);
 
         if (auto q = dynamic_cast<CreateDatabaseStatement*>(query.get())) return execCreateDB(q);
         if (auto q = dynamic_cast<DropDatabaseStatement*>(query.get())) return execDropDB(q);
@@ -507,6 +482,7 @@ json Executor::execute(const std::string& sql) {
         if (auto q = dynamic_cast<SetUserStatement*>(query.get())) return execSetUser(q);
         if (auto q = dynamic_cast<GrantRoleStatement*>(query.get())) return execGrantRole(q);
         if (auto q = dynamic_cast<GrantStatement*>(query.get())) return execGrant(q);
+        if (auto q = dynamic_cast<GrantDdlStatement*>(query.get())) return execGrantDdl(q);
         return err("Unknown query type");
     } catch (const std::exception& e) { return err(e.what()); }
 }
@@ -527,10 +503,22 @@ json Executor::execRollback() {
 }
 
 json Executor::execCreateDB(const CreateDatabaseStatement* q) {
-    checkPermission("*", "CREATE");
+    if (current_user_.empty()) return err("Not authenticated.");
     if (storage_.databaseExists(q->database_name)) return err("Database '" + q->database_name + "' already exists.");
-    if (storage_.createDatabase(q->database_name)) return ok("Database '" + q->database_name + "' created.");
-    return err("Failed to create database.");
+    if (q->database_name == "system") return err("Cannot create reserved database 'system'.");
+    if (!storage_.createDatabase(q->database_name)) return err("Failed to create database.");
+
+    // Записываем владельца в system.sys_db_owners
+    auto sch = storage_.getTableSchema("system", "sys_db_owners");
+    Row row(sch.columns.size());
+    row[1] = coerce_string_to_cell_column(sch.columns[1], q->database_name, false);
+    row[2] = coerce_string_to_cell_column(sch.columns[2], current_user_, false);
+    std::map<int, long> dummy;
+    applyDefaultsAndAutoincrement("system", sch, "sys_db_owners", row, dummy);
+    storage_.appendRows("system", "sys_db_owners", {row});
+    storage_.indexInsertRow("system", "sys_db_owners", sch, row);
+
+    return ok("Database '" + q->database_name + "' created (owner: " + current_user_ + ").");
 }
 
 json Executor::execUse(const UseDatabaseStatement* q) {
@@ -544,16 +532,22 @@ json Executor::execUse(const UseDatabaseStatement* q) {
 }
 
 json Executor::execDropDB(const DropDatabaseStatement* q) {
-    checkPermission("*", "DROP");
+    if (current_user_.empty()) return err("Not authenticated.");
+    if (q->database_name == "system") return err("Cannot drop system database.");
     if (!storage_.databaseExists(q->database_name)) {
         if (q->if_exists) return ok("Dropped database '" + q->database_name + "' (if existed).");
         return err("Database '" + q->database_name + "' does not exist.");
+    }
+    // Только владелец или админ может удалить БД
+    std::string owner = storage_.getDbOwner(q->database_name);
+    if (current_user_ != "admin" && owner != current_user_) {
+        return err("Permission denied: only owner '" + owner + "' or admin can drop this database.");
     }
     if (storage_.dropDatabase(q->database_name)) {
         json res = ok("Dropped database '" + q->database_name + "'.");
         if (current_db_ == q->database_name) {
             current_db_.clear();
-            res["current_db"] = ""; // Приказываем клиенту "забыть" удаленную БД
+            res["current_db"] = "";
         }
         return res;
     }
@@ -561,7 +555,7 @@ json Executor::execDropDB(const DropDatabaseStatement* q) {
 }
 json Executor::execCreateTable(const CreateTableStatement* q) {
     requireDB();
-    checkPermission("*", "CREATE");
+    checkPermission(q->table_name, "CREATE");
 
     TableSchema s; s.table_name = q->table_name;
     for (auto& cd : q->column_defs) { ColumnDef c; c.name = cd.name; c.type = cd.type; c.not_null = cd.not_null; c.unique = cd.unique; c.has_default = cd.has_default; c.is_autoincrement = cd.is_autoincrement; c.default_value = cd.default_value; c.fk_ref_table = cd.fk_ref_table; c.fk_ref_column = cd.fk_ref_column; c.on_delete = cd.on_delete; c.on_update = cd.on_update; s.columns.push_back(c); }
@@ -874,14 +868,14 @@ json Executor::execShowCreateTable(const std::string& table_name) {
     return {{"success", true}, {"columns", {"Table", "Create Table"}}, {"rows", rows}};
 }
 
-void Executor::applyDefaultsAndAutoincrement(const TableSchema& s, const std::string& table_name,
+void Executor::applyDefaultsAndAutoincrement(const std::string& db_name, const TableSchema& s, const std::string& table_name,
                                             Row& r, std::map<int, long>& last_ids) {
     for (size_t i = 0; i < s.columns.size(); ++i) {
         if (!r[i].has_value()) {
             if (s.columns[i].is_autoincrement) {
                 if (last_ids.find(static_cast<int>(i)) == last_ids.end()) {
                     long max_id = 0;
-                    auto all_rows = storage_.readAllRows(current_db_, table_name);
+                    auto all_rows = storage_.readAllRows(db_name, table_name);
                     for (const auto& ar : all_rows) {
                         try {
                             if (i < ar.size() && ar[i].has_value()) {
@@ -1022,7 +1016,7 @@ json Executor::execInsert(const InsertStatement* q) {
             }
         }
 
-        applyDefaultsAndAutoincrement(s, q->table_name, r, last_ids);
+        applyDefaultsAndAutoincrement(current_db_, s, q->table_name, r, last_ids);
 
         for (size_t i = 0; i < s.columns.size(); ++i) {
             if (s.columns[i].not_null && !r[i].has_value()) {
@@ -1134,7 +1128,7 @@ json Executor::execLoadCsv(const LoadCsvStatement* q) {
                 cell_from_csv_field(s.columns[static_cast<size_t>(ti)], fields[j]);
         }
 
-        applyDefaultsAndAutoincrement(s, q->table_name, r, last_ids);
+        applyDefaultsAndAutoincrement(current_db_, s, q->table_name, r, last_ids);
 
         for (size_t i = 0; i < s.columns.size(); ++i) {
             if (s.columns[i].not_null && !r[i].has_value()) {
@@ -1732,138 +1726,127 @@ std::vector<Row> Executor::execute_subquery(const SelectStatement* q, const Tabl
 }
 
 json Executor::execCreateUser(const CreateUserStatement* q) {
-    requireDB();
-    checkPermission("sys_users", "ALL");
+    // Только админ может создавать пользователей через CREATE USER
+    if (current_user_ != "admin") return err("Only admin can use CREATE USER. Use REGISTER for self-registration.");
 
-    auto existing = storage_.indexLookup(current_db_, "sys_users", "username", q->username);
+    auto existing = storage_.indexLookup("system", "sys_users", "username", q->username);
     if (!existing.empty()) return err("User already exists.");
 
-    auto sch = storage_.getTableSchema(current_db_, "sys_users");
-    
+    auto sch = storage_.getTableSchema("system", "sys_users");
     Row row(sch.columns.size());
     row[1] = coerce_string_to_cell_column(sch.columns[1], q->username, false);
     row[2] = coerce_string_to_cell_column(sch.columns[2], q->password, false);
-
-    std::map<int, long> dummy_last_ids;
-    applyDefaultsAndAutoincrement(sch, "sys_users", row, dummy_last_ids);
-
-    storage_.appendRows(current_db_, "sys_users", {row});
-    storage_.indexInsertRow(current_db_, "sys_users", sch, row);
+    std::map<int, long> dummy;
+    applyDefaultsAndAutoincrement("system", sch, "sys_users", row, dummy);
+    storage_.appendRows("system", "sys_users", {row});
+    storage_.indexInsertRow("system", "sys_users", sch, row);
 
     return ok("User '" + q->username + "' created.");
 }
 
 json Executor::execCreateRole(const CreateRoleStatement* q) {
-    requireDB();
-    checkPermission("sys_roles", "ALL");
-
-    auto existing = storage_.indexLookup(current_db_, "sys_roles", "role_name", q->rolename);
-    if (!existing.empty()) return err("Role already exists.");
-
-    auto sch = storage_.getTableSchema(current_db_, "sys_roles");
-    
-    Row row(sch.columns.size());
-    row[1] = coerce_string_to_cell_column(sch.columns[1], q->rolename, false);
-
-    // Автоматическая генерация ID
-    std::map<int, long> dummy_last_ids;
-    applyDefaultsAndAutoincrement(sch, "sys_roles", row, dummy_last_ids);
-
-    storage_.appendRows(current_db_, "sys_roles", {row});
-    storage_.indexInsertRow(current_db_, "sys_roles", sch, row); // Обязательно обновляем индекс!
-
-    return ok("Role '" + q->rolename + "' created.");
+    return err("CREATE ROLE is deprecated. The new RBAC model uses database ownership. "
+               "Use GRANT DDL ON <db> TO <user> to grant DDL privileges.");
 }
 
 nlohmann::json Executor::execSetUser(const SetUserStatement* q) {
-    if (current_db_.empty()) {
-        return err("Select a database first (e.g., USE system;) to authenticate users.");
-    }
+    // SET USER теперь работает глобально через system DB
+    auto users = storage_.indexLookup("system", "sys_users", "username", q->username);
+    if (users.empty()) return err("User '" + q->username + "' does not exist.");
 
-    auto users = storage_.indexLookup(current_db_, "sys_users", "username", q->username);
-    if (users.empty()) {
-        return err("User '" + q->username + "' does not exist in database '" + current_db_ + "'");
-    }
-
-    Row user_row = storage_.findRow(current_db_, "sys_users", users[0]);
+    Row user_row = storage_.findRow("system", "sys_users", users[0]);
     std::string stored_pass = "";
     if (user_row.size() > 2 && user_row[2].has_value()) {
         stored_pass = cell_to_where_string(user_row[2]);
     }
     
-    if (stored_pass != q->password) {
-        return err("Invalid password for user '" + q->username + "'.");
-    }
+    if (stored_pass != q->password) return err("Invalid password for user '" + q->username + "'.");
 
     current_user_ = q->username;
-
-    {
-        std::lock_guard<std::mutex> lock(priv_cache_mutex_);
-        priv_cache_.clear();
-    }
-
     json res = ok("Context switched to user: " + current_user_);
     res["current_user"] = current_user_;
     return res;
 }
 
 json Executor::execGrantRole(const GrantRoleStatement* q) {
-    requireDB();
-    checkPermission("sys_user_roles", "ALL");
-
-    auto user_pks = storage_.indexLookup(current_db_, "sys_users", "username", q->user_name);
-    if (user_pks.empty()) return err("User not found: " + q->user_name);
-    std::string user_id = user_pks[0];
-
-    auto role_pks = storage_.indexLookup(current_db_, "sys_roles", "role_name", q->role_name);
-    if (role_pks.empty()) return err("Role not found: " + q->role_name);
-    std::string role_id = role_pks[0];
-
-    auto sch = storage_.getTableSchema(current_db_, "sys_user_roles");
-    
-    Row row(sch.columns.size());
-    row[1] = coerce_string_to_cell_column(sch.columns[1], user_id, false);
-    row[2] = coerce_string_to_cell_column(sch.columns[2], role_id, false);
-
-    std::map<int, long> dummy_last_ids;
-    applyDefaultsAndAutoincrement(sch, "sys_user_roles", row, dummy_last_ids);
-
-    storage_.appendRows(current_db_, "sys_user_roles", {row});
-    storage_.indexInsertRow(current_db_, "sys_user_roles", sch, row);
-    
-    {
-        std::lock_guard<std::mutex> lock(priv_cache_mutex_);
-        priv_cache_.clear();
-    }
-    return ok("Granted role '" + q->role_name + "' to user '" + q->user_name + "'.");
+    return err("GRANT ROLE is deprecated. The new RBAC model uses database ownership. "
+               "Use GRANT DDL ON <db> TO <user> to grant DDL privileges.");
 }
 
 json Executor::execGrant(const GrantStatement* q) {
-    requireDB();
-    checkPermission("sys_grants", "ALL");
+    return err("Legacy GRANT <privilege> ON <table> TO <role> is deprecated. "
+               "Use GRANT DDL ON <db> TO <user> instead.");
+}
 
-    auto role_pks = storage_.indexLookup(current_db_, "sys_roles", "role_name", q->role_name);
-    if (role_pks.empty()) return err("Role not found: " + q->role_name);
-    std::string role_id = role_pks[0];
+json Executor::execRegister(const RegisterStatement* q) {
+    if (q->username == "admin") return err("Cannot register as 'admin'.");
+    auto existing = storage_.indexLookup("system", "sys_users", "username", q->username);
+    if (!existing.empty()) return err("User '" + q->username + "' already exists.");
+    if (q->password.empty()) return err("Password cannot be empty.");
 
-    auto sch = storage_.getTableSchema(current_db_, "sys_grants");
-    
+    auto sch = storage_.getTableSchema("system", "sys_users");
     Row row(sch.columns.size());
-    row[1] = coerce_string_to_cell_column(sch.columns[1], role_id, false);
-    row[2] = coerce_string_to_cell_column(sch.columns[2], q->object_name, false);
-    row[3] = coerce_string_to_cell_column(sch.columns[3], q->privilege, false);
+    row[1] = coerce_string_to_cell_column(sch.columns[1], q->username, false);
+    row[2] = coerce_string_to_cell_column(sch.columns[2], q->password, false);
+    std::map<int, long> dummy;
+    applyDefaultsAndAutoincrement("system", sch, "sys_users", row, dummy);
+    storage_.appendRows("system", "sys_users", {row});
+    storage_.indexInsertRow("system", "sys_users", sch, row);
 
-    std::map<int, long> dummy_last_ids;
-    applyDefaultsAndAutoincrement(sch, "sys_grants", row, dummy_last_ids);
+    current_user_ = q->username;
+    json res = ok("User '" + q->username + "' registered and logged in.");
+    res["current_user"] = current_user_;
+    return res;
+}
 
-    storage_.appendRows(current_db_, "sys_grants", {row});
-    storage_.indexInsertRow(current_db_, "sys_grants", sch, row);
-    
-    {
-        std::lock_guard<std::mutex> lock(priv_cache_mutex_);
-        priv_cache_.clear();
+json Executor::execLogin(const LoginStatement* q) {
+    auto users = storage_.indexLookup("system", "sys_users", "username", q->username);
+    if (users.empty()) return err("User '" + q->username + "' does not exist.");
+
+    Row user_row = storage_.findRow("system", "sys_users", users[0]);
+    std::string stored_pass = "";
+    if (user_row.size() > 2 && user_row[2].has_value()) {
+        stored_pass = cell_to_where_string(user_row[2]);
     }
-    return ok("Granted " + q->privilege + " on " + q->object_name + " to " + q->role_name + ".");
+    if (stored_pass != q->password) return err("Invalid password.");
+
+    current_user_ = q->username;
+    json res = ok("Logged in as '" + current_user_ + "'.");
+    res["current_user"] = current_user_;
+    return res;
+}
+
+json Executor::execGrantDdl(const GrantDdlStatement* q) {
+    if (current_user_.empty()) return err("Not authenticated.");
+    
+    // Проверяем, что БД существует
+    if (!storage_.databaseExists(q->db_name)) return err("Database '" + q->db_name + "' does not exist.");
+
+    // Только владелец или админ может выдавать DDL
+    std::string owner = storage_.getDbOwner(q->db_name);
+    if (current_user_ != "admin" && owner != current_user_) {
+        return err("Permission denied: only owner '" + owner + "' can grant DDL on '" + q->db_name + "'.");
+    }
+
+    // Проверяем, что юзер существует
+    auto user_pks = storage_.indexLookup("system", "sys_users", "username", q->username);
+    if (user_pks.empty()) return err("User '" + q->username + "' does not exist.");
+
+    // Проверяем, нет ли уже такого гранта
+    if (storage_.hasDbDdlGrant(q->db_name, q->username)) {
+        return ok("User '" + q->username + "' already has DDL on '" + q->db_name + "'.");
+    }
+
+    auto sch = storage_.getTableSchema("system", "sys_ddl_grants");
+    Row row(sch.columns.size());
+    row[1] = coerce_string_to_cell_column(sch.columns[1], q->db_name, false);
+    row[2] = coerce_string_to_cell_column(sch.columns[2], q->username, false);
+    std::map<int, long> dummy;
+    applyDefaultsAndAutoincrement("system", sch, "sys_ddl_grants", row, dummy);
+    storage_.appendRows("system", "sys_ddl_grants", {row});
+    storage_.indexInsertRow("system", "sys_ddl_grants", sch, row);
+
+    return ok("Granted DDL on '" + q->db_name + "' to user '" + q->username + "'.");
 }
 
 } // namespace db

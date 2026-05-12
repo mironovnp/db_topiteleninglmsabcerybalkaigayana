@@ -45,6 +45,7 @@ bool Storage::createTable(const std::string& db_name, const TableSchema& schema)
     root->setPageId(root_id);
     leafSetContentStart(*root, PAGE_SIZE);
     leafSetNextId(*root, INVALID_PAGE_ID);
+    walLogPageImage(p.string(), root_id, *root);
     pool.unpinPage(root_id, true);
 
     std::string payload = serializeSchema(schema);
@@ -54,6 +55,8 @@ bool Storage::createTable(const std::string& db_name, const TableSchema& schema)
         throw std::runtime_error("Schema too large for meta page");
     memcpy(meta->data + 16, payload.data(), payload.size());
     meta->setNumRecords(static_cast<uint32_t>(payload.size()));
+
+    walLogPageImage(p.string(), meta_id, *meta);
     pool.unpinPage(meta_id, true);
 
     if (wal_mgr_) wal_mgr_->flushTo(wal_mgr_->getNextLSN() - 1);
@@ -158,6 +161,7 @@ int Storage::appendRows(const std::string& db_name, const std::string& table_nam
     PageId new_root = tree.getRootPageId();
     meta = pool.fetchPage(0);
     memcpy(meta->data + 16, &new_root, 4);
+    walLogPageImage(abs_table, 0, *meta);
     pool.unpinPage(0, true);
 
     walFlushDurably();
@@ -212,6 +216,7 @@ bool Storage::writeAllRows(const std::string& db_name, const std::string& table_
     memcpy(&payload[0], &root_id, 4);
     memcpy(meta->data + 16, payload.data(), payload.size());
     meta->setNumRecords(static_cast<uint32_t>(payload.size()));
+    walLogPageImage(p.string(), meta_id, *meta);
     pool.unpinPage(meta_id, true);
 
     if (wal_mgr_) wal_mgr_->flushTo(wal_mgr_->getNextLSN() - 1);

@@ -12,6 +12,8 @@ struct QueryResult {
     int affected_rows = 0;
     std::vector<std::string> columns;
     std::vector<std::vector<std::string>> rows;
+    std::string current_db;
+    std::string current_user;
 };
 
 class DBClient {
@@ -19,6 +21,7 @@ public:
     DBClient();
     bool connect(const std::string& host, int port);
     QueryResult executeQuery(const std::string& sql, bool dry_run = false);
+    QueryResult executeText2Sql(const std::string& request);
     bool ping();
 
 private:

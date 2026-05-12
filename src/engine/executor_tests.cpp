@@ -102,6 +102,9 @@ public:
         std::cout << "\n>>> ФАЗА 19: Logical WAL Recovery (Row-level)" << std::endl;
         test_logical_wal_recovery();
 
+        std::cout << "\n>>> ФАЗА 19.5: Recovery Undo (Crash during transaction)" << std::endl;
+        test_recovery_undo_active_transactions();
+
         std::cout << "\n>>> ФАЗА 20: Типизированное хранение и NULL" << std::endl;
         test_cell_value_and_nulls();
 
@@ -234,7 +237,7 @@ private:
 
     void test_ddl_and_errors() {
         executor.setThreadLocalContext("");
-        executor.setThreadLocalUser("");
+        executor.setThreadLocalUser("admin"); // Changed from "" to "admin" to bypass auth error
 
         assert_error("Запрос без базы данных", "CREATE TABLE t (id INT);", "No database selected");
         assert_error("SHOW TABLES без базы", "SHOW TABLES;", "No database selected");
@@ -790,6 +793,68 @@ private:
         }
     }
 
+    void test_recovery_undo_active_transactions() {
+        total_count++;
+        try {
+            auto run_test = [&]() {
+                auto dir = std::filesystem::path(data_dir) / "recovery_undo";
+                if (std::filesystem::exists(dir)) std::filesystem::remove_all(dir);
+                std::filesystem::create_directories(dir);
+
+                std::string db_name = "undo_db";
+                {
+                    db::Storage storage(dir.string());
+                    storage.createDatabase(db_name);
+                    db::TableSchema s;
+                    s.table_name = "items";
+                    s.columns = {{"id", "INT"}, {"val", "TEXT"}};
+                    s.primary_key_index = 0;
+                    storage.createTable(db_name, s);
+                    storage.createIndex(db_name, "items", "idx_val", "val");
+
+                    db::Row row1;
+                    row1.push_back(db::CellPrimitive{int64_t{1}});
+                    row1.push_back(db::CellPrimitive{std::string{"base"}});
+                    storage.upsertClusterRowWal(db_name, "items", s, nullptr, row1);
+
+                    // Start transaction but DO NOT commit
+                    storage.beginTransaction();
+                    db::Row row2;
+                    row2.push_back(db::CellPrimitive{int64_t{2}});
+                    row2.push_back(db::CellPrimitive{std::string{"temp"}});
+                    storage.upsertClusterRowWal(db_name, "items", s, nullptr, row2);
+                    
+                    // Unclean shutdown here, no commit.
+                    // The thread_local state txn_active_ = true will be isolated to this thread.
+                }
+
+                // Recovery phase
+                db::Storage storage_recover(dir.string());
+                auto rows = storage_recover.readAllRows(db_name, "items");
+                
+                bool has_base = false;
+                bool has_temp = false;
+                for (const auto& r : rows) {
+                    if (db::cell_to_where_string(r[0]) == "1") has_base = true;
+                    if (db::cell_to_where_string(r[0]) == "2") has_temp = true;
+                }
+
+                if (has_base && !has_temp) {
+                    std::cout << "  [OK] Recovery Undo успешно откатил незавершенную транзакцию" << std::endl;
+                    passed_count++;
+                } else {
+                    std::cerr << "  [FAIL] Recovery Undo failed: has_base=" << has_base 
+                              << " has_temp=" << has_temp << " (должно быть false)" << std::endl;
+                }
+            };
+            
+            std::thread t(run_test);
+            t.join();
+        } catch (const std::exception& e) {
+            std::cerr << "  [FAIL] test_recovery_undo_active_transactions exception: " << e.what() << std::endl;
+        }
+    }
+
     void test_cell_value_and_nulls() {
         executor.setThreadLocalContext("system");
         executor.setThreadLocalUser("admin");
@@ -1138,61 +1203,105 @@ private:
         executor.setThreadLocalContext("system");
         executor.setThreadLocalUser("admin");
 
-        // 1. Подготовка (от имени админа)
-        assert_success("RBAC: Создание базы", "CREATE DATABASE rbac_db;");
-        assert_success("RBAC: Выбор базы", "USE rbac_db;");
-        assert_success("RBAC: Настройка контекста админа", "SET USER admin PASSWORD 'admin';");
-        assert_success("RBAC: Создание таблицы", "CREATE TABLE vault (id INT PRIMARY KEY, secret_data VARCHAR(100));");
-        assert_success("RBAC: Вставка базовых данных", "INSERT INTO vault VALUES (1, 'Top Secret');");
+        // ═══ 1. Регистрация и Аутентификация ═══
+        assert_auth_user("RBAC: Регистрация alice", "REGISTER alice PASSWORD 'pass_a';", "alice");
+        assert_auth_user("RBAC: Регистрация bob", "REGISTER bob PASSWORD 'pass_b';", "bob");
+        assert_auth_user("RBAC: Регистрация eve", "REGISTER eve PASSWORD 'pass_e';", "eve");
 
-        // 2. Создание аккаунтов и ролей
-        assert_success("RBAC: Создание пользователей", "CREATE USER alice PASSWORD 'pass_a';");
-        assert_success("RBAC: Создание пользователей", "CREATE USER bob PASSWORD 'pass_b';");
-        assert_success("RBAC: Создание пользователей", "CREATE USER eve PASSWORD 'pass_e';"); // Хакер
-        
-        assert_success("RBAC: Создание ролей", "CREATE ROLE reader;");
-        assert_success("RBAC: Создание ролей", "CREATE ROLE writer;");
+        // Ошибки регистрации
+        assert_error("RBAC: Дубликат регистрации", "REGISTER alice PASSWORD 'xxx';", "already exists");
+        assert_error("RBAC: Регистрация admin", "REGISTER admin PASSWORD 'xxx';", "Cannot register");
+        assert_error("RBAC: Пустой пароль", "REGISTER nobody PASSWORD '';", "Password cannot be empty");
 
-        // 3. Выдача разрешений (Гранты)
-        assert_success("RBAC: Права на чтение", "GRANT SELECT ON vault TO reader;");
-        assert_success("RBAC: Права на запись", "GRANT INSERT ON vault TO writer;");
-        assert_success("RBAC: Права на обновление", "GRANT UPDATE ON vault TO writer;");
-        
-        assert_success("RBAC: Назначение ролей", "GRANT ROLE reader TO alice;");
-        assert_success("RBAC: Назначение ролей", "GRANT ROLE reader TO bob;"); // Боб может и читать
-        assert_success("RBAC: Назначение ролей", "GRANT ROLE writer TO bob;"); // ...и писать
+        // Аутентификация через LOGIN
+        assert_auth_user("RBAC: Login alice", "LOGIN alice PASSWORD 'pass_a';", "alice");
+        assert_error("RBAC: Неверный пароль", "LOGIN alice PASSWORD 'wrong';", "Invalid password");
+        assert_error("RBAC: Несуществующий юзер", "LOGIN ghost PASSWORD '123';", "does not exist");
 
-        // 4. Тестирование Аутентификации
-        assert_error("RBAC: Неверный юзер", "SET USER ghost PASSWORD '123';", "does not exist");
-        assert_error("RBAC: Неверный пароль", "SET USER alice PASSWORD 'wrong';", "Invalid password");
+        // Совместимость: SET USER тоже работает
+        assert_auth_user("RBAC: SET USER bob", "SET USER bob PASSWORD 'pass_b';", "bob");
+        assert_error("RBAC: SET USER неверный пароль", "SET USER bob PASSWORD 'wrong';", "Invalid password");
 
-        // 5. Тестирование Изоляции: ALICE (Только чтение)
-        assert_auth_user("RBAC: Авторизация Alice", "SET USER alice PASSWORD 'pass_a';", "alice");
-        assert_rows("RBAC: Alice читает", "SELECT * FROM vault;", 1, {{"1", "Top Secret"}});
-        assert_error("RBAC: Alice пытается писать", "INSERT INTO vault VALUES (2, 'Alice data');", "Permission denied");
-        assert_error("RBAC: Alice пытается удалять", "DELETE FROM vault WHERE id = 1;", "Permission denied");
-        assert_error("RBAC: Alice пытается создать таблицу", "CREATE TABLE backdoor (id INT);", "Permission denied");
+        // ═══ 2. Владение базой данных ═══
+        // Alice создает базу → становится владельцем
+        executor.setThreadLocalUser("alice");
+        assert_success("RBAC: Alice создает alice_db", "CREATE DATABASE alice_db;");
+        assert_success("RBAC: Alice использует alice_db", "USE alice_db;");
 
-        // 6. Тестирование Прав: BOB (Чтение и Запись)
-        assert_success("RBAC: Авторизация Bob", "SET USER bob PASSWORD 'pass_b';");
-        assert_success("RBAC: Bob пишет", "INSERT INTO vault VALUES (2, 'Bob data');");
-        assert_success("RBAC: Bob обновляет", "UPDATE vault SET secret_data = 'Updated' WHERE id = 1;");
-        assert_rows("RBAC: Bob читает изменения", "SELECT id FROM vault WHERE id = 2;", 1, {{"2"}});
-        // У Боба нет прав на DROP
-        assert_error("RBAC: Bob пытается удалить таблицу", "DROP TABLE vault;", "Permission denied");
+        // Alice (владелец) → полный DDL+DML
+        assert_success("RBAC: Alice DDL (CREATE TABLE)", "CREATE TABLE vault (id INT PRIMARY KEY, secret TEXT);");
+        assert_success("RBAC: Alice DML (INSERT)", "INSERT INTO vault VALUES (1, 'Top Secret');");
+        assert_rows("RBAC: Alice DML (SELECT)", "SELECT * FROM vault;", 1, {{"1", "Top Secret"}});
+        assert_success("RBAC: Alice DML (UPDATE)", "UPDATE vault SET secret = 'Updated' WHERE id = 1;");
+        assert_success("RBAC: Alice DDL (ALTER TABLE)", "ALTER TABLE vault ADD COLUMN notes TEXT;");
+        assert_success("RBAC: Alice DDL (CREATE INDEX)", "CREATE INDEX idx_secret ON vault(secret);");
 
-        // 7. Тестирование Безопасности: EVE (Без ролей)
-        assert_success("RBAC: Авторизация Eve", "SET USER eve PASSWORD 'pass_e';");
-        assert_error("RBAC: Eve пытается читать", "SELECT * FROM vault;", "Permission denied");
-        assert_error("RBAC: Eve пытается писать", "INSERT INTO vault VALUES (3, 'Malware');", "Permission denied");
-        
-        // 8. Защита системного каталога (Критически важно!)
-        assert_error("RBAC: Eve атакует sys_users", "INSERT INTO sys_users VALUES (99, 'root', 'pwd');", "Permission denied");
-        assert_error("RBAC: Eve атакует sys_grants", "INSERT INTO sys_grants VALUES (99, 1, '*', 'ALL');", "Permission denied");
+        // ═══ 3. Другие пользователи → DML только ═══
+        executor.setThreadLocalUser("bob");
+        executor.setThreadLocalContext("alice_db");
 
-        // 9. Очистка и возврат к админу
-        assert_success("RBAC: Авторизация Admin", "SET USER admin PASSWORD 'admin';");
-        assert_success("RBAC: Админ удаляет базу", "DROP DATABASE rbac_db;");
+        // Bob может делать DML
+        assert_success("RBAC: Bob DML (INSERT)", "INSERT INTO vault (id, secret) VALUES (2, 'Bob data');");
+        assert_rows("RBAC: Bob DML (SELECT)", "SELECT id FROM vault ORDER BY id;", 2, {{"1"}, {"2"}});
+        assert_success("RBAC: Bob DML (UPDATE)", "UPDATE vault SET secret = 'Bob updated' WHERE id = 2;");
+        assert_success("RBAC: Bob DML (DELETE)", "DELETE FROM vault WHERE id = 2;");
+
+        // Bob НЕ может DDL
+        assert_error("RBAC: Bob DDL (CREATE TABLE)", "CREATE TABLE hack (id INT);", "Permission denied");
+        assert_error("RBAC: Bob DDL (DROP TABLE)", "DROP TABLE vault;", "Permission denied");
+        assert_error("RBAC: Bob DDL (ALTER TABLE)", "ALTER TABLE vault ADD COLUMN hack TEXT;", "Permission denied");
+        assert_error("RBAC: Bob DDL (CREATE INDEX)", "CREATE INDEX idx_hack ON vault(secret);", "Permission denied");
+
+        // ═══ 4. Eve (без грантов) → тоже только DML ═══
+        executor.setThreadLocalUser("eve");
+        assert_rows("RBAC: Eve DML (SELECT)", "SELECT count(*) FROM vault;", 1, {{"1"}});
+        assert_error("RBAC: Eve DDL (CREATE TABLE)", "CREATE TABLE backdoor (id INT);", "Permission denied");
+        assert_error("RBAC: Eve DDL (DROP TABLE)", "DROP TABLE vault;", "Permission denied");
+
+        // ═══ 5. DROP DATABASE → только владелец или admin ═══
+        assert_error("RBAC: Eve не может удалить БД Alice", "DROP DATABASE alice_db;", "Permission denied");
+
+        executor.setThreadLocalUser("bob");
+        assert_error("RBAC: Bob не может удалить БД Alice", "DROP DATABASE alice_db;", "Permission denied");
+
+        // ═══ 6. GRANT DDL ═══
+        executor.setThreadLocalUser("alice");
+        // Alice выдает DDL-права Bob
+        assert_success("RBAC: Alice грантит DDL Bob", "GRANT DDL ON alice_db TO bob;");
+
+        // Eve не может грантить (не владелец)
+        executor.setThreadLocalUser("eve");
+        assert_error("RBAC: Eve грантит DDL", "GRANT DDL ON alice_db TO eve;", "Permission denied");
+
+        // Теперь Bob может DDL
+        executor.setThreadLocalUser("bob");
+        executor.setThreadLocalContext("alice_db");
+        assert_success("RBAC: Bob DDL после гранта (CREATE TABLE)", "CREATE TABLE bob_table (id INT PRIMARY KEY, data TEXT);");
+        assert_success("RBAC: Bob DDL после гранта (DROP TABLE)", "DROP TABLE bob_table;");
+
+        // ═══ 7. Admin → полный доступ всегда ═══
+        executor.setThreadLocalUser("admin");
+        executor.setThreadLocalContext("alice_db");
+        assert_success("RBAC: Admin DDL в alice_db", "CREATE TABLE admin_test (id INT PRIMARY KEY);");
+        assert_success("RBAC: Admin DROP TABLE", "DROP TABLE admin_test;");
+        assert_success("RBAC: Admin может удалить БД", "DROP DATABASE alice_db;");
+
+        // ═══ 8. Неавторизованный пользователь ═══
+        executor.setThreadLocalUser("");
+        assert_error("RBAC: Нет авторизации → CREATE DB", "CREATE DATABASE ghost;", "Not authenticated");
+        assert_error("RBAC: Нет авторизации → DDL", "CREATE TABLE x (id INT);", "Not authenticated");
+
+        // ═══ 9. CREATE USER → только admin ═══
+        executor.setThreadLocalUser("admin");
+        assert_success("RBAC: Admin CREATE USER", "CREATE USER charlie PASSWORD 'c123';");
+
+        executor.setThreadLocalUser("alice");
+        assert_error("RBAC: Alice CREATE USER", "CREATE USER nobody PASSWORD 'x';", "Only admin");
+
+        // ═══ 10. Legacy commands → deprecation ═══
+        executor.setThreadLocalUser("admin");
+        assert_error("RBAC: CREATE ROLE deprecated", "CREATE ROLE reader;", "deprecated");
+        assert_error("RBAC: GRANT ROLE deprecated", "GRANT ROLE reader TO alice;", "deprecated");
     }
 
     void test_wal_undo_transactions() {
@@ -1226,84 +1335,83 @@ private:
         executor.setThreadLocalContext("system");
         executor.setThreadLocalUser("admin");
 
-        // 1. Подготовка данных (выполняется последовательно)
+        // 1. Подготовка данных (от имени admin)
         assert_success("MT: Создание БД", "CREATE DATABASE mt_db;");
         assert_success("MT: Выбор БД", "USE mt_db;");
-        assert_success("MT: Настройка контекста админа", "SET USER admin PASSWORD 'admin';");
-        
         assert_success("MT: Создание таблицы", "CREATE TABLE mt_table (id INT PRIMARY KEY, val TEXT);");
         assert_success("MT: Вставка", "INSERT INTO mt_table VALUES (1, 'init');");
-        
-        // Создаем Alice (Читатель)
-        assert_success("MT: Юзер Alice", "CREATE USER alice PASSWORD '123';");
-        assert_success("MT: Роль Reader", "CREATE ROLE mt_reader;");
-        assert_success("MT: Грант SELECT", "GRANT SELECT ON mt_table TO mt_reader;");
-        assert_success("MT: Назначение mt_reader", "GRANT ROLE mt_reader TO alice;");
 
-        // Создаем Bob (Писатель)
-        assert_success("MT: Юзер Bob", "CREATE USER bob PASSWORD '123';");
-        assert_success("MT: Роль Writer", "CREATE ROLE mt_writer;");
-        assert_success("MT: Грант INSERT", "GRANT INSERT ON mt_table TO mt_writer;");
-        assert_success("MT: Назначение mt_writer", "GRANT ROLE mt_writer TO bob;");
+        // Регистрируем пользователей для тестов
+        executor.execute("REGISTER mt_alice PASSWORD 'a123';");
+        executor.execute("REGISTER mt_bob PASSWORD 'b123';");
 
-        // 2. Многопоточный стресс-тест
-        std::cout << "  [TEST] Запуск конкурентных потоков (Стресс-тест RBAC)... -> ";
+        // 2. Многопоточный стресс-тест: Модель владения
+        // admin — владелец mt_db (он создал её)
+        // mt_alice — DML only (не владелец, нет DDL-гранта)
+        // mt_bob — DML only (не владелец, нет DDL-гранта)
+        std::cout << "  [TEST] Запуск конкурентных потоков (Стресс-тест RBAC Ownership)... -> ";
         
-        const int NUM_THREADS = 20; // 20 одновременных подключений
-        const int ITERS = 50;       // По 50 запросов от каждого
+        const int NUM_THREADS = 20;
+        const int ITERS = 50;
         
         std::vector<std::thread> threads;
-        std::atomic<int> success_reads{0};
-        std::atomic<int> failed_writes{0};
-        std::atomic<int> success_writes{0};
+        std::atomic<int> success_reads{0};       // Успешные SELECT (все юзеры)
+        std::atomic<int> success_writes{0};      // Успешные INSERT (все юзеры — DML)
+        std::atomic<int> failed_ddl{0};          // Отбитые DDL от не-владельцев
         std::atomic<bool> test_failed{false};
 
-        // Имитируем мьютекс из server.cpp для защиты самого B-дерева
+        // Имитируем мьютекс из server.cpp для защиты B-дерева
         std::shared_mutex server_rw_mutex; 
 
         for (int i = 0; i < NUM_THREADS; ++i) {
             threads.emplace_back([&, i]() {
                 try {
-                    // Половина потоков — это Alice (читатели), половина — Bob (писатели)
-                    bool is_alice = (i % 2 == 0);
-                    std::string user = is_alice ? "alice" : "bob";
+                    // Раскладка потоков:
+                    // i % 3 == 0 → mt_alice (читатель + писатель DML)
+                    // i % 3 == 1 → mt_bob (писатель DML + попытки DDL)
+                    // i % 3 == 2 → admin (владелец, полный доступ)
+                    std::string user;
+                    if (i % 3 == 0) user = "mt_alice";
+                    else if (i % 3 == 1) user = "mt_bob";
+                    else user = "admin";
                     
                     for (int j = 0; j < ITERS; ++j) {
-                        // ИМИТАЦИЯ HTTP-СЕССИИ: Устанавливаем контекст строго для текущего потока
                         executor.setThreadLocalContext("mt_db");
                         executor.setThreadLocalUser(user);
 
-                        if (is_alice) {
-                            // Блок чтения
-                            {
-                                std::shared_lock<std::shared_mutex> lock(server_rw_mutex);
-                                json res = executor.execute("SELECT * FROM mt_table;");
-                                if (res.value("success", false)) success_reads++;
-                                else test_failed = true;
-                            }
+                        // DML SELECT — должен работать для всех
+                        {
+                            std::shared_lock<std::shared_mutex> lock(server_rw_mutex);
+                            json res = executor.execute("SELECT * FROM mt_table;");
+                            if (res.value("success", false)) success_reads++;
+                            else test_failed = true;
+                        }
 
-                            // Блок записи
-                            {
-                                std::unique_lock<std::shared_mutex> wlock(server_rw_mutex);
-                                json res_w = executor.execute("INSERT INTO mt_table VALUES (99, 'hack');");
-                                
-                                if (!res_w.value("success", false)) {
-                                    std::string msg = res_w.value("message", "");
-                                    if (msg.find("Permission denied") != std::string::npos) {
-                                        failed_writes++; 
-                                    } else test_failed = true; 
-                                } else test_failed = true; 
-                            }
-                        } else {
-                            // Bob пытается писать
-                            int id = i * 1000 + j; 
-                            std::string sql = "INSERT INTO mt_table VALUES (" + std::to_string(id) + ", 'bob_data');";
-                            
-                            {
-                                std::unique_lock<std::shared_mutex> lock(server_rw_mutex);
-                                json res = executor.execute(sql);
-                                if (res.value("success", false)) success_writes++;
-                                else test_failed = true;
+                        // DML INSERT — должен работать для всех
+                        {
+                            int id = i * 1000 + j + 10000;
+                            std::string sql = "INSERT INTO mt_table VALUES (" + std::to_string(id) + ", 'data_" + user + "');";
+                            std::unique_lock<std::shared_mutex> lock(server_rw_mutex);
+                            json res = executor.execute(sql);
+                            if (res.value("success", false)) success_writes++;
+                            else test_failed = true;
+                        }
+
+                        // DDL попытка (CREATE TABLE) — только admin (владелец) может
+                        if (user != "admin") {
+                            std::string tbl = "ddl_test_" + std::to_string(i) + "_" + std::to_string(j);
+                            std::unique_lock<std::shared_mutex> lock(server_rw_mutex);
+                            json res = executor.execute("CREATE TABLE " + tbl + " (id INT PRIMARY KEY);");
+                            if (!res.value("success", false)) {
+                                std::string msg = res.value("message", "");
+                                if (msg.find("Permission denied") != std::string::npos) {
+                                    failed_ddl++;
+                                } else {
+                                    test_failed = true;
+                                }
+                            } else {
+                                // Не-владелец смог сделать DDL — ошибка безопасности!
+                                test_failed = true;
                             }
                         }
                     }
@@ -1313,7 +1421,6 @@ private:
             });
         }
 
-        // Ждем завершения всех потоков
         for (auto& t : threads) {
             t.join();
         }
@@ -1324,9 +1431,9 @@ private:
             exit(1);
         } else {
             std::cout << "\033[32mOK\033[0m\n";
-            std::cout << "    Успешных конкурентных чтений (Alice): " << success_reads.load() << "\n";
-            std::cout << "    Отбитых попыток взлома (Alice): " << failed_writes.load() << "\n";
-            std::cout << "    Успешных конкурентных записей (Bob): " << success_writes.load() << "\n";
+            std::cout << "    Успешных конкурентных чтений: " << success_reads.load() << "\n";
+            std::cout << "    Успешных конкурентных записей (DML): " << success_writes.load() << "\n";
+            std::cout << "    Отбитых DDL попыток от не-владельцев: " << failed_ddl.load() << "\n";
         }
         
         // 4. Уборка

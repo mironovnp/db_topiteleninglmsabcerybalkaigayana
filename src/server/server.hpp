@@ -30,6 +30,8 @@ private:
     std::unordered_map<std::string, SessionContext> sessions_;
     std::atomic<unsigned long long> next_session_id_{1};
 
+    nlohmann::json attach_session_context(const std::string& session_id, nlohmann::json result);
+
     void* svr_ptr_ = nullptr; // Using void* to avoid including httplib.h in header
 };
 

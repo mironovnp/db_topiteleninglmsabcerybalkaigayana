@@ -1,0 +1,234 @@
+=== Подготовка тестового окружения ===
+
+>>> ФАЗА 1: DDL и Базовые ошибки
+  [OK] Запрос без базы данных (Expected error caught)
+  [OK] SHOW TABLES без базы (Expected error caught)
+  [OK] Создание БД test_db
+  [OK] Использование БД
+  [OK] Создание таблицы users
+  [OK] Создание таблицы orders
+  [OK] Несуществующая колонка (Expected error caught)
+
+>>> ФАЗА 2: Базовый DML (Insert, Update, Delete)
+  [OK] Вставка в users (1)
+  [OK] Вставка в users (2)
+  [OK] Вставка в users (3)
+  [OK] Проверка вставки
+  [OK] Update возраста Bob
+  [OK] Проверка Update
+  [OK] Delete Charlie
+  [OK] Проверка Delete
+
+>>> ФАЗА 3: SELECT, Выражения и Сортировка
+  [OK] Выражения в SELECT
+  [OK] Псевдонимы (AS)
+  [OK] Сложный WHERE (AND/OR)
+  [OK] ORDER BY DESC
+  [OK] LIMIT и OFFSET
+
+>>> ФАЗА 4: JOIN-ы (INNER, LEFT, RIGHT, FULL, CROSS)
+  [OK] INNER JOIN
+  [OK] LEFT JOIN
+  [OK] RIGHT JOIN
+  [OK] CROSS JOIN
+  [OK] FULL JOIN
+
+>>> ФАЗА 5: Группировка и Агрегаты
+  [OK] Агрегаты без группировки
+  [OK] GROUP BY с агрегатами
+  [OK] HAVING фильтрация
+
+>>> ФАЗА 6: Подзапросы (IN, EXISTS, Correlated)
+  [OK] Подзапрос IN
+  [OK] Подзапрос EXISTS
+  [OK] Фильтрация по значению
+
+>>> ФАЗА 7: Псевдонимы (Aliases)
+  [OK] Алиасы таблиц в JOIN
+  [OK] Алиасы столбцов (AS)
+  [OK] Алиасы без AS
+  [OK] Смешанные алиасы
+
+>>> ФАЗА 8: Индексы и ALTER TABLE
+  [OK] Создание индекса на users.name
+  [OK] Поиск по индексу
+  [OK] ALTER TABLE ADD COLUMN
+  [OK] Проверка новой колонки
+  [OK] ALTER TABLE DROP COLUMN
+  [OK] Проверка удаления колонки (Expected error caught)
+
+>>> ФАЗА 9: Ограничения (NOT NULL, UNIQUE, PK)
+  [OK] Создание таблицы с ограничениями
+  [OK] Корректная вставка
+  [OK] Ошибка NOT NULL (name) (Expected error caught)
+  [OK] Ошибка PRIMARY KEY (дубликат id) (Expected error caught)
+  [OK] Ошибка UNIQUE (дубликат email) (Expected error caught)
+  [OK] Ошибка UNIQUE (дубликат в списке VALUES) (Expected error caught)
+  [OK] Проверка, что ошибочные данные не вставились
+
+>>> ФАЗА 10: Продвинутые функции (DISTINCT, IS NULL, FK)
+  [OK] DISTINCT по возрасту
+  [OK] IS NULL поиск
+  [OK] IS NOT NULL поиск
+  [OK] Создание таблицы с FK
+  [OK] FK вставка (существующий родитель)
+  [OK] FK ошибка (несуществующий родитель) (Expected error caught)
+
+>>> ФАЗА 11: Каскады и сложная агрегация
+  [OK] COUNT(DISTINCT age)
+  [OK] Проверка каскадного удаления
+  [OK] Другие комментарии остались
+  [OK] RESTRICT блокировка удаления (Expected error caught)
+  [OK] Проверка каскадного обновления
+
+>>> ФАЗА 12: Поиск и фильтрация (LIKE, BETWEEN)
+  [OK] LIKE поиск (% в конце)
+  [OK] LIKE поиск (% в начале)
+  [OK] LIKE поиск (_ символ)
+  [OK] NOT LIKE
+  [OK] BETWEEN для чисел
+  [OK] NOT BETWEEN
+
+>>> ФАЗА 13: Продвинутые подзапросы
+  [OK] Скалярный подзапрос в WHERE
+  [OK] Подзапрос в списке SELECT
+  [OK] Подзапрос в FROM (Derived Table)
+
+>>> ФАЗА 14: Автоматизация и оптимизация индексов
+  [OK] Проверка AUTOINCREMENT
+  [OK] Проверка DEFAULT
+  [OK] Index Range (>)
+  [OK] Index Range (BETWEEN)
+  [OK] Index Range (<=)
+  [OK] Index Sort (ASC)
+  [OK] Index Sort (DESC)
+
+>>> ФАЗА 15: Обработка ошибок и краевых случаев
+  [OK] SELECT из несуществующей таблицы (Expected error caught)
+  [OK] INSERT в несуществующую таблицу (Expected error caught)
+  [OK] UPDATE несуществующей таблицы (Expected error caught)
+  [OK] DELETE из несуществующей таблицы (Expected error caught)
+  [OK] DROP TABLE без IF EXISTS (Expected error caught)
+  [OK] DROP TABLE с IF EXISTS
+  [OK] DROP DATABASE без IF EXISTS (Expected error caught)
+  [OK] DROP DATABASE с IF EXISTS
+  [OK] Создание дубликата таблицы (Expected error caught)
+  [OK] Создание дубликата БД (Expected error caught)
+  [OK] INSERT: неизвестная колонка (Expected error caught)
+  [OK] UPDATE: неизвестная колонка в SET (Expected error caught)
+  [OK] UPDATE: неизвестная колонка в WHERE (Expected error caught)
+  [OK] DELETE: неизвестная колонка в WHERE (Expected error caught)
+  [OK] DELETE из пустой таблицы
+  [OK] UPDATE в пустой таблице
+  [OK] Массовый UPDATE (2 строки)
+  [OK] Массовый DELETE (все)
+  [OK] Сравнение FLOAT
+  [OK] Поиск по BOOL
+
+>>> ФАЗА 16: Команды SHOW
+  [OK] SHOW DATABASES содержит test_db
+  [OK] SHOW TABLES содержит users и orders
+  [OK] SHOW COLUMNS FROM users
+  [OK] SHOW INDEX FROM users
+  [OK] SHOW CREATE TABLE users корректен
+  [OK] SHOW COLUMNS для призрака (Expected error caught)
+  [OK] SHOW INDEX для призрака (Expected error caught)
+  [OK] SHOW CREATE TABLE для призрака (Expected error caught)
+
+>>> ФАЗА 17: Удаление БД
+  [OK] Удаление БД
+  [OK] Проверка удаления БД (Expected error caught)
+
+>>> ФАЗА 18: WAL Recovery
+  [OK] WAL recovery применяет PAGE_IMAGE
+
+>>> ФАЗА 19: Logical WAL Recovery (Row-level)
+  [OK] Logical WAL recovery (UPSERT/DELETE + Index) успешно
+
+>>> ФАЗА 19.5: Recovery Undo (Crash during transaction)
+  [OK] Recovery Undo успешно откатил незавершенную транзакцию
+
+>>> ФАЗА 20: Типизированное хранение и NULL
+  [OK] Legacy Row Migration (v1 -> v2) успешна
+
+>>> ФАЗА 21: Типизированные ключи B+-дерева (wire, legacy, compare)
+  [OK] BTree wire roundtrip (clustered INT)
+  [OK] BTree wire roundtrip (secondary TEXT+INT)
+  [OK] compare_btree_keys: INT ascending
+  [OK] compare_btree_keys: same indexed value, PK tie-break
+  [OK] compare_btree_keys_nav: prefix vs composite (equal for navigation)
+  [OK] Legacy clustered key decode (lexical INT)
+  [OK] Legacy secondary key decode (col\0pk)
+  [OK] btree_key_parts_from_bytes rejects trailing garbage
+  [OK] compare_cell_values: NULL sorts before non-NULL
+
+>>> ФАЗА 22: LOAD CSV
+
+>>> ФАЗА 23: Многострочные запросы и Алиасы агрегатов
+
+>>> ФАЗА 24: WAL Undo и транзакции
+  [OK] TXN: ROLLBACK
+  [OK] TXN: BEGIN для commit
+  [OK] TXN: COMMIT
+
+>>> ФАЗА 25: Проверка RBAC
+  [OK] RBAC: Создание базы
+  [OK] RBAC: Выбор базы
+  [OK] RBAC: Настройка контекста админа
+  [OK] RBAC: Создание таблицы
+  [OK] RBAC: Вставка базовых данных
+  [OK] RBAC: Создание пользователей
+  [OK] RBAC: Создание пользователей
+  [OK] RBAC: Создание пользователей
+  [OK] RBAC: Создание ролей
+  [OK] RBAC: Создание ролей
+  [OK] RBAC: Права на чтение
+  [OK] RBAC: Права на запись
+  [OK] RBAC: Права на обновление
+  [OK] RBAC: Назначение ролей
+  [OK] RBAC: Назначение ролей
+  [OK] RBAC: Назначение ролей
+  [OK] RBAC: Неверный юзер (Expected error caught)
+  [OK] RBAC: Неверный пароль (Expected error caught)
+  [OK] RBAC: Авторизация Alice
+  [OK] RBAC: Alice читает
+  [OK] RBAC: Alice пытается писать (Expected error caught)
+  [OK] RBAC: Alice пытается удалять (Expected error caught)
+  [OK] RBAC: Alice пытается создать таблицу (Expected error caught)
+  [OK] RBAC: Авторизация Bob
+  [OK] RBAC: Bob пишет
+  [OK] RBAC: Bob обновляет
+  [OK] RBAC: Bob читает изменения
+  [OK] RBAC: Bob пытается удалить таблицу (Expected error caught)
+  [OK] RBAC: Авторизация Eve
+  [OK] RBAC: Eve пытается читать (Expected error caught)
+  [OK] RBAC: Eve пытается писать (Expected error caught)
+  [OK] RBAC: Eve атакует sys_users (Expected error caught)
+  [OK] RBAC: Eve атакует sys_grants (Expected error caught)
+  [OK] RBAC: Авторизация Admin
+  [OK] RBAC: Админ удаляет базу
+
+>>> ФАЗА 26: Многопоточность и Изоляция контекста (RBAC)
+  [OK] MT: Создание БД
+  [OK] MT: Выбор БД
+  [OK] MT: Настройка контекста админа
+  [OK] MT: Создание таблицы
+  [OK] MT: Вставка
+  [OK] MT: Юзер Alice
+  [OK] MT: Роль Reader
+  [OK] MT: Грант SELECT
+  [OK] MT: Назначение mt_reader
+  [OK] MT: Юзер Bob
+  [OK] MT: Роль Writer
+  [OK] MT: Грант INSERT
+  [OK] MT: Назначение mt_writer
+  [TEST] Запуск конкурентных потоков (Стресс-тест RBAC)... -> [32mOK[0m
+    Успешных конкурентных чтений (Alice): 500
+    Отбитых попыток взлома (Alice): 500
+    Успешных конкурентных записей (Bob): 500
+  [OK] MT: Удаление БД
+
+========================================
+ИТОГО: 170/212 тестов пройдено.
+ЕСТЬ ОШИБКИ! Проверьте вывод выше.
+========================================

@@ -17,15 +17,16 @@ using storage_i::skip_index_source_cell;
 using storage_i::tree_cell_lex;
 using storage_i::wal_encode_btree_key;
 
-static void rewriteMeta(BufferPool& pool, WALManager* wal_mgr, const TableSchema& schema,
-                        PageId root_id) {
+static void rewriteMeta(BufferPool& pool, Storage* storage, const std::string& abs_path, const TableSchema& schema,
+                         PageId root_id) {
     Page* meta = pool.fetchPage(0);
-    std::string payload = Storage::serializeSchemaPublic(schema);
+    std::string payload = Storage::serializeSchema(schema);
     memcpy(&payload[0], &root_id, 4);
     memcpy(meta->data + 16, payload.data(), payload.size());
     meta->setNumRecords(static_cast<uint32_t>(payload.size()));
+    if (storage) storage->walLogPageImage(abs_path, 0, *meta);
     pool.unpinPage(0, true);
-    if (wal_mgr) wal_mgr->flushTo(wal_mgr->getNextLSN() - 1);
+    if (storage) storage->walFlushDurably();
 }
 
 bool Storage::createIndex(const std::string& db_name, const std::string& table_name,
@@ -76,6 +77,7 @@ bool Storage::createIndex(const std::string& db_name, const std::string& table_n
 
     memcpy(meta->data + 16, &root_id, 4);
     meta->setNumRecords(4);
+    walLogPageImage(ip.string(), meta_id, *meta);
     pool.unpinPage(meta_id, true);
     if (wal_mgr_) wal_mgr_->flushTo(wal_mgr_->getNextLSN() - 1);
     maybeCheckpoint();
@@ -87,7 +89,7 @@ bool Storage::createIndex(const std::string& db_name, const std::string& table_n
     PageId troot;
     memcpy(&troot, tmeta->data + 16, 4);
     tpool.unpinPage(0, false);
-    rewriteMeta(tpool, wal_mgr_.get(), schema, troot);
+    rewriteMeta(tpool, this, tp.string(), schema, troot);
 
     return true;
 }
@@ -121,7 +123,7 @@ bool Storage::dropIndex(const std::string& db_name, const std::string& table_nam
     PageId troot;
     memcpy(&troot, tmeta->data + 16, 4);
     tpool.unpinPage(0, false);
-    rewriteMeta(tpool, wal_mgr_.get(), schema, troot);
+    rewriteMeta(tpool, this, tp.string(), schema, troot);
 
     return true;
 }

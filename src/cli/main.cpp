@@ -104,193 +104,17 @@ static bool isSqlStart(const std::string& first_word) {
            first_word == "USE" || first_word == "ALTER" || first_word == "GRANT" ||
            first_word == "REVOKE" || first_word == "SET" || first_word == "SHOW" ||
            first_word == "LOAD" || first_word == "BEGIN" || first_word == "COMMIT" ||
-           first_word == "ROLLBACK";
+           first_word == "ROLLBACK" || first_word == "REGISTER" || first_word == "LOGIN";
 }
 
-static std::string buildSchemaContext(db::DBClient& client, std::string& error) {
-    auto tables = client.executeQuery("SHOW TABLES;");
-    if (!tables.success) {
-        error = "Не удалось получить схему БД: " + tables.message;
-        return {};
-    }
-    if (tables.rows.empty()) {
-        error = "Отсутствует информация о таблицах: в текущей базе нет таблиц.";
-        return {};
-    }
-
-    std::ostringstream schema;
-    for (const auto& row : tables.rows) {
-        if (row.empty()) continue;
-        const std::string table = row[0];
-        auto cols = client.executeQuery("SHOW COLUMNS FROM " + table + ";");
-        if (!cols.success) {
-            error = "Не удалось получить схему таблицы '" + table + "': " + cols.message;
-            return {};
-        }
-
-        schema << "TABLE " << table << " (";
-        for (size_t i = 0; i < cols.rows.size(); ++i) {
-            const auto& c = cols.rows[i];
-            if (c.size() < 2) continue;
-            if (i > 0) schema << ", ";
-            schema << c[0] << " " << c[1];
-            if (c.size() > 2 && c[2] == "NO") schema << " NOT NULL";
-            if (c.size() > 3 && c[3] == "PRI") schema << " PRIMARY KEY";
-            else if (c.size() > 3 && c[3] == "UNI") schema << " UNIQUE";
-        }
-        schema << ")\n";
-    }
-    return schema.str();
-}
-
-static std::string extractJsonObject(const std::string& text) {
-    size_t begin = text.find('{');
-    size_t end = text.rfind('}');
-    if (begin == std::string::npos || end == std::string::npos || begin > end)
-        return {};
-    return text.substr(begin, end - begin + 1);
-}
-
-static std::string readApiKeyFromFile(const std::string& path) {
-    std::ifstream in(path);
-    if (!in) return {};
-    std::string key;
-    std::getline(in, key);
-    return trim(key);
-}
-
-static bool isPlaceholderApiKey(const std::string& key) {
-    return key.empty() || key == "put-your-mistral-api-key-here" ||
-           key.find("PASTE_") != std::string::npos ||
-           key.find("YOUR_") != std::string::npos;
-}
-
-static void ensureMistralApiKeyFile(const std::string& path) {
-    std::ifstream existing(path);
-    if (existing.good()) return;
-
-    std::ofstream out(path);
-    if (!out) return;
-    out << "put-your-mistral-api-key-here\n";
-}
-
-static std::string loadMistralApiKey() {
-    if (const char* env_key = std::getenv("MISTRAL_API_KEY")) {
-        std::string key = trim(env_key);
-        if (!isPlaceholderApiKey(key)) return key;
-    }
-
-    if (const char* env_file = std::getenv("MISTRAL_API_KEY_FILE")) {
-        std::string key = readApiKeyFromFile(env_file);
-        if (!isPlaceholderApiKey(key)) return key;
-    }
-
-    constexpr const char* canonical_key_file = "mistral_api_key";
-    std::string key = readApiKeyFromFile(canonical_key_file);
-    if (!isPlaceholderApiKey(key)) return key;
-
-    // Backward compatibility with earlier local names. If a real key is found,
-    // migrate it into the new canonical file name without printing it.
-    for (const char* legacy_path : {".mistral_api_key", ".mistral_api_key.example"}) {
-        key = readApiKeyFromFile(legacy_path);
-        if (!isPlaceholderApiKey(key)) {
-            std::ofstream out(canonical_key_file);
-            if (out) out << key << "\n";
-            return key;
-        }
-    }
-
-    ensureMistralApiKeyFile(canonical_key_file);
-    return {};
-}
-
-static bool generateSqlWithMistral(const std::string& ru_request,
-                                   const std::string& schema_context,
-                                   std::string& sql,
-                                   std::string& message) {
-    std::string api_key = loadMistralApiKey();
-    if (api_key.empty()) {
-        message = "API ключ Mistral не задан. Установите MISTRAL_API_KEY, MISTRAL_API_KEY_FILE "
-                  "или заполните локальный файл mistral_api_key.";
-        return false;
-    }
-    std::string model = "mistral-small-latest";
-    if (const char* env_model = std::getenv("MISTRAL_MODEL")) {
-        if (*env_model) model = env_model;
-    }
-
-    nlohmann::json body;
-    body["model"] = model;
-    body["temperature"] = 0.0;
-    body["messages"] = nlohmann::json::array({
-        {
-            {"role", "system"},
-            {"content",
-             "Ты переводишь точные русскоязычные запросы пользователя в SQL для учебной СУБД. "
-             "Используй только переданную схему. Не выдумывай таблицы, колонки, значения и условия. "
-             "Если для корректного SQL не хватает таблицы, колонки, условия, периода, значения или другой "
-             "обязательной информации, верни JSON: {\"success\":false,\"message\":\"Отсутствует информация о ...\"}. "
-             "Если информации достаточно, верни только JSON: {\"success\":true,\"sql\":\"...\"}. "
-             "SQL должен быть одним запросом без markdown и без пояснений."}
-        },
-        {
-            {"role", "user"},
-            {"content", "Схема базы данных:\n" + schema_context + "\nЗадача на русском:\n" + ru_request}
-        }
-    });
-
-    httplib::SSLClient cli("api.mistral.ai", 443);
-    cli.set_connection_timeout(10);
-    cli.set_read_timeout(60);
-
-    httplib::Headers headers = {
-        {"Authorization", "Bearer " + api_key},
-        {"Content-Type", "application/json"}
-    };
-    auto res = cli.Post("/v1/chat/completions", headers, body.dump(), "application/json");
-    if (!res) {
-        message = "Не удалось подключиться к Mistral API.";
-        return false;
-    }
-    if (res->status < 200 || res->status >= 300) {
-        message = "Mistral API вернул HTTP " + std::to_string(res->status) + ": " + res->body;
-        return false;
-    }
-
-    try {
-        auto response = nlohmann::json::parse(res->body);
-        std::string content = response["choices"][0]["message"]["content"].get<std::string>();
-        auto parsed = nlohmann::json::parse(extractJsonObject(content));
-        if (!parsed.value("success", false)) {
-            message = parsed.value("message", "Отсутствует информация о задаче.");
-            return false;
-        }
-        sql = trim(parsed.value("sql", ""));
-        if (sql.empty()) {
-            message = "Mistral API вернул пустой SQL.";
-            return false;
-        }
-        return true;
-    } catch (const std::exception& e) {
-        message = std::string("Не удалось разобрать ответ Mistral API: ") + e.what();
-        return false;
-    }
-}
-
-static bool handleText2Sql(db::DBClient& client, const std::string& request) {
-    std::string schema_error;
-    std::string schema = buildSchemaContext(client, schema_error);
-    if (schema.empty()) {
-        std::cout << "\033[31m[TEXT2SQL]\033[0m " << schema_error << "\n\n";
+static bool handleText2Sql(db::DBClient& client, const std::string& request, std::string& prompt_db, std::string& prompt_user) {
+    auto ai_res = client.executeText2Sql(request);
+    if (!ai_res.success) {
+        std::cout << "\033[31m[TEXT2SQL]\033[0m " << ai_res.message << "\n\n";
         return true;
     }
 
-    std::string sql;
-    std::string msg;
-    if (!generateSqlWithMistral(request, schema, sql, msg)) {
-        std::cout << "\033[31m[TEXT2SQL]\033[0m " << msg << "\n\n";
-        return true;
-    }
+    std::string sql = ai_res.message;
 
     std::cout << "\033[36m[TEXT2SQL]\033[0m " << sql << "\n";
     auto result = client.executeQuery(sql);
@@ -298,6 +122,16 @@ static bool handleText2Sql(db::DBClient& client, const std::string& request) {
         std::cout << "\033[31m[ERROR]\033[0m " << result.message << "\n\n";
         return true;
     }
+
+    if (!result.current_db.empty()) {
+        prompt_db = "(" + result.current_db + ")";
+    } else {
+        prompt_db = "(none)";
+    }
+    if (!result.current_user.empty()) {
+        prompt_user = result.current_user;
+    }
+
     if (!result.columns.empty()) {
         printTable(result.columns, result.rows);
     } else if (!result.message.empty()) {
@@ -336,9 +170,46 @@ int main(int argc, char* argv[]) {
 
     std::string line;
     std::string query;
-
-    std::string prompt_user = "admin";
+    std::string prompt_user = "";
     std::string prompt_db = "(none)";
+
+    // ═══ AUTH FLOW ═══
+    while (prompt_user.empty()) {
+        std::cout << "\033[1;33mLogin or Register? (l/r):\033[0m ";
+        if (!std::getline(std::cin, line)) return 0;
+        line = trim(line);
+        if (line == "exit" || line == "quit") return 0;
+
+        bool is_login = (line == "l" || line == "L" || line == "login");
+        bool is_register = (line == "r" || line == "R" || line == "register");
+        if (!is_login && !is_register) {
+            std::cout << "\033[31mPlease enter 'l' for login or 'r' for register.\033[0m\n";
+            continue;
+        }
+
+        std::string username, password;
+        std::cout << "Username: ";
+        if (!std::getline(std::cin, username)) return 0;
+        username = trim(username);
+        if (username.empty()) { std::cout << "\033[31mUsername cannot be empty.\033[0m\n"; continue; }
+
+        std::cout << "Password: ";
+        if (!std::getline(std::cin, password)) return 0;
+        password = trim(password);
+        if (password.empty()) { std::cout << "\033[31mPassword cannot be empty.\033[0m\n"; continue; }
+
+        std::string sql = is_login 
+            ? "LOGIN " + username + " PASSWORD '" + password + "';"
+            : "REGISTER " + username + " PASSWORD '" + password + "';";
+
+        auto result = client.executeQuery(sql);
+        if (result.success) {
+            prompt_user = result.current_user.empty() ? username : result.current_user;
+            std::cout << "\033[32m[OK]\033[0m " << result.message << "\n\n";
+        } else {
+            std::cout << "\033[31m[ERROR]\033[0m " << result.message << "\n\n";
+        }
+    }
 
     while (true) {
         std::string sout = "\033[1;36m" + prompt_user + "@" + prompt_db + "\033[0m> ";
@@ -359,7 +230,7 @@ int main(int argc, char* argv[]) {
 
         if (query.empty() && (startsWith(line, "\\ai ") || startsWith(line, "\\text2sql "))) {
             std::string request = startsWith(line, "\\ai ") ? line.substr(4) : line.substr(10);
-            handleText2Sql(client, trim(request));
+            handleText2Sql(client, trim(request), prompt_db, prompt_user);
             continue;
         }
 
@@ -369,7 +240,7 @@ int main(int argc, char* argv[]) {
 
         if (!first_word.empty()) {
             if (!isSqlStart(first_word)) {
-                handleText2Sql(client, query);
+                handleText2Sql(client, query, prompt_db, prompt_user);
                 query.clear();
                 continue;
             }
@@ -398,17 +269,17 @@ int main(int argc, char* argv[]) {
 
         if (!result.columns.empty()) {
             printTable(result.columns, result.rows);
-        } else if (result.type == "modify" || result.success) {
-            std::string msg = result.message;
-            if (msg.find("Using database '") == 0) {
-                size_t start = 16;
-                size_t end = msg.find("'", start);
-                if (end != std::string::npos) {
-                    prompt_db = "(" + msg.substr(start, end - start) + ")";
-                }
-            } else if (msg.find("Context switched to user: ") == 0) {
-                prompt_user = msg.substr(26);
+        } else if (result.success) {
+            if (!result.current_db.empty()) {
+                prompt_db = "(" + result.current_db + ")";
+            } else {
+                prompt_db = "(none)";
             }
+            if (!result.current_user.empty()) {
+                prompt_user = result.current_user;
+            }
+
+            std::string msg = result.message;
             if (!msg.empty() && result.type != "select") {
                 std::cout << "\033[32m[OK]\033[0m " << msg;
             }

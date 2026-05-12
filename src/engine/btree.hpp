@@ -29,7 +29,7 @@ struct BTreeBulkKeySpec {
 
 class BPlusTree {
 public:
-    BPlusTree(BufferPool& pool, PageId root_page_id, const TableSchema* row_schema, uint8_t key_arity);
+    BPlusTree(BufferPool& pool, PageId& root_page_id, const TableSchema* row_schema, uint8_t key_arity);
 
     bool               insert(const BTreeKey& key, const Row& row);
     bool               upsert(const BTreeKey& key, const Row& row);
@@ -51,7 +51,7 @@ public:
 
 private:
     BufferPool&          pool_;
-    PageId               root_;
+    PageId&              root_;
     const TableSchema*   row_schema_;
     uint8_t              key_arity_;
 

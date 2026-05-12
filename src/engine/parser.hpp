@@ -25,6 +25,7 @@ enum class TokenType {
     KW_INDEX, KW_IF, KW_DISTINCT, KW_IS, KW_LIKE, KW_BETWEEN, KW_AUTOINCREMENT, KW_SHOW,
     KW_USER, KW_ROLE, KW_GRANT, KW_REVOKE, KW_TO, KW_PASSWORD, KW_ALL, KW_PRIVILEGES,
     KW_BEGIN, KW_COMMIT, KW_ROLLBACK,
+    KW_REGISTER, KW_LOGIN, KW_DDL,
     IDENTIFIER, STRING_LITERAL, NUMBER_LITERAL, BOOL_LITERAL,
     OP_EQ, OP_NEQ, OP_LT, OP_GT, OP_LTE, OP_GTE,
     OP_PLUS, OP_MINUS, OP_DIV, // OP_STAR is handled by STAR
@@ -333,6 +334,24 @@ public:
     std::string role_name;
 };
 
+class RegisterStatement : public Statement {
+public:
+    std::string username;
+    std::string password;
+};
+
+class LoginStatement : public Statement {
+public:
+    std::string username;
+    std::string password;
+};
+
+class GrantDdlStatement : public Statement {
+public:
+    std::string db_name;
+    std::string username;
+};
+
 class BeginStatement : public Statement {};
 class CommitStatement : public Statement {};
 class RollbackStatement : public Statement {};
@@ -386,6 +405,8 @@ private:
     std::unique_ptr<SetUserStatement> parseSetUser();
     std::unique_ptr<CreateRoleStatement> parseCreateRole();
     std::unique_ptr<Statement> parseGrant();
+    std::unique_ptr<RegisterStatement> parseRegister();
+    std::unique_ptr<LoginStatement> parseLogin();
 
     QualifiedCol parseQualifiedCol();
     std::string parseIdentifier();

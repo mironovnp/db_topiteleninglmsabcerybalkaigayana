@@ -14,7 +14,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <errno.h>
-#include <sys/uio.h>
+#include <unordered_set>
 #include <unordered_map>
 #endif
 
@@ -217,7 +217,7 @@ void WALManager::openFile() {
 }
 
 LSN WALManager::appendRecord(LogRecord& record) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     
     record.lsn = next_lsn_++;
     std::string bytes = record.serialize();
@@ -228,7 +228,7 @@ LSN WALManager::appendRecord(LogRecord& record) {
 }
 
 void WALManager::flushTo(LSN lsn) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     
     if (lsn <= flushed_lsn_) return;
     
@@ -262,7 +262,7 @@ void WALManager::flushTo(LSN lsn) {
 
 void WALManager::recover(Storage* storage) {
 #ifndef _WIN32
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
 
     if (log_fd_ < 0) return;
 
@@ -276,6 +276,7 @@ void WALManager::recover(Storage* storage) {
     }
 
     LSN last_lsn = 0;
+    std::unordered_set<TxnId> active_txns;
 
     // Keep data fds open per file for speed.
     std::unordered_map<std::string, int> data_fds;
@@ -328,6 +329,9 @@ void WALManager::recover(Storage* storage) {
         last_lsn = lsn;
 
         LogRecordType type = static_cast<LogRecordType>(type_u8);
+        if (type == LogRecordType::BEGIN_TXN) active_txns.insert(txn_id);
+        else if (type == LogRecordType::COMMIT_TXN || type == LogRecordType::ABORT_TXN) active_txns.erase(txn_id);
+
         if (payload_size == 0) continue;
 
         if (type == LogRecordType::ROW_UPSERT || type == LogRecordType::ROW_DELETE ||
@@ -406,6 +410,78 @@ void WALManager::recover(Storage* storage) {
     // After recovery, set LSN pointers to the end of the durable log.
     next_lsn_ = last_lsn + 1;
     flushed_lsn_ = last_lsn;
+
+    if (!active_txns.empty() && storage) {
+        off_t size = ::lseek(log_fd_, 0, SEEK_END);
+        std::string data;
+        data.resize(size);
+        ::pread(log_fd_, data.data(), size, 0);
+
+        std::vector<LogRecord> records;
+        uint32_t off = 0;
+        while (off < data.size()) {
+            auto [rec, consumed] = LogRecord::deserialize(data.data() + off,
+                                                          static_cast<uint32_t>(data.size() - off));
+            if (consumed == 0) break;
+            records.push_back(std::move(rec));
+            off += consumed;
+        }
+
+        for (auto it = records.rbegin(); it != records.rend(); ++it) {
+            const LogRecord& rec = *it;
+            if (active_txns.find(rec.txn_id) == active_txns.end()) continue;
+            
+            if (rec.type == LogRecordType::BEGIN_TXN) {
+                LogRecord abort(rec.txn_id, 0, LogRecordType::ABORT_TXN, 0);
+                abort.lsn = next_lsn_++;
+                std::string bytes = abort.serialize();
+                log_buffer_.append(bytes);
+                active_txns.erase(rec.txn_id);
+                if (active_txns.empty()) break;
+                continue;
+            }
+            if (rec.type == LogRecordType::COMMIT_TXN || rec.type == LogRecordType::ABORT_TXN ||
+                rec.type == LogRecordType::CLR_ROW_UPSERT || rec.type == LogRecordType::CLR_ROW_DELETE) {
+                continue;
+            }
+            if (rec.type != LogRecordType::ROW_UPSERT && rec.type != LogRecordType::ROW_DELETE) continue;
+
+            std::string path, key, row_blob;
+            if (!LogRecord::decodeRowPayload(rec.payload, path, key, row_blob)) continue;
+
+            LogRecordType clr_type = LogRecordType::CLR_ROW_DELETE;
+            std::string clr_blob;
+            if (rec.type == LogRecordType::ROW_DELETE) {
+                if (row_blob.empty()) continue;
+                clr_type = LogRecordType::CLR_ROW_UPSERT;
+                clr_blob = row_blob;
+            }
+
+            LogRecord clr(rec.txn_id, 0, clr_type, 0, LogRecord::encodeRowPayload(path, key, clr_blob));
+            clr.lsn = next_lsn_++;
+            std::string bytes = clr.serialize();
+            log_buffer_.append(bytes);
+
+            LogRecordType replay_type = (clr_type == LogRecordType::CLR_ROW_UPSERT) ? LogRecordType::ROW_UPSERT : LogRecordType::ROW_DELETE;
+            storage->replayWalLogicalRecord(replay_type, path, key, clr_blob);
+        }
+        
+        if (!log_buffer_.empty()) {
+            const char* p = log_buffer_.data();
+            size_t left = log_buffer_.size();
+            while (left > 0) {
+                ssize_t w = ::write(log_fd_, p, left);
+                if (w > 0) {
+                    p += static_cast<size_t>(w);
+                    left -= static_cast<size_t>(w);
+                }
+            }
+            ::fdatasync(log_fd_);
+            log_buffer_.clear();
+            flushed_lsn_ = next_lsn_ - 1;
+        }
+    }
+
     ::lseek(log_fd_, 0, SEEK_END);
 #endif
 }
@@ -431,7 +507,7 @@ std::vector<LogRecord> WALManager::readAllRecords() {
 
 void WALManager::reset() {
 #ifndef _WIN32
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (log_fd_ < 0) return;
     if (::ftruncate(log_fd_, 0) != 0) {
         throw std::runtime_error("WALManager: ftruncate failed for " + log_file_path_);

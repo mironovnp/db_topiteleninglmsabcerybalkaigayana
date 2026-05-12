@@ -69,6 +69,18 @@ void Storage::walAppendRowUpsert(const std::string& abs_path, const std::string&
 void Storage::walFlushDurably() {
     if (wal_mgr_) wal_mgr_->flushTo(wal_mgr_->getNextLSN() - 1);
 }
+    
+void Storage::walLogPageImage(const std::string& abs_path, PageId page_id, const Page& pg) {
+    if (!wal_mgr_) return;
+    std::string payload;
+    uint16_t fpl = static_cast<uint16_t>(abs_path.size());
+    payload.append(reinterpret_cast<const char*>(&fpl), 2);
+    payload.append(abs_path);
+    payload.append(reinterpret_cast<const char*>(pg.data), PAGE_SIZE);
+    
+    LogRecord rec(0, 0, LogRecordType::PAGE_IMAGE, page_id, std::move(payload));
+    walAppendRecord(std::move(rec));
+}
 
 bool Storage::transactionActive() const {
     return txn_active_;
@@ -130,11 +142,9 @@ void Storage::rollbackTransaction() {
         walAppendRecord(std::move(clr));
         walFlushDurably();
 
-        closePool(path);
         replayWalLogicalRecord(clr_type == LogRecordType::CLR_ROW_UPSERT ? LogRecordType::ROW_UPSERT
                                                                          : LogRecordType::ROW_DELETE,
                                path, key, clr_blob);
-        closePool(path);
     }
 
     LogRecord abort(txn_id, current_txn_prev_lsn_, LogRecordType::ABORT_TXN, 0);
@@ -151,7 +161,7 @@ void Storage::replayWalLogicalRecord(LogRecordType type, std::string abs_path, s
                                      std::string row_blob) {
     if (!pathEndsWithDb(abs_path) && !pathEndsWithIdx(abs_path)) return;
 
-    BufferPool replayPool(abs_path, POOL_SIZE, nullptr, true);
+    BufferPool& replayPool = getPool(abs_path);
 
     if (pathEndsWithIdx(abs_path)) {
         std::filesystem::path fp(abs_path);
@@ -163,7 +173,7 @@ void Storage::replayWalLogicalRecord(LogRecordType type, std::string abs_path, s
         std::string column_name = stem.substr(dot + 1);
 
         auto tp = tablePath(db_name, table_name);
-        BufferPool schemaPool(tp.string(), POOL_SIZE, nullptr, true);
+        BufferPool& schemaPool = getPool(tp.string());
         Page* sm = schemaPool.fetchPage(0);
         uint32_t slen = sm->getNumRecords();
         TableSchema sch = deserializeSchema(sm->data + 16, slen);
@@ -319,6 +329,7 @@ void Storage::deleteClusterRowWal(const std::string& db_name, const std::string&
     PageId new_root = tree.getRootPageId();
     meta = pool.fetchPage(0);
     memcpy(meta->data + 16, &new_root, 4);
+    walLogPageImage(tpath, 0, *meta);
     pool.unpinPage(0, true);
 
     walFlushDurably();
@@ -403,6 +414,7 @@ void Storage::upsertClusterRowWal(const std::string& db_name, const std::string&
     PageId new_root = tree.getRootPageId();
     meta = pool.fetchPage(0);
     memcpy(meta->data + 16, &new_root, 4);
+    walLogPageImage(tpath, 0, *meta);
     pool.unpinPage(0, true);
 
     for (const auto& idx : schema.indexes) {
@@ -433,6 +445,7 @@ void Storage::upsertClusterRowWal(const std::string& db_name, const std::string&
         PageId nr = itree.getRootPageId();
         im = ipool.fetchPage(0);
         memcpy(im->data + 16, &nr, 4);
+        walLogPageImage(ip.string(), 0, *im);
         ipool.unpinPage(0, true);
     }
 

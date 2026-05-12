@@ -61,7 +61,7 @@ private:
 
     nlohmann::json insertValidatedRows(const std::string& table_name, const TableSchema& s,
                                        std::vector<Row> evaluated_rows);
-    void applyDefaultsAndAutoincrement(const TableSchema& s, const std::string& table_name, Row& r,
+    void applyDefaultsAndAutoincrement(const std::string& db_name, const TableSchema& s, const std::string& table_name, Row& r,
                                        std::map<int, long>& last_ids);
 
     void checkPermission(const std::string& table_name, const std::string& privilege);
@@ -71,6 +71,9 @@ private:
     nlohmann::json execSetUser(const SetUserStatement* q);
     nlohmann::json execGrantRole(const GrantRoleStatement* q);
     nlohmann::json execGrant(const GrantStatement* q);
+    nlohmann::json execRegister(const RegisterStatement* q);
+    nlohmann::json execLogin(const LoginStatement* q);
+    nlohmann::json execGrantDdl(const GrantDdlStatement* q);
     nlohmann::json execBegin();
     nlohmann::json execCommit();
     nlohmann::json execRollback();
