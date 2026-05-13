@@ -137,8 +137,9 @@ public:
     bool hasIndex(const std::string& db_name, const std::string& table_name,
                   const std::string& column_name) const;
 
-    // Public access to schema serialization (used by index helpers)
-    static std::string serializeSchemaPublic(const TableSchema& s) { return serializeSchema(s); }
+    void walFlushDurably();
+    void walLogPageImage(const std::string& abs_path, PageId page_id, const Page& pg);
+    static std::string serializeSchema(const TableSchema& s);
 
 private:
     std::filesystem::path data_dir_;
@@ -158,8 +159,6 @@ private:
                             const std::string& old_row_blob = {});
     void walAppendRowUpsert(const std::string& abs_path, const std::string& key,
                             const std::string& row_blob);
-    void walFlushDurably();
-    void walLogPageImage(const std::string& abs_path, PageId page_id, const Page& pg);
 
     void indexRemovePhysical(const std::string& db_name, const std::string& table_name,
                              const TableSchema& schema, const Row& row);
@@ -175,7 +174,6 @@ private:
                                     const std::string& col) const;
 
     // Meta page serialization
-    static std::string serializeSchema(const TableSchema& s);
     static TableSchema deserializeSchema(const char* data, uint32_t len);
 };
 

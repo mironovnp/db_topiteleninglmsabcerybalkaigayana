@@ -266,19 +266,38 @@ void WALManager::recover(Storage* storage) {
 
     if (log_fd_ < 0) return;
 
-    // Make sure we replay only durable WAL.
-    if (::fdatasync(log_fd_) != 0) {
-        throw std::runtime_error("WALManager: fdatasync failed for " + log_file_path_);
+    // 1. Read the entire durable log into memory for two-pass recovery.
+    off_t size = ::lseek(log_fd_, 0, SEEK_END);
+    if (size <= 0) {
+        next_lsn_ = 1;
+        flushed_lsn_ = 0;
+        return;
+    }
+    
+    std::string log_data;
+    log_data.resize(size);
+    if (::pread(log_fd_, log_data.data(), size, 0) != (ssize_t)size) {
+        throw std::runtime_error("WALManager: failed to read log for recovery");
     }
 
-    if (::lseek(log_fd_, 0, SEEK_SET) < 0) {
-        throw std::runtime_error("WALManager: lseek failed for " + log_file_path_);
+    std::vector<LogRecord> records;
+    uint32_t offset_p = 0;
+    while (offset_p < log_data.size()) {
+        auto [rec, consumed] = LogRecord::deserialize(log_data.data() + offset_p, 
+                                                      static_cast<uint32_t>(log_data.size() - offset_p));
+        if (consumed == 0) break;
+        records.push_back(std::move(rec));
+        offset_p += consumed;
     }
 
-    LSN last_lsn = 0;
+    if (records.empty()) {
+        next_lsn_ = 1;
+        flushed_lsn_ = 0;
+        return;
+    }
+
+    LSN last_lsn = records.back().lsn;
     std::unordered_set<TxnId> active_txns;
-
-    // Keep data fds open per file for speed.
     std::unordered_map<std::string, int> data_fds;
 
     auto getDataFd = [&](const std::string& path) -> int {
@@ -292,141 +311,74 @@ void WALManager::recover(Storage* storage) {
         return fd;
     };
 
-    auto readExact = [&](void* dst, size_t n) -> bool {
-        char* p = static_cast<char*>(dst);
-        size_t left = n;
-        while (left > 0) {
-            ssize_t rr = ::read(log_fd_, p, left);
-            if (rr <= 0) return false;
-            p += rr;
-            left -= static_cast<size_t>(rr);
-        }
-        return true;
-    };
-
-    while (true) {
-        uint32_t total_len = 0;
-        ssize_t r = ::read(log_fd_, &total_len, sizeof(total_len));
-        if (r == 0) break; // EOF
-        if (r < 0) throw std::runtime_error("WALManager: read failed (len) for " + log_file_path_);
-        if (r != static_cast<ssize_t>(sizeof(total_len))) break; // partial
-
-        // Read fixed header fields.
-        uint8_t type_u8 = 0;
-        uint32_t lsn = 0;
-        uint32_t txn_id = 0;
-        uint32_t prev_lsn = 0;
-        uint32_t page_id = 0;
-        uint32_t payload_size = 0;
-
-        if (!readExact(&type_u8, 1)) break;
-        if (!readExact(&lsn, 4)) break;
-        if (!readExact(&txn_id, 4)) break;
-        if (!readExact(&prev_lsn, 4)) break;
-        if (!readExact(&page_id, 4)) break;
-        if (!readExact(&payload_size, 4)) break;
-
-        last_lsn = lsn;
-
-        LogRecordType type = static_cast<LogRecordType>(type_u8);
-        if (type == LogRecordType::BEGIN_TXN) active_txns.insert(txn_id);
-        else if (type == LogRecordType::COMMIT_TXN || type == LogRecordType::ABORT_TXN) active_txns.erase(txn_id);
-
-        if (payload_size == 0) continue;
-
-        if (type == LogRecordType::ROW_UPSERT || type == LogRecordType::ROW_DELETE ||
-            type == LogRecordType::CLR_ROW_UPSERT || type == LogRecordType::CLR_ROW_DELETE) {
-            std::string payload;
-            payload.resize(payload_size);
-            if (!readExact(payload.data(), payload.size())) break;
-            if (storage) {
-                std::string pth, ky, blob;
-                if (LogRecord::decodeRowPayload(payload, pth, ky, blob)) {
-                    LogRecordType replay_type =
-                        (type == LogRecordType::CLR_ROW_UPSERT) ? LogRecordType::ROW_UPSERT :
-                        (type == LogRecordType::CLR_ROW_DELETE) ? LogRecordType::ROW_DELETE : type;
-                    storage->replayWalLogicalRecord(replay_type, std::move(pth), std::move(ky), std::move(blob));
-                }
-            }
-            continue;
+    // --- PASS 1: Physical Redo (PAGE_IMAGE) ---
+    // This ensures all metadata pages (Page 0) are restored first.
+    for (const auto& rec : records) {
+        if (rec.type == LogRecordType::BEGIN_TXN) {
+            active_txns.insert(rec.txn_id);
+        } else if (rec.type == LogRecordType::COMMIT_TXN || rec.type == LogRecordType::ABORT_TXN) {
+            active_txns.erase(rec.txn_id);
         }
 
-        if (type != LogRecordType::PAGE_IMAGE) {
-            if (::lseek(log_fd_, payload_size, SEEK_CUR) < 0) break;
-            continue;
-        }
-
-        std::string payload;
-        payload.resize(payload_size);
-        if (!readExact(payload.data(), payload.size())) break;
+        if (rec.type != LogRecordType::PAGE_IMAGE) continue;
 
         // Parse payload: file_path_len(2) | file_path | page_bytes(PAGE_SIZE)
-        if (payload.size() < 2) continue;
-        const char* pp = payload.data();
+        if (rec.payload.size() < 2) continue;
         uint16_t fpl = 0;
-        memcpy(&fpl, pp, 2);
-        pp += 2;
-        if (payload.size() < 2 + fpl + PAGE_SIZE) continue;
+        memcpy(&fpl, rec.payload.data(), 2);
+        if (rec.payload.size() < 2 + (size_t)fpl + PAGE_SIZE) continue;
 
-        std::string file_path(pp, fpl);
-        pp += fpl;
+        std::string file_path(rec.payload.data() + 2, fpl);
+        const char* page_data = rec.payload.data() + 2 + fpl;
 
         int fd = getDataFd(file_path);
         if (fd < 0) continue;
 
-        off_t off = static_cast<off_t>(page_id) * PAGE_SIZE;
-
-        // Idempotent redo: check on-disk pageLSN.
-        bool should_write = true;
-        Page cur{};
-        ssize_t pr = ::pread(fd, cur.data, PAGE_SIZE, off);
-        if (pr == static_cast<ssize_t>(PAGE_SIZE)) {
-            if (cur.getLSN() >= lsn) should_write = false;
+        off_t off = static_cast<off_t>(rec.page_id) * PAGE_SIZE;
+        
+        // Idempotent redo check
+        Page cur_disk_page{};
+        if (::pread(fd, cur_disk_page.data, PAGE_SIZE, off) == (ssize_t)PAGE_SIZE) {
+            if (cur_disk_page.getLSN() >= rec.lsn) continue;
         }
 
-        if (!should_write) continue;
+        Page redo_page;
+        memcpy(redo_page.data, page_data, PAGE_SIZE);
+        redo_page.setLSN(rec.lsn);
 
-        Page pg;
-        memcpy(pg.data, pp, PAGE_SIZE);
-        pg.setLSN(lsn);
-
-        off_t end = ::lseek(fd, 0, SEEK_END);
-        if (end < off + static_cast<off_t>(PAGE_SIZE)) {
-            if (::ftruncate(fd, off + static_cast<off_t>(PAGE_SIZE)) != 0) continue;
+        // Ensure file is large enough
+        struct stat st;
+        if (fstat(fd, &st) == 0 && st.st_size < off + (off_t)PAGE_SIZE) {
+            if (ftruncate(fd, off + PAGE_SIZE) != 0) {}
         }
+        ::pwrite(fd, redo_page.data, PAGE_SIZE, off);
+    }
 
-        ssize_t pw = ::pwrite(fd, pg.data, PAGE_SIZE, off);
-        if (pw != static_cast<ssize_t>(PAGE_SIZE)) {
-            continue;
+    // --- PASS 2: Logical Redo ---
+    // Now that metadata is physically present, we can safely run BTree operations.
+    if (storage) {
+        for (const auto& rec : records) {
+            if (rec.type == LogRecordType::ROW_UPSERT || rec.type == LogRecordType::ROW_DELETE ||
+                rec.type == LogRecordType::CLR_ROW_UPSERT || rec.type == LogRecordType::CLR_ROW_DELETE) {
+                
+                std::string pth, ky, blob;
+                if (LogRecord::decodeRowPayload(rec.payload, pth, ky, blob)) {
+                    LogRecordType replay_type = 
+                        (rec.type == LogRecordType::CLR_ROW_UPSERT) ? LogRecordType::ROW_UPSERT :
+                        (rec.type == LogRecordType::CLR_ROW_DELETE) ? LogRecordType::ROW_DELETE : rec.type;
+                    
+                    try {
+                        storage->replayWalLogicalRecord(replay_type, pth, ky, blob);
+                    } catch (const std::exception& e) {
+                        std::cerr << "[WAL] Logical redo failed for LSN " << rec.lsn << ": " << e.what() << "\n";
+                    }
+                }
+            }
         }
     }
 
-    // Sync all touched data files once.
-    for (auto& [_, fd] : data_fds) {
-        ::fdatasync(fd);
-        ::close(fd);
-    }
-
-    // After recovery, set LSN pointers to the end of the durable log.
-    next_lsn_ = last_lsn + 1;
-    flushed_lsn_ = last_lsn;
-
+    // --- PASS 3: Logical Undo for Uncommitted Transactions ---
     if (!active_txns.empty() && storage) {
-        off_t size = ::lseek(log_fd_, 0, SEEK_END);
-        std::string data;
-        data.resize(size);
-        ::pread(log_fd_, data.data(), size, 0);
-
-        std::vector<LogRecord> records;
-        uint32_t off = 0;
-        while (off < data.size()) {
-            auto [rec, consumed] = LogRecord::deserialize(data.data() + off,
-                                                          static_cast<uint32_t>(data.size() - off));
-            if (consumed == 0) break;
-            records.push_back(std::move(rec));
-            off += consumed;
-        }
-
         for (auto it = records.rbegin(); it != records.rend(); ++it) {
             const LogRecord& rec = *it;
             if (active_txns.find(rec.txn_id) == active_txns.end()) continue;
@@ -434,54 +386,51 @@ void WALManager::recover(Storage* storage) {
             if (rec.type == LogRecordType::BEGIN_TXN) {
                 LogRecord abort(rec.txn_id, 0, LogRecordType::ABORT_TXN, 0);
                 abort.lsn = next_lsn_++;
-                std::string bytes = abort.serialize();
-                log_buffer_.append(bytes);
+                log_buffer_.append(abort.serialize());
                 active_txns.erase(rec.txn_id);
                 if (active_txns.empty()) break;
                 continue;
             }
-            if (rec.type == LogRecordType::COMMIT_TXN || rec.type == LogRecordType::ABORT_TXN ||
-                rec.type == LogRecordType::CLR_ROW_UPSERT || rec.type == LogRecordType::CLR_ROW_DELETE) {
-                continue;
-            }
+
             if (rec.type != LogRecordType::ROW_UPSERT && rec.type != LogRecordType::ROW_DELETE) continue;
 
             std::string path, key, row_blob;
             if (!LogRecord::decodeRowPayload(rec.payload, path, key, row_blob)) continue;
 
-            LogRecordType clr_type = LogRecordType::CLR_ROW_DELETE;
-            std::string clr_blob;
-            if (rec.type == LogRecordType::ROW_DELETE) {
-                if (row_blob.empty()) continue;
-                clr_type = LogRecordType::CLR_ROW_UPSERT;
-                clr_blob = row_blob;
-            }
+            LogRecordType clr_type = (rec.type == LogRecordType::ROW_DELETE) ? LogRecordType::CLR_ROW_UPSERT : LogRecordType::CLR_ROW_DELETE;
+            std::string clr_blob = (rec.type == LogRecordType::ROW_DELETE) ? row_blob : "";
+            if (rec.type == LogRecordType::ROW_DELETE && clr_blob.empty()) continue;
 
             LogRecord clr(rec.txn_id, 0, clr_type, 0, LogRecord::encodeRowPayload(path, key, clr_blob));
             clr.lsn = next_lsn_++;
-            std::string bytes = clr.serialize();
-            log_buffer_.append(bytes);
+            log_buffer_.append(clr.serialize());
 
             LogRecordType replay_type = (clr_type == LogRecordType::CLR_ROW_UPSERT) ? LogRecordType::ROW_UPSERT : LogRecordType::ROW_DELETE;
-            storage->replayWalLogicalRecord(replay_type, path, key, clr_blob);
-        }
-        
-        if (!log_buffer_.empty()) {
-            const char* p = log_buffer_.data();
-            size_t left = log_buffer_.size();
-            while (left > 0) {
-                ssize_t w = ::write(log_fd_, p, left);
-                if (w > 0) {
-                    p += static_cast<size_t>(w);
-                    left -= static_cast<size_t>(w);
-                }
-            }
-            ::fdatasync(log_fd_);
-            log_buffer_.clear();
-            flushed_lsn_ = next_lsn_ - 1;
+            try {
+                storage->replayWalLogicalRecord(replay_type, path, key, clr_blob);
+            } catch (...) {}
         }
     }
 
+    for (auto& [_, fd] : data_fds) {
+        ::fdatasync(fd);
+        ::close(fd);
+    }
+
+    if (!log_buffer_.empty()) {
+        const char* p = log_buffer_.data();
+        size_t left = log_buffer_.size();
+        while (left > 0) {
+            ssize_t w = ::write(log_fd_, p, left);
+            if (w <= 0) break;
+            p += w; left -= w;
+        }
+        ::fdatasync(log_fd_);
+        log_buffer_.clear();
+    }
+
+    next_lsn_ = last_lsn + 1;
+    flushed_lsn_ = last_lsn;
     ::lseek(log_fd_, 0, SEEK_END);
 #endif
 }

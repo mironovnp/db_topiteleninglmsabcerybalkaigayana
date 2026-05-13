@@ -1,3 +1,4 @@
+#define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "server/server.hpp"
 #include <httplib.h>
 #include <nlohmann/json.hpp>
@@ -148,58 +149,59 @@ void Server::start() {
                 return;
             }
 
-            // 2. Call Gemini
-            std::string api_key = "AIzaSyCiBT7cfpt4gtD0Ki_UJloqGU773JB_urQ";
+            // 2. Call Mistral AI
+            std::string api_key = "80xhJlVbyKu8x5GXOCOmRskh2cLtfYtX";
 
-            httplib::SSLClient cli("generativelanguage.googleapis.com", 443);
-            cli.set_connection_timeout(30);
-            cli.set_read_timeout(120);
+            httplib::SSLClient cli("api.mistral.ai");
+            cli.set_connection_timeout(10); // Increase timeout
+            cli.set_read_timeout(20);
+            cli.enable_server_certificate_verification(true);
 
-            json gemini_body;
-            gemini_body["contents"] = json::array({{
-                {"parts", json::array({{
-                    {"text", 
-                        "Ты — эксперт SQL для базы данных databasetopit. Переведи запрос пользователя в SQL. "
-                        "Используй только предоставленную схему. Возвращай строго JSON: {\"success\":true, \"sql\":\"...\"} или {\"success\":false, \"message\":\"...\"}. "
-                        "Не добавляй markdown или текст вне JSON.\n"
-                        "Схема:\n" + schema + "\nЗапрос:\n" + request
-                    }
-                }})}
-            }});
-            gemini_body["generationConfig"]["temperature"] = 0.0;
-            gemini_body["generationConfig"]["responseMimeType"] = "application/json";
+            json mistral_body;
+            mistral_body["model"] = "mistral-small-latest";
+            mistral_body["messages"] = json::array({
+                {{"role", "user"}, {"content", 
+                    "Ты — эксперт SQL для базы данных databasetopit. Переведи запрос пользователя в SQL. "
+                    "Используй только предоставленную схему. Возвращай строго JSON: {\"success\":true, \"sql\":\"...\"} или {\"success\":false, \"message\":\"...\"}. "
+                    "Не добавляй markdown или текст вне JSON.\n"
+                    "Схема:\n" + schema + "\nЗапрос:\n" + request
+                }}
+            });
+            mistral_body["response_format"] = {{"type", "json_object"}};
+            mistral_body["temperature"] = 0.0;
 
-            auto gemini_res = cli.Post("/v1beta/models/gemini-1.5-flash:generateContent?key=" + api_key, 
-                                      gemini_body.dump(), "application/json");
+            httplib::Headers headers = {
+                {"Authorization", "Bearer " + api_key}
+            };
+
+            auto mistral_res = cli.Post("/v1/chat/completions", headers, mistral_body.dump(), "application/json");
             
-            if (!gemini_res) {
-                res.set_content(json({{"success", false}, {"message", "Failed to connect to Gemini API"}}).dump(), "application/json");
+            if (!mistral_res) {
+                res.set_content(json({{"success", false}, {"message", "Failed to connect to Mistral API"}}).dump(), "application/json");
                 return;
             }
 
-            if (gemini_res->status != 200) {
+            if (mistral_res->status != 200) {
                 try {
-                    auto err_json = json::parse(gemini_res->body);
+                    auto err_json = json::parse(mistral_res->body);
                     if (err_json.contains("error")) {
-                        res.set_content(json({{"success", false}, {"message", "Gemini API error: " + err_json["error"].value("message", "unknown")}}).dump(), "application/json");
+                        res.set_content(json({{"success", false}, {"message", "Mistral API error: " + err_json["error"].value("message", "unknown")}}).dump(), "application/json");
                         return;
                     }
                 } catch (...) {}
-                res.set_content(json({{"success", false}, {"message", "Gemini API returned status " + std::to_string(gemini_res->status)}}).dump(), "application/json");
+                res.set_content(json({{"success", false}, {"message", "Mistral API returned status " + std::to_string(mistral_res->status)}}).dump(), "application/json");
                 return;
             }
 
-            auto gemini_json = json::parse(gemini_res->body);
-            if (!gemini_json.contains("candidates") || gemini_json["candidates"].empty()) {
-                std::string extra;
-                if (gemini_json.contains("promptFeedback")) extra = " (Prompt blocked)";
-                res.set_content(json({{"success", false}, {"message", "Gemini returned no candidates" + extra}}).dump(), "application/json");
+            auto mistral_json = json::parse(mistral_res->body);
+            if (!mistral_json.contains("choices") || mistral_json["choices"].empty()) {
+                res.set_content(json({{"success", false}, {"message", "Mistral returned no choices"}}).dump(), "application/json");
                 return;
             }
             
-            std::string content = gemini_json["candidates"][0]["content"]["parts"][0]["text"].get<std::string>();
+            std::string content = mistral_json["choices"][0]["message"]["content"].get<std::string>();
             
-            // Clean up Gemini output (sometimes it wraps in markdown)
+            // Clean up Mistral output (just in case, although response_format is used)
             size_t start = content.find('{');
             size_t end = content.rfind('}');
             if (start != std::string::npos && end != std::string::npos && start < end) {

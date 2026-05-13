@@ -8,15 +8,15 @@ install_deps() {
     if [[ "$OSTYPE" == "linux-gnu"* ]]; then
         if command -v apt-get &>/dev/null; then
             sudo apt-get update -qq
-            sudo apt-get install -y -qq cmake g++ make git
+            sudo apt-get install -y -qq cmake g++ make git libssl-dev
         elif command -v dnf &>/dev/null; then
-            sudo dnf install -y cmake gcc-c++ make git
+            sudo dnf install -y cmake gcc-c++ make git openssl-devel
         elif command -v pacman &>/dev/null; then
-            sudo pacman -Sy --noconfirm cmake gcc make git
+            sudo pacman -Sy --noconfirm cmake gcc make git openssl
         fi
     elif [[ "$OSTYPE" == "darwin"* ]]; then
         if command -v brew &>/dev/null; then
-            brew install cmake git
+            brew install cmake git openssl
         fi
     fi
 }

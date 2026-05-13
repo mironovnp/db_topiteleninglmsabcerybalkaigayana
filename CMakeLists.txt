@@ -50,8 +50,9 @@ add_executable(dbserver
     src/server/main.cpp
     src/server/server.cpp
 )
-target_link_libraries(dbserver PRIVATE dbengine httplib::httplib)
+target_link_libraries(dbserver PRIVATE dbengine httplib::httplib OpenSSL::SSL OpenSSL::Crypto)
 target_include_directories(dbserver PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_compile_definitions(dbserver PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
 
 # ── Client library (static) ──
 add_library(dbclient STATIC
