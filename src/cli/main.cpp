@@ -104,7 +104,8 @@ static bool isSqlStart(const std::string& first_word) {
            first_word == "USE" || first_word == "ALTER" || first_word == "GRANT" ||
            first_word == "REVOKE" || first_word == "SET" || first_word == "SHOW" ||
            first_word == "LOAD" || first_word == "BEGIN" || first_word == "COMMIT" ||
-           first_word == "ROLLBACK" || first_word == "REGISTER" || first_word == "LOGIN";
+           first_word == "ROLLBACK" || first_word == "REGISTER" || first_word == "LOGIN" ||
+           first_word == "LOGOUT";
 }
 
 static bool handleText2Sql(db::DBClient& client, const std::string& request, std::string& prompt_db, std::string& prompt_user) {
@@ -173,45 +174,46 @@ int main(int argc, char* argv[]) {
     std::string prompt_user = "";
     std::string prompt_db = "(none)";
 
-    // ═══ AUTH FLOW ═══
-    while (prompt_user.empty()) {
-        std::cout << "\033[1;33mLogin or Register? (l/r):\033[0m ";
-        if (!std::getline(std::cin, line)) return 0;
-        line = trim(line);
-        if (line == "exit" || line == "quit") return 0;
-
-        bool is_login = (line == "l" || line == "L" || line == "login");
-        bool is_register = (line == "r" || line == "R" || line == "register");
-        if (!is_login && !is_register) {
-            std::cout << "\033[31mPlease enter 'l' for login or 'r' for register.\033[0m\n";
-            continue;
-        }
-
-        std::string username, password;
-        std::cout << "Username: ";
-        if (!std::getline(std::cin, username)) return 0;
-        username = trim(username);
-        if (username.empty()) { std::cout << "\033[31mUsername cannot be empty.\033[0m\n"; continue; }
-
-        std::cout << "Password: ";
-        if (!std::getline(std::cin, password)) return 0;
-        password = trim(password);
-        if (password.empty()) { std::cout << "\033[31mPassword cannot be empty.\033[0m\n"; continue; }
-
-        std::string sql = is_login 
-            ? "LOGIN " + username + " PASSWORD '" + password + "';"
-            : "REGISTER " + username + " PASSWORD '" + password + "';";
-
-        auto result = client.executeQuery(sql);
-        if (result.success) {
-            prompt_user = result.current_user.empty() ? username : result.current_user;
-            std::cout << "\033[32m[OK]\033[0m " << result.message << "\n\n";
-        } else {
-            std::cout << "\033[31m[ERROR]\033[0m " << result.message << "\n\n";
-        }
-    }
-
     while (true) {
+        // ═══ AUTH FLOW ═══
+        while (prompt_user.empty()) {
+            std::cout << "\033[1;33mLogin or Register? (l/r):\033[0m ";
+            if (!std::getline(std::cin, line)) return 0;
+            line = trim(line);
+            if (line == "exit" || line == "quit") return 0;
+
+            bool is_login = (line == "l" || line == "L" || line == "login");
+            bool is_register = (line == "r" || line == "R" || line == "register");
+            if (!is_login && !is_register) {
+                std::cout << "\033[31mPlease enter 'l' for login or 'r' for register.\033[0m\n";
+                continue;
+            }
+
+            std::string username, password;
+            std::cout << "Username: ";
+            if (!std::getline(std::cin, username)) return 0;
+            username = trim(username);
+            if (username.empty()) { std::cout << "\033[31mUsername cannot be empty.\033[0m\n"; continue; }
+
+            std::cout << "Password: ";
+            if (!std::getline(std::cin, password)) return 0;
+            password = trim(password);
+            if (password.empty()) { std::cout << "\033[31mPassword cannot be empty.\033[0m\n"; continue; }
+
+            std::string sql = is_login 
+                ? "LOGIN " + username + " PASSWORD '" + password + "';"
+                : "REGISTER " + username + " PASSWORD '" + password + "';";
+
+            auto result = client.executeQuery(sql);
+            if (result.success) {
+                prompt_user = result.current_user.empty() ? username : result.current_user;
+                std::cout << "\033[32m[OK]\033[0m " << result.message << "\n\n";
+            } else {
+                std::cout << "\033[31m[ERROR]\033[0m " << result.message << "\n\n";
+            }
+        }
+
+        while (!prompt_user.empty()) {
         std::string sout = "\033[1;36m" + prompt_user + "@" + prompt_db + "\033[0m> ";
         std::cout << (query.empty() ? sout : "  -> ");
 
@@ -283,8 +285,13 @@ int main(int argc, char* argv[]) {
             if (!msg.empty() && result.type != "select") {
                 std::cout << "\033[32m[OK]\033[0m " << msg;
             }
+            if (result.type == "logout") {
+                prompt_user.clear();
+                prompt_db = "(none)";
+            }
         }
         std::cout << "\n";
+    }
     }
 
     std::cout << "Goool nakonec-to ti vishel!\n";

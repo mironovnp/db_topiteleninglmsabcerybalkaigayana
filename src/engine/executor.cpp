@@ -460,6 +460,7 @@ json Executor::execute(const std::string& sql) {
 
         if (auto q = dynamic_cast<RegisterStatement*>(query.get())) return execRegister(q);
         if (auto q = dynamic_cast<LoginStatement*>(query.get())) return execLogin(q);
+        if (auto q = dynamic_cast<LogoutStatement*>(query.get())) return execLogout();
 
         if (auto q = dynamic_cast<CreateDatabaseStatement*>(query.get())) return execCreateDB(q);
         if (auto q = dynamic_cast<DropDatabaseStatement*>(query.get())) return execDropDB(q);
@@ -483,6 +484,7 @@ json Executor::execute(const std::string& sql) {
         if (auto q = dynamic_cast<GrantRoleStatement*>(query.get())) return execGrantRole(q);
         if (auto q = dynamic_cast<GrantStatement*>(query.get())) return execGrant(q);
         if (auto q = dynamic_cast<GrantDdlStatement*>(query.get())) return execGrantDdl(q);
+        if (auto q = dynamic_cast<RevokeDdlStatement*>(query.get())) return execRevokeDdl(q);
         return err("Unknown query type");
     } catch (const std::exception& e) { return err(e.what()); }
 }
@@ -522,6 +524,9 @@ json Executor::execCreateDB(const CreateDatabaseStatement* q) {
 }
 
 json Executor::execUse(const UseDatabaseStatement* q) {
+    if (q->database_name == "system" && current_user_ != "admin") {
+        return err("Permission denied: only admin can use the 'system' database.");
+    }
     if (storage_.databaseExists(q->database_name)) {
         current_db_ = q->database_name;
         json res = ok("Using database '" + q->database_name + "'.");
@@ -786,7 +791,10 @@ json Executor::execShow(const ShowStatement* q) {
 json Executor::execShowDatabases() {
     auto dbs = storage_.listDatabases();
     json rows = json::array();
-    for (const auto& db : dbs) rows.push_back({db});
+    for (const auto& db : dbs) {
+        if (db == "system" && current_user_ != "admin") continue;
+        rows.push_back({db});
+    }
     return {{"success", true}, {"columns", {"Database"}}, {"rows", rows}};
 }
 
@@ -1847,6 +1855,46 @@ json Executor::execGrantDdl(const GrantDdlStatement* q) {
     storage_.indexInsertRow("system", "sys_ddl_grants", sch, row);
 
     return ok("Granted DDL on '" + q->db_name + "' to user '" + q->username + "'.");
+}
+
+json Executor::execRevokeDdl(const RevokeDdlStatement* q) {
+    if (current_user_.empty()) return err("Not authenticated.");
+    
+    if (!storage_.databaseExists(q->db_name)) return err("Database '" + q->db_name + "' does not exist.");
+
+    std::string owner = storage_.getDbOwner(q->db_name);
+    if (current_user_ != "admin" && owner != current_user_) {
+        return err("Permission denied: only owner '" + owner + "' can revoke DDL on '" + q->db_name + "'.");
+    }
+
+    if (!storage_.hasDbDdlGrant(q->db_name, q->username)) {
+        return err("User '" + q->username + "' does not have DDL rights on '" + q->db_name + "'.");
+    }
+
+    auto grants = storage_.readAllRows("system", "sys_ddl_grants");
+    std::vector<Row> to_delete;
+    for (const auto& row : grants) {
+        if (row.size() >= 3 && row[1].has_value() && row[2].has_value()) {
+            if (cell_to_where_string(row[1]) == q->db_name && cell_to_where_string(row[2]) == q->username) {
+                to_delete.push_back(row);
+                break;
+            }
+        }
+    }
+
+    int total_deleted = 0;
+    if (!to_delete.empty()) {
+        performDelete("system", "sys_ddl_grants", to_delete, total_deleted);
+    }
+    return ok("Revoked DDL on '" + q->db_name + "' from user '" + q->username + "'.");
+}
+
+json Executor::execLogout() {
+    current_user_ = "";
+    current_db_ = "";
+    json res = ok("Logged out successfully.");
+    res["type"] = "logout";
+    return res;
 }
 
 } // namespace db

@@ -74,6 +74,8 @@ private:
     nlohmann::json execRegister(const RegisterStatement* q);
     nlohmann::json execLogin(const LoginStatement* q);
     nlohmann::json execGrantDdl(const GrantDdlStatement* q);
+    nlohmann::json execRevokeDdl(const RevokeDdlStatement* q);
+    nlohmann::json execLogout();
     nlohmann::json execBegin();
     nlohmann::json execCommit();
     nlohmann::json execRollback();

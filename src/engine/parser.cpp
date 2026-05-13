@@ -45,7 +45,7 @@ static const std::unordered_map<std::string, TokenType> KEYWORDS = {
     {"BEGIN",TokenType::KW_BEGIN}, {"COMMIT",TokenType::KW_COMMIT},
     {"ROLLBACK",TokenType::KW_ROLLBACK},
     {"REGISTER",TokenType::KW_REGISTER}, {"LOGIN",TokenType::KW_LOGIN},
-    {"DDL",TokenType::KW_DDL},
+    {"DDL",TokenType::KW_DDL}, {"LOGOUT",TokenType::KW_LOGOUT},
 };
 
 using enum TokenType;
@@ -221,6 +221,8 @@ std::unique_ptr<Statement> Parser::parse() {
     }
     if (check(KW_REGISTER)) { consume(); return parseRegister(); }
     if (check(KW_LOGIN)) { consume(); return parseLogin(); }
+    if (check(KW_LOGOUT)) { consume(); return parseLogout(); }
+    if (check(KW_REVOKE)) { consume(); return parseRevoke(); }
     throw std::runtime_error("Unknown query, got: " + cur().value);
 }
 
@@ -509,6 +511,24 @@ std::unique_ptr<LoginStatement> Parser::parseLogin() {
     q->password = expect(STRING_LITERAL).value;
     match(SEMICOLON);
     return q;
+}
+
+std::unique_ptr<LogoutStatement> Parser::parseLogout() {
+    match(SEMICOLON);
+    return std::make_unique<LogoutStatement>();
+}
+
+std::unique_ptr<Statement> Parser::parseRevoke() {
+    if (match(KW_DDL)) {
+        auto q = std::make_unique<RevokeDdlStatement>();
+        expect(KW_ON);
+        q->db_name = expect(IDENTIFIER).value;
+        expect(KW_FROM);
+        q->username = expect(IDENTIFIER).value;
+        match(SEMICOLON);
+        return q;
+    }
+    throw std::runtime_error("Expected DDL after REVOKE");
 }
 
 // ── Helper: parse [table.]column ────────────────────────────────────────
