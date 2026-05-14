@@ -1,10 +1,10 @@
-#define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "server/server.hpp"
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 #include <iostream>
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 
 namespace db {
 
@@ -149,8 +149,17 @@ void Server::start() {
                 return;
             }
 
-            // 2. Call Mistral AI
-            std::string api_key = "80xhJlVbyKu8x5GXOCOmRskh2cLtfYtX";
+            // 2. Call Mistral AI (key must not live in the binary; set MISTRAL_API_KEY in the environment)
+            const char* key_env = std::getenv("MISTRAL_API_KEY");
+            std::string api_key = key_env ? std::string(key_env) : std::string();
+            if (api_key.empty()) {
+                res.set_content(
+                    json({{"success", false},
+                          {"message", "text2sql is disabled: set the MISTRAL_API_KEY environment variable."}})
+                        .dump(),
+                    "application/json");
+                return;
+            }
 
             httplib::SSLClient cli("api.mistral.ai");
             cli.set_connection_timeout(10); // Increase timeout

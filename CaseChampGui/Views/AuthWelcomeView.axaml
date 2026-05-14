@@ -1,0 +1,94 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:CaseChampGui.ViewModels"
+             x:Class="CaseChampGui.Views.AuthWelcomeView"
+             HorizontalAlignment="Stretch"
+             x:DataType="vm:AuthViewModel">
+
+    <!-- Center card and tabs together so tab buttons stay above the form, not at window edges -->
+    <StackPanel HorizontalAlignment="Center"
+                MaxWidth="480"
+                Margin="12,8,12,8"
+                Spacing="16">
+
+        <Grid ColumnDefinitions="*,10,*">
+            <Button Grid.Column="0"
+                    Classes="ghost"
+                    HorizontalAlignment="Stretch"
+                    HorizontalContentAlignment="Center"
+                    MinHeight="40"
+                    Opacity="{Binding LoginTabOpacity}"
+                    Content="Вход"
+                    Command="{Binding SelectLoginCommand}" />
+            <Button Grid.Column="2"
+                    Classes="ghost"
+                    HorizontalAlignment="Stretch"
+                    HorizontalContentAlignment="Center"
+                    MinHeight="40"
+                    Opacity="{Binding RegisterTabOpacity}"
+                    Content="Регистрация"
+                    Command="{Binding SelectRegisterCommand}" />
+        </Grid>
+
+        <Border Classes="card"
+                ClipToBounds="True"
+                CornerRadius="14"
+                Padding="28"
+                HorizontalAlignment="Stretch"
+                Margin="0">
+            <StackPanel Spacing="18">
+                <StackPanel Spacing="4">
+                    <TextBlock Text="СУБД Топит_Еленинг" Classes="h1" TextWrapping="Wrap" />
+                    <TextBlock Text="lms_abce_и_Гаяна"
+                               Classes="muted"
+                               FontSize="13"
+                               FontWeight="SemiBold"
+                               TextWrapping="Wrap" />
+                    <TextBlock Text="Войдите или создайте локальную учётную запись на сервере."
+                               Classes="muted"
+                               TextWrapping="Wrap" />
+                </StackPanel>
+
+                <StackPanel Spacing="10">
+                    <TextBlock Text="Имя пользователя" Classes="subtle" />
+                    <TextBox Text="{Binding Username, Mode=TwoWay}"
+                             PlaceholderText="например, alice"
+                             MaxLength="48" />
+                </StackPanel>
+
+                <StackPanel Spacing="10">
+                    <TextBlock Text="Пароль" Classes="subtle" />
+                    <TextBox Text="{Binding Password, Mode=TwoWay}"
+                             PasswordChar="•"
+                             PlaceholderText="••••••••" />
+                </StackPanel>
+
+                <StackPanel Spacing="10" IsVisible="{Binding IsRegister}">
+                    <TextBlock Text="Повтор пароля" Classes="subtle" />
+                    <TextBox Text="{Binding ConfirmPassword, Mode=TwoWay}"
+                             PasswordChar="•"
+                             PlaceholderText="ещё раз" />
+                </StackPanel>
+
+                <CheckBox Content="Запомнить пароль на этом компьютере"
+                          IsChecked="{Binding RememberPassword, Mode=TwoWay}">
+                    <ToolTip.Tip>
+                        Пароль шифруется локально (AES-GCM) и сохраняется только при включённой галочке. Не используйте на общих ПК.</ToolTip.Tip>
+                </CheckBox>
+
+                <TextBlock Text="{Binding StatusText}"
+                           Foreground="{DynamicResource ErrorBrush}"
+                           TextWrapping="Wrap"
+                           IsVisible="{Binding HasStatus}" />
+
+                <Button Classes="accent"
+                        HorizontalAlignment="Stretch"
+                        Content="{Binding SubmitLabel}"
+                        Command="{Binding SubmitCommand}" />
+
+                <TextBlock Text="Сервер проверяет логин и пароль; права (владелец БД, DDL) назначаются в самой СУБД."
+                           Classes="muted" TextWrapping="Wrap" FontSize="11" />
+            </StackPanel>
+        </Border>
+    </StackPanel>
+</UserControl>

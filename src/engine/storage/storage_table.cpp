@@ -97,7 +97,12 @@ TableSchema Storage::getTableSchema(const std::string& db_name,
     BufferPool& pool = getPool(p.string());
 
     Page* meta = pool.fetchPage(0);
-    TableSchema s = deserializeSchema(meta->data + 16, PAGE_SIZE - 16);
+    uint32_t payload_len = meta->getNumRecords();
+    if (payload_len < 16 || payload_len > PAGE_SIZE - 16) {
+        pool.unpinPage(0, false);
+        throw std::runtime_error("Table '" + table_name + "': invalid schema length in meta page");
+    }
+    TableSchema s = deserializeSchema(meta->data + 16, payload_len);
     s.table_name = table_name;
     pool.unpinPage(0, false);
     return s;

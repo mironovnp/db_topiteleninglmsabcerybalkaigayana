@@ -1,0 +1,81 @@
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    
+    <SolidColorBrush x:Key="BackgroundBrush" Color="#050A10" />
+    <SolidColorBrush x:Key="SurfaceBrush" Color="#0D1117" />
+    <SolidColorBrush x:Key="SurfaceMutedBrush" Color="#0A0F14" />
+    <SolidColorBrush x:Key="PanelBrush" Color="#161B22" />
+    <SolidColorBrush x:Key="SidebarBrush" Color="#050A10" />
+    <SolidColorBrush x:Key="HeaderBrush" Color="#0D1117" />
+    <SolidColorBrush x:Key="BorderSoftBrush" Color="#21262D" />
+    <SolidColorBrush x:Key="BorderBrush" Color="#30363D" />
+    <SolidColorBrush x:Key="DividerBrush" Color="#21262D" />
+
+    <SolidColorBrush x:Key="AccentBrush" Color="#00E5FF" />
+    <SolidColorBrush x:Key="AccentHoverBrush" Color="#5FF0FF" />
+    <SolidColorBrush x:Key="AccentPressedBrush" Color="#00B8CC" />
+    <SolidColorBrush x:Key="AccentSoftBrush" Color="#103038" />
+    <SolidColorBrush x:Key="AccentForegroundBrush" Color="#050A10" />
+
+    <SolidColorBrush x:Key="TextBrush" Color="#F0F6FC" />
+    <SolidColorBrush x:Key="SubtleTextBrush" Color="#8B949E" />
+    <SolidColorBrush x:Key="MutedTextBrush" Color="#6E7681" />
+
+    <SolidColorBrush x:Key="SuccessBrush" Color="#3FB950" />
+    <SolidColorBrush x:Key="SuccessSoftBrush" Color="#10321A" />
+    <SolidColorBrush x:Key="ErrorBrush" Color="#FF7B72" />
+    <SolidColorBrush x:Key="ErrorSoftBrush" Color="#3D1F1F" />
+    <SolidColorBrush x:Key="WarnBrush" Color="#D29922" />
+
+    <SolidColorBrush x:Key="SidebarItemHoverBrush" Color="#161B22" />
+    <SolidColorBrush x:Key="SidebarItemActiveBrush" Color="#00E5FF" />
+    <SolidColorBrush x:Key="SidebarItemTextBrush" Color="#C9D1D9" />
+    <SolidColorBrush x:Key="SidebarItemActiveTextBrush" Color="#050A10" />
+
+    <SolidColorBrush x:Key="TabActiveBrush" Color="#0D1117" />
+    <SolidColorBrush x:Key="TabInactiveBrush" Color="#050A10" />
+    <SolidColorBrush x:Key="TabHoverBrush" Color="#161B22" />
+
+    <SolidColorBrush x:Key="ShadowBrush" Color="#C0000000" />
+    <SolidColorBrush x:Key="AdminNameBrush" Color="#00E5FF" />
+
+    <SolidColorBrush x:Key="UserBubbleBrush" Color="#161B22" />
+    <SolidColorBrush x:Key="AiBubbleBrush" Color="#0D1117" />
+
+    <SolidColorBrush x:Key="AuthGateBackgroundBrush" Color="#050A10" />
+
+    <!-- Fluent ToggleSwitch uses these keys; без них в варианте Iu5 «вкл» часто сливается (светлый трек + светлый шарик). -->
+    <SolidColorBrush x:Key="ToggleSwitchContentForeground" Color="#F0F6FC" />
+    <SolidColorBrush x:Key="ToggleSwitchContainerBackground" Color="Transparent" />
+    <SolidColorBrush x:Key="ToggleSwitchContainerBackgroundPointerOver" Color="#141920" />
+    <SolidColorBrush x:Key="ToggleSwitchContainerBackgroundPressed" Color="#0A1016" />
+
+    <SolidColorBrush x:Key="ToggleSwitchFillOff" Color="#161B22" />
+    <SolidColorBrush x:Key="ToggleSwitchStrokeOff" Color="#30363D" />
+    <SolidColorBrush x:Key="ToggleSwitchFillOffPointerOver" Color="#1C2229" />
+    <SolidColorBrush x:Key="ToggleSwitchStrokeOffPointerOver" Color="#484F58" />
+    <SolidColorBrush x:Key="ToggleSwitchFillOffPressed" Color="#12161C" />
+    <SolidColorBrush x:Key="ToggleSwitchStrokeOffPressed" Color="#21262D" />
+    <SolidColorBrush x:Key="ToggleSwitchFillOffDisabled" Color="#0A0F14" />
+    <SolidColorBrush x:Key="ToggleSwitchStrokeOffDisabled" Color="#21262D" />
+
+    <SolidColorBrush x:Key="ToggleSwitchKnobFillOff" Color="#C9D1D9" />
+    <SolidColorBrush x:Key="ToggleSwitchKnobFillOffPointerOver" Color="#F0F6FC" />
+    <SolidColorBrush x:Key="ToggleSwitchKnobFillOffPressed" Color="#8B949E" />
+    <SolidColorBrush x:Key="ToggleSwitchKnobFillOffDisabled" Color="#484F58" />
+
+    <SolidColorBrush x:Key="ToggleSwitchFillOn" Color="#103038" />
+    <SolidColorBrush x:Key="ToggleSwitchStrokeOn" Color="#00CCE0" />
+    <SolidColorBrush x:Key="ToggleSwitchFillOnPointerOver" Color="#184550" />
+    <SolidColorBrush x:Key="ToggleSwitchStrokeOnPointerOver" Color="#5FF0FF" />
+    <SolidColorBrush x:Key="ToggleSwitchFillOnPressed" Color="#0C2830" />
+    <SolidColorBrush x:Key="ToggleSwitchStrokeOnPressed" Color="#00B8CC" />
+    <SolidColorBrush x:Key="ToggleSwitchFillOnDisabled" Color="#0A1518" />
+    <SolidColorBrush x:Key="ToggleSwitchStrokeOnDisabled" Color="#21262D" />
+
+    <SolidColorBrush x:Key="ToggleSwitchKnobFillOn" Color="#F0F6FC" />
+    <SolidColorBrush x:Key="ToggleSwitchKnobFillOnPointerOver" Color="#FFFFFF" />
+    <SolidColorBrush x:Key="ToggleSwitchKnobFillOnPressed" Color="#D0D7DE" />
+    <SolidColorBrush x:Key="ToggleSwitchKnobFillOnDisabled" Color="#6E7681" />
+
+</ResourceDictionary>

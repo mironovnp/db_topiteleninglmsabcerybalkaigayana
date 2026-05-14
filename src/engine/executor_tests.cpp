@@ -1218,6 +1218,11 @@ private:
         assert_error("RBAC: Неверный пароль", "LOGIN alice PASSWORD 'wrong';", "Invalid password");
         assert_error("RBAC: Несуществующий юзер", "LOGIN ghost PASSWORD '123';", "does not exist");
 
+        assert_success("RBAC: CHANGE PASSWORD alice", "CHANGE PASSWORD 'pass_a' 'new_a';");
+        assert_auth_user("RBAC: Login alice после смены пароля", "LOGIN alice PASSWORD 'new_a';", "alice");
+        assert_success("RBAC: restore alice pwd", "CHANGE PASSWORD 'new_a' 'pass_a';");
+        assert_auth_user("RBAC: Login alice restored", "LOGIN alice PASSWORD 'pass_a';", "alice");
+
         // Совместимость: SET USER тоже работает
         assert_auth_user("RBAC: SET USER bob", "SET USER bob PASSWORD 'pass_b';", "bob");
         assert_error("RBAC: SET USER неверный пароль", "SET USER bob PASSWORD 'wrong';", "Invalid password");

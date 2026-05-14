@@ -1,0 +1,415 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:vm="using:CaseChampGui.ViewModels"
+        xmlns:views="using:CaseChampGui.Views"
+        xmlns:svc="using:CaseChampGui.Services"
+        mc:Ignorable="d"
+        x:Class="CaseChampGui.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Title="СУБД Топит_Еленинг"
+        Width="1280" Height="800"
+        MinWidth="1000" MinHeight="640"
+        WindowStartupLocation="CenterScreen"
+        Background="{DynamicResource BackgroundBrush}">
+
+    <Panel>
+        <Grid ColumnDefinitions="Auto,*"
+              IsVisible="{Binding !AuthOverlayVisible}">
+
+            
+            
+            <Border Grid.Column="0"
+                    Name="SidebarHost"
+                    Width="{Binding SidebarWidth}"
+                    Background="{DynamicResource SidebarBrush}"
+                    BorderBrush="{DynamicResource BorderSoftBrush}"
+                    BorderThickness="0,0,1,0"
+                    PointerEntered="OnSidebarPointerEntered"
+                    PointerExited="OnSidebarPointerExited"
+                    ClipToBounds="True">
+
+                <DockPanel LastChildFill="True">
+
+                    
+                    <Panel DockPanel.Dock="Top" Margin="12,16,12,16" MinHeight="60">
+                        <Image Width="60"
+                               Height="60"
+                               Source="{Binding SidebarBrandBitmap}"
+                               Stretch="Uniform"
+                               HorizontalAlignment="Center"
+                               VerticalAlignment="Center"
+                               IsVisible="{Binding !IsSidebarExpanded}" />
+                        <Grid ColumnDefinitions="60,*"
+                              VerticalAlignment="Center"
+                              IsVisible="{Binding IsSidebarExpanded}">
+                            <Image Grid.Column="0"
+                                   Width="60"
+                                   Height="60"
+                                   Source="{Binding SidebarBrandBitmap}"
+                                   Stretch="Uniform"
+                                   VerticalAlignment="Center"
+                                   HorizontalAlignment="Center" />
+                            <StackPanel Grid.Column="1"
+                                        Margin="10,0,0,0"
+                                        VerticalAlignment="Center"
+                                        Spacing="-2"
+                                        ClipToBounds="True">
+                                <TextBlock Text="СУБД Топит_Еленинг"
+                                           FontSize="14"
+                                           FontWeight="SemiBold"
+                                           TextTrimming="CharacterEllipsis"
+                                           TextWrapping="NoWrap"
+                                           Foreground="{DynamicResource TextBrush}" />
+                                <TextBlock Text="lms_abce_и_Гаяна"
+                                           FontSize="11"
+                                           TextTrimming="CharacterEllipsis"
+                                           TextWrapping="NoWrap"
+                                           Foreground="{DynamicResource MutedTextBrush}" />
+                            </StackPanel>
+                        </Grid>
+                    </Panel>
+
+                    
+                    <ListBox DockPanel.Dock="Bottom"
+                             Classes="rail"
+                             Margin="12,4,12,12"
+                             ItemsSource="{Binding BottomNavItems}"
+                             SelectedItem="{Binding SelectedNavItem, Mode=TwoWay}"
+                             Background="Transparent"
+                             BorderThickness="0">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate DataType="vm:NavItemViewModel">
+                                <Panel Height="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).NavItemHeight, FallbackValue=40}">
+                                    <TextBlock Text="{Binding Icon}"
+                                               FontSize="16"
+                                               HorizontalAlignment="Center"
+                                               VerticalAlignment="Center"
+                                               IsVisible="{Binding !$parent[Window].((vm:MainWindowViewModel)DataContext).IsSidebarExpanded}" />
+                                    <Grid ColumnDefinitions="40,*"
+                                          ClipToBounds="True"
+                                          IsVisible="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).IsSidebarExpanded}">
+                                        <TextBlock Grid.Column="0"
+                                                   Text="{Binding Icon}"
+                                                   FontSize="16"
+                                                   HorizontalAlignment="Center"
+                                                   VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="1"
+                                                   Text="{Binding Title}"
+                                                   VerticalAlignment="Center"
+                                                   FontSize="13"
+                                                   TextWrapping="NoWrap"
+                                                   Margin="6,0,0,0" />
+                                    </Grid>
+                                </Panel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+
+                    
+                    <Border DockPanel.Dock="Bottom"
+                            Margin="10,4,10,6"
+                            CornerRadius="12"
+                            Background="{DynamicResource PanelBrush}"
+                            BorderBrush="{DynamicResource BorderSoftBrush}"
+                            BorderThickness="1">
+                        <Button Background="Transparent"
+                                BorderThickness="0"
+                                Padding="6,6"
+                                HorizontalAlignment="Stretch"
+                                HorizontalContentAlignment="Stretch"
+                                Cursor="Hand">
+                            <Button.Flyout>
+                                <MenuFlyout Placement="RightEdgeAlignedTop">
+                                    <MenuItem Header="Выйти из аккаунта" Command="{Binding LogoutCommand}" />
+                                </MenuFlyout>
+                            </Button.Flyout>
+                            <Panel>
+                                <Panel HorizontalAlignment="Center"
+                                       VerticalAlignment="Center"
+                                       IsVisible="{Binding !IsSidebarExpanded}">
+                                    <Panel Width="40" Height="40">
+                                        <Ellipse Width="38" Height="38"
+                                                 Fill="{DynamicResource SurfaceMutedBrush}"
+                                                 Stroke="{DynamicResource BorderSoftBrush}"
+                                                 StrokeThickness="1"
+                                                 HorizontalAlignment="Center"
+                                                 VerticalAlignment="Center"
+                                                 IsVisible="{Binding !ShowAvatarOnPanel}" />
+                                        <Border Width="38" Height="38"
+                                                CornerRadius="19"
+                                                ClipToBounds="True"
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Center"
+                                                IsVisible="{Binding ShowAvatarOnPanel}">
+                                            <Image Width="38" Height="38"
+                                                   Source="{Binding AccountAvatarBitmap}"
+                                                   Stretch="UniformToFill" />
+                                        </Border>
+                                        <TextBlock HorizontalAlignment="Center"
+                                                   VerticalAlignment="Center"
+                                                   FontWeight="SemiBold"
+                                                   FontSize="15"
+                                                   Foreground="{DynamicResource TextBrush}"
+                                                   Text="{Binding AccountInitial}"
+                                                   IsVisible="{Binding !ShowAvatarOnPanel}" />
+                                    </Panel>
+                                </Panel>
+                                <Grid ColumnDefinitions="40,*"
+                                      Height="40"
+                                      IsVisible="{Binding IsSidebarExpanded}">
+                                    <Panel Grid.Column="0" Width="40" Height="40">
+                                        <Ellipse Width="38" Height="38"
+                                                 Fill="{DynamicResource SurfaceMutedBrush}"
+                                                 Stroke="{DynamicResource BorderSoftBrush}"
+                                                 StrokeThickness="1"
+                                                 IsVisible="{Binding !ShowAvatarOnPanel}" />
+                                        <Border Width="38" Height="38"
+                                                CornerRadius="19"
+                                                ClipToBounds="True"
+                                                IsVisible="{Binding ShowAvatarOnPanel}">
+                                            <Image Width="38" Height="38"
+                                                   Source="{Binding AccountAvatarBitmap}"
+                                                   Stretch="UniformToFill" />
+                                        </Border>
+                                        <TextBlock HorizontalAlignment="Center"
+                                                   VerticalAlignment="Center"
+                                                   FontWeight="SemiBold"
+                                                   FontSize="15"
+                                                   Foreground="{DynamicResource TextBrush}"
+                                                   Text="{Binding AccountInitial}"
+                                                   IsVisible="{Binding !ShowAvatarOnPanel}" />
+                                    </Panel>
+                                    <StackPanel Grid.Column="1"
+                                                Margin="8,0,0,0"
+                                                VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding AccountPanelLabel}"
+                                                   FontSize="13"
+                                                   FontWeight="SemiBold"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   IsVisible="{Binding IsAdminUser}"
+                                                   Foreground="{DynamicResource AdminNameBrush}" />
+                                        <TextBlock Text="{Binding AccountPanelLabel}"
+                                                   FontSize="13"
+                                                   FontWeight="SemiBold"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   IsVisible="{Binding !IsAdminUser}"
+                                                   Foreground="{DynamicResource TextBrush}" />
+                                        <TextBlock Text="меню"
+                                                   FontSize="10"
+                                                   Classes="muted" />
+                                    </StackPanel>
+                                </Grid>
+                            </Panel>
+                        </Button>
+                    </Border>
+
+                    
+                    <ListBox Classes="rail"
+                             Margin="12,4,12,4"
+                             ItemsSource="{Binding PrimaryNavItems}"
+                             SelectedItem="{Binding SelectedNavItem, Mode=TwoWay}"
+                             Background="Transparent"
+                             BorderThickness="0">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate DataType="vm:NavItemViewModel">
+                                <Panel Height="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).NavItemHeight, FallbackValue=40}">
+                                    <TextBlock Text="{Binding Icon}"
+                                               FontSize="16"
+                                               HorizontalAlignment="Center"
+                                               VerticalAlignment="Center"
+                                               IsVisible="{Binding !$parent[Window].((vm:MainWindowViewModel)DataContext).IsSidebarExpanded}" />
+                                    <Grid ColumnDefinitions="40,*"
+                                          ClipToBounds="True"
+                                          IsVisible="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).IsSidebarExpanded}">
+                                        <TextBlock Grid.Column="0"
+                                                   Text="{Binding Icon}"
+                                                   FontSize="16"
+                                                   HorizontalAlignment="Center"
+                                                   VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="1"
+                                                   Text="{Binding Title}"
+                                                   VerticalAlignment="Center"
+                                                   FontSize="13"
+                                                   TextWrapping="NoWrap"
+                                                   Margin="6,0,0,0" />
+                                    </Grid>
+                                </Panel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </DockPanel>
+            </Border>
+
+            
+            <Grid Grid.Column="1" RowDefinitions="Auto,Auto,*">
+
+                
+                <Border Grid.Row="0"
+                        Background="{DynamicResource BackgroundBrush}"
+                        BorderBrush="{DynamicResource BorderSoftBrush}"
+                        BorderThickness="0,0,0,1"
+                        Padding="{Binding SectionHeaderPadding}">
+                    <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                            <TextBlock Text="{Binding CurrentSectionTitle}"
+                                       FontSize="20"
+                                       FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextBrush}" />
+                            <TextBlock Text="{Binding CurrentSectionSubtitle}"
+                                       FontSize="12"
+                                       Foreground="{DynamicResource MutedTextBrush}" />
+                        </StackPanel>
+
+                        <Border Grid.Column="1"
+                                Classes="pill"
+                                Padding="12,6"
+                                CornerRadius="999"
+                                VerticalAlignment="Center">
+                            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                <TextBlock Text="{Binding ConnectionBadgeIcon}"
+                                           FontSize="12"
+                                           VerticalAlignment="Center"
+                                           Foreground="{DynamicResource AccentBrush}" />
+                                <TextBlock Text="{Binding ConnectionBadge}"
+                                           FontSize="12"
+                                           Foreground="{DynamicResource TextBrush}"
+                                           VerticalAlignment="Center" />
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+                </Border>
+
+                
+                <Border Grid.Row="1"
+                        Background="{DynamicResource BackgroundBrush}"
+                        BorderBrush="{DynamicResource BorderSoftBrush}"
+                        BorderThickness="0,0,0,1"
+                        Padding="32,8,28,8"
+                        IsVisible="{Binding ShowDatabaseBar}">
+                    <DockPanel LastChildFill="True">
+                        <Button DockPanel.Dock="Right"
+                                Classes="ghost"
+                                Content="↻"
+                                FontSize="13"
+                                Padding="8,3"
+                                ToolTip.Tip="Обновить список баз"
+                                Command="{Binding RefreshDatabasesCommand}" />
+
+                        <TextBlock DockPanel.Dock="Left"
+                                   Text="БАЗЫ"
+                                   FontSize="10"
+                                   FontWeight="Bold"
+                                   LetterSpacing="1.4"
+                                   Foreground="{DynamicResource MutedTextBrush}"
+                                   VerticalAlignment="Center"
+                                   Margin="0,0,16,0" />
+
+                        <Border DockPanel.Dock="Left"
+                                Width="1"
+                                Margin="0,5,16,5"
+                                Background="{DynamicResource BorderSoftBrush}" />
+
+                        <Panel>
+                            <TextBlock Text="Нет связи с сервером — переподключитесь в настройках"
+                                       Classes="muted"
+                                       VerticalAlignment="Center"
+                                       IsVisible="{Binding IsDisconnected}" />
+
+                            <TextBlock Classes="muted"
+                                       VerticalAlignment="Center"
+                                       Text="Список пуст. Выполните CREATE DATABASE имя; и нажмите ↻">
+                                <TextBlock.IsVisible>
+                                    <MultiBinding Converter="{x:Static views:AndConverter.Instance}">
+                                        <Binding Path="IsConnected" />
+                                        <Binding Path="HasDatabases" Converter="{x:Static views:NegateBoolConverter.Instance}" />
+                                    </MultiBinding>
+                                </TextBlock.IsVisible>
+                            </TextBlock>
+
+                            <ListBox Classes="dbtabs"
+                                     ItemsSource="{Binding Databases}"
+                                     SelectedItem="{Binding SelectedDatabase, Mode=TwoWay}"
+                                     IsVisible="{Binding HasDatabases}"
+                                     HorizontalAlignment="Left">
+                                <ListBox.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <StackPanel Orientation="Horizontal" />
+                                    </ItemsPanelTemplate>
+                                </ListBox.ItemsPanel>
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate DataType="vm:DatabaseTabViewModel">
+                                        <TextBlock Text="{Binding Name}" FontSize="12" VerticalAlignment="Center" />
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                        </Panel>
+                    </DockPanel>
+                </Border>
+
+                
+                <Panel Grid.Row="2" Background="{DynamicResource BackgroundBrush}">
+                    <ContentControl Classes="section" IsVisible="{Binding IsSqlVisible}">
+                        <views:SqlView DataContext="{Binding Sql}" />
+                    </ContentControl>
+                    <ContentControl Classes="section" IsVisible="{Binding IsText2SqlVisible}">
+                        <views:Text2SqlView DataContext="{Binding Text2Sql}" />
+                    </ContentControl>
+                    <ContentControl Classes="section" IsVisible="{Binding IsSettingsVisible}">
+                        <views:SettingsView DataContext="{Binding Settings}" />
+                    </ContentControl>
+                </Panel>
+            </Grid>
+        </Grid>
+
+        <Border ZIndex="49"
+                HorizontalAlignment="Stretch"
+                VerticalAlignment="Stretch"
+                Background="{DynamicResource AuthGateBackgroundBrush}"
+                IsVisible="{Binding AuthOverlayVisible}">
+            <ScrollViewer HorizontalScrollBarVisibility="Disabled"
+                          VerticalScrollBarVisibility="Auto"
+                          HorizontalAlignment="Stretch"
+                          VerticalAlignment="Stretch"
+                          HorizontalContentAlignment="Stretch"
+                          VerticalContentAlignment="Top"
+                          Padding="32,28,32,48">
+                <views:AuthWelcomeView DataContext="{Binding Auth}" />
+            </ScrollViewer>
+        </Border>
+
+        
+        <ItemsControl ZIndex="100"
+                      ItemsSource="{Binding Notifications.Items}"
+                      HorizontalAlignment="Right"
+                      VerticalAlignment="Bottom"
+                      Margin="0,0,24,24"
+                      IsHitTestVisible="True">
+            <ItemsControl.ItemTemplate>
+                <DataTemplate DataType="svc:NotificationItem">
+                    <Border Classes="notification"
+                            Classes.error="{Binding IsError}"
+                            Classes.warning="{Binding IsWarning}"
+                            Classes.info="{Binding IsInfo}">
+                        <StackPanel Spacing="4">
+                            <StackPanel Orientation="Horizontal" Spacing="10">
+                                <TextBlock Text="{Binding Icon}"
+                                           FontWeight="Bold"
+                                           Foreground="{DynamicResource AccentBrush}"
+                                           VerticalAlignment="Center" />
+                                <TextBlock Text="{Binding Title}"
+                                           FontWeight="SemiBold"
+                                           Foreground="{DynamicResource TextBrush}"
+                                           VerticalAlignment="Center" />
+                            </StackPanel>
+                            <TextBlock Text="{Binding Message}"
+                                       TextWrapping="Wrap"
+                                       Classes="subtle" />
+                        </StackPanel>
+                    </Border>
+                </DataTemplate>
+            </ItemsControl.ItemTemplate>
+        </ItemsControl>
+    </Panel>
+</Window>

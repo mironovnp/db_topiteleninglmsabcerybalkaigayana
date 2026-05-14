@@ -105,7 +105,7 @@ static bool isSqlStart(const std::string& first_word) {
            first_word == "REVOKE" || first_word == "SET" || first_word == "SHOW" ||
            first_word == "LOAD" || first_word == "BEGIN" || first_word == "COMMIT" ||
            first_word == "ROLLBACK" || first_word == "REGISTER" || first_word == "LOGIN" ||
-           first_word == "LOGOUT";
+           first_word == "LOGOUT" || first_word == "CHANGE";
 }
 
 static bool handleText2Sql(db::DBClient& client, const std::string& request, std::string& prompt_db, std::string& prompt_user) {

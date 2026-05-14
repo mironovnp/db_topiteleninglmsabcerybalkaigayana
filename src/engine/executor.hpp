@@ -73,6 +73,7 @@ private:
     nlohmann::json execGrant(const GrantStatement* q);
     nlohmann::json execRegister(const RegisterStatement* q);
     nlohmann::json execLogin(const LoginStatement* q);
+    nlohmann::json execChangePassword(const ChangePasswordStatement* q);
     nlohmann::json execGrantDdl(const GrantDdlStatement* q);
     nlohmann::json execRevokeDdl(const RevokeDdlStatement* q);
     nlohmann::json execLogout();

@@ -1,0 +1,47 @@
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    
+    <SolidColorBrush x:Key="BackgroundBrush" Color="#202124" />
+    <SolidColorBrush x:Key="SurfaceBrush" Color="#2A2C30" />
+    <SolidColorBrush x:Key="SurfaceMutedBrush" Color="#26282C" />
+    <SolidColorBrush x:Key="PanelBrush" Color="#34373D" />
+    <SolidColorBrush x:Key="SidebarBrush" Color="#1B1C1F" />
+    <SolidColorBrush x:Key="HeaderBrush" Color="#2C2E33" />
+    <SolidColorBrush x:Key="BorderSoftBrush" Color="#3A3D44" />
+    <SolidColorBrush x:Key="BorderBrush" Color="#484C55" />
+    <SolidColorBrush x:Key="DividerBrush" Color="#3D4048" />
+
+    <SolidColorBrush x:Key="AccentBrush" Color="#E2E6ED" />
+    <SolidColorBrush x:Key="AccentHoverBrush" Color="#F4F6FA" />
+    <SolidColorBrush x:Key="AccentPressedBrush" Color="#C8CED8" />
+    <SolidColorBrush x:Key="AccentSoftBrush" Color="#33363C" />
+    <SolidColorBrush x:Key="AccentForegroundBrush" Color="#1B1C1F" />
+
+    <SolidColorBrush x:Key="TextBrush" Color="#ECE7DF" />
+    <SolidColorBrush x:Key="SubtleTextBrush" Color="#B5ABA0" />
+    <SolidColorBrush x:Key="MutedTextBrush" Color="#8B8278" />
+
+    <SolidColorBrush x:Key="SuccessBrush" Color="#82B567" />
+    <SolidColorBrush x:Key="SuccessSoftBrush" Color="#2E3A24" />
+    <SolidColorBrush x:Key="ErrorBrush" Color="#E07A7A" />
+    <SolidColorBrush x:Key="ErrorSoftBrush" Color="#3D2727" />
+    <SolidColorBrush x:Key="WarnBrush" Color="#E0BC6B" />
+
+    <SolidColorBrush x:Key="SidebarItemHoverBrush" Color="#2A2C31" />
+    <SolidColorBrush x:Key="SidebarItemActiveBrush" Color="#E2E6ED" />
+    <SolidColorBrush x:Key="SidebarItemTextBrush" Color="#CFC8BE" />
+    <SolidColorBrush x:Key="SidebarItemActiveTextBrush" Color="#1B1C1F" />
+
+    <SolidColorBrush x:Key="TabActiveBrush" Color="#2A2C30" />
+    <SolidColorBrush x:Key="TabInactiveBrush" Color="#1B1C1F" />
+    <SolidColorBrush x:Key="TabHoverBrush" Color="#33363C" />
+
+    <SolidColorBrush x:Key="ShadowBrush" Color="#80000000" />
+    <SolidColorBrush x:Key="AdminNameBrush" Color="#E8C547" />
+
+    <SolidColorBrush x:Key="AuthGateBackgroundBrush" Color="#202124" />
+
+    
+    <SolidColorBrush x:Key="UserBubbleBrush" Color="#3B3D44" />
+    <SolidColorBrush x:Key="AiBubbleBrush" Color="#2A2C30" />
+</ResourceDictionary>

@@ -5,7 +5,6 @@ data/
 cli_output.txt
 server.log
 test_data/
-CaseChampGui/
 .ssh_known_hosts
 test_db_data_for_executor_tests/
 executor_tests
@@ -13,3 +12,9 @@ executor_tests
 .mistral_api_key.example
 mistral_api_key
 .env
+test_output.txt
+
+# C# / .NET build artifacts
+CaseChampGui/bin/
+CaseChampGui/obj/
+*.user

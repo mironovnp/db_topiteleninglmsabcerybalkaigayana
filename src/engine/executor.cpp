@@ -460,6 +460,7 @@ json Executor::execute(const std::string& sql) {
 
         if (auto q = dynamic_cast<RegisterStatement*>(query.get())) return execRegister(q);
         if (auto q = dynamic_cast<LoginStatement*>(query.get())) return execLogin(q);
+        if (auto q = dynamic_cast<ChangePasswordStatement*>(query.get())) return execChangePassword(q);
         if (auto q = dynamic_cast<LogoutStatement*>(query.get())) return execLogout();
 
         if (auto q = dynamic_cast<CreateDatabaseStatement*>(query.get())) return execCreateDB(q);
@@ -1822,6 +1823,29 @@ json Executor::execLogin(const LoginStatement* q) {
     json res = ok("Logged in as '" + current_user_ + "'.");
     res["current_user"] = current_user_;
     return res;
+}
+
+json Executor::execChangePassword(const ChangePasswordStatement* q) {
+    if (current_user_.empty()) return err("Not authenticated.");
+    auto users = storage_.indexLookup("system", "sys_users", "username", current_user_);
+    if (users.empty()) return err("User not found.");
+
+    Row user_row = storage_.findRow("system", "sys_users", users[0]);
+    std::string stored_pass;
+    if (user_row.size() > 2 && user_row[2].has_value()) {
+        stored_pass = cell_to_where_string(user_row[2]);
+    }
+    if (stored_pass != q->old_password) return err("Invalid current password.");
+    if (q->new_password.empty()) return err("New password cannot be empty.");
+
+    auto sch = storage_.getTableSchema("system", "sys_users");
+    Row new_row = user_row;
+    new_row[2] = coerce_string_to_cell_column(sch.columns[2], q->new_password, false);
+
+    performUpdate("system", "sys_users", sch, user_row, new_row);
+    storage_.upsertClusterRowWal("system", "sys_users", sch, &user_row, new_row);
+
+    return ok("Password updated.");
 }
 
 json Executor::execGrantDdl(const GrantDdlStatement* q) {

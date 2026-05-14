@@ -46,6 +46,7 @@ static const std::unordered_map<std::string, TokenType> KEYWORDS = {
     {"ROLLBACK",TokenType::KW_ROLLBACK},
     {"REGISTER",TokenType::KW_REGISTER}, {"LOGIN",TokenType::KW_LOGIN},
     {"DDL",TokenType::KW_DDL}, {"LOGOUT",TokenType::KW_LOGOUT},
+    {"CHANGE",TokenType::KW_CHANGE},
 };
 
 using enum TokenType;
@@ -161,7 +162,7 @@ Token Parser::expect(TokenType t) {
 bool Parser::isIdentifier(TokenType t) const {
     return t == IDENTIFIER || t == KW_COUNT || t == KW_SUM || 
            t == KW_AVG || t == KW_MIN || t == KW_MAX || t == KW_INDEX ||
-           t == KW_LOGIN || t == KW_REGISTER;
+           t == KW_LOGIN || t == KW_REGISTER || t == KW_CHANGE;
 }
 
 std::string Parser::parseIdentifier() {
@@ -221,6 +222,7 @@ std::unique_ptr<Statement> Parser::parse() {
     }
     if (check(KW_REGISTER)) { consume(); return parseRegister(); }
     if (check(KW_LOGIN)) { consume(); return parseLogin(); }
+    if (check(KW_CHANGE)) { consume(); return parseChangePassword(); }
     if (check(KW_LOGOUT)) { consume(); return parseLogout(); }
     if (check(KW_REVOKE)) { consume(); return parseRevoke(); }
     throw std::runtime_error("Unknown query, got: " + cur().value);
@@ -509,6 +511,15 @@ std::unique_ptr<LoginStatement> Parser::parseLogin() {
     q->username = expect(IDENTIFIER).value;
     expect(KW_PASSWORD);
     q->password = expect(STRING_LITERAL).value;
+    match(SEMICOLON);
+    return q;
+}
+
+std::unique_ptr<ChangePasswordStatement> Parser::parseChangePassword() {
+    expect(KW_PASSWORD);
+    auto q = std::make_unique<ChangePasswordStatement>();
+    q->old_password = expect(STRING_LITERAL).value;
+    q->new_password = expect(STRING_LITERAL).value;
     match(SEMICOLON);
     return q;
 }

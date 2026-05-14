@@ -1,0 +1,233 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="using:CaseChampGui.ViewModels"
+             mc:Ignorable="d"
+             x:Class="CaseChampGui.Views.SettingsView"
+             x:DataType="vm:SettingsViewModel">
+
+    <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Margin="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).ContentMargin, FallbackValue='28,20,28,28'}"
+                    Spacing="16"
+                    MaxWidth="780"
+                    HorizontalAlignment="Stretch">
+
+            
+            <Border Classes="card">
+                <StackPanel Spacing="14">
+                    <StackPanel Orientation="Horizontal" Spacing="10">
+                        <TextBlock Text="🎨" FontSize="18" VerticalAlignment="Center" />
+                        <TextBlock Text="Внешний вид" Classes="h2" VerticalAlignment="Center" />
+                    </StackPanel>
+
+                    <Grid ColumnDefinitions="*,260" RowDefinitions="Auto,Auto,Auto,Auto,Auto" RowSpacing="14" ColumnSpacing="20">
+                        <StackPanel Grid.Row="0" Grid.Column="0" Spacing="2">
+                            <TextBlock Text="Тема оформления" />
+                            <TextBlock Text="Выбор применяется сразу и сохраняется в настройках."
+                                       Classes="muted" />
+                        </StackPanel>
+                        <ComboBox Grid.Row="0" Grid.Column="1"
+                                  ItemsSource="{Binding AvailableThemes}"
+                                  SelectedItem="{Binding SelectedTheme, Mode=TwoWay}"
+                                  HorizontalAlignment="Stretch">
+                            <ComboBox.ItemTemplate>
+                                <DataTemplate DataType="vm:ThemeOption">
+                                    <TextBlock Text="{Binding Label}" />
+                                </DataTemplate>
+                            </ComboBox.ItemTemplate>
+                        </ComboBox>
+
+                        <StackPanel Grid.Row="1" Grid.Column="0" Spacing="2">
+                            <TextBlock Text="Размер шрифта редактора SQL" />
+                            <TextBlock Text="Применяется к окну ввода запросов." Classes="muted" />
+                        </StackPanel>
+                        <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                            <Slider Minimum="11" Maximum="22"
+                                    Value="{Binding EditorFontSize, Mode=TwoWay}"
+                                    TickFrequency="1"
+                                    IsSnapToTickEnabled="True"
+                                    Width="180" />
+                            <TextBlock Text="{Binding EditorFontSize, StringFormat='{}{0:0} pt'}"
+                                       VerticalAlignment="Center"
+                                       Classes="mono" />
+                        </StackPanel>
+
+                        <StackPanel Grid.Row="2" Grid.Column="0" Spacing="2">
+                            <TextBlock Text="Сворачивать боковое меню" />
+                            <TextBlock Text="Когда включено — меню слева превращается в узкую полоску с иконками и раскрывается при наведении мыши. Выключите, чтобы оно всегда оставалось раскрытым."
+                                       Classes="muted"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Row="2" Grid.Column="1"
+                                      IsChecked="{Binding SidebarAutoCollapse, Mode=TwoWay}"
+                                      HorizontalAlignment="Right" />
+
+                        <StackPanel Grid.Row="3" Grid.Column="0" Spacing="2">
+                            <TextBlock Text="Плавные анимации" />
+                            <TextBlock Text="Hover, fade, переходы между разделами." Classes="muted" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Row="3" Grid.Column="1"
+                                      IsChecked="{Binding AnimationsEnabled, Mode=TwoWay}"
+                                      HorizontalAlignment="Right" />
+
+                        <StackPanel Grid.Row="4" Grid.Column="0" Spacing="2">
+                            <TextBlock Text="Компактный режим" />
+                            <TextBlock Text="Уменьшает отступы боковой панели." Classes="muted" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Row="4" Grid.Column="1"
+                                      IsChecked="{Binding CompactMode, Mode=TwoWay}"
+                                      HorizontalAlignment="Right" />
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+            
+            <Border Classes="card">
+                <StackPanel Spacing="14">
+                    <StackPanel Orientation="Horizontal" Spacing="10">
+                        <TextBlock Text="🔌" FontSize="18" VerticalAlignment="Center" />
+                        <TextBlock Text="Подключение к серверу" Classes="h2" VerticalAlignment="Center" />
+                    </StackPanel>
+
+                    <Grid ColumnDefinitions="*,260" RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="14" ColumnSpacing="20">
+                        <StackPanel Grid.Row="0" Grid.Column="0" Spacing="2">
+                            <TextBlock Text="Хост dbserver" />
+                            <TextBlock Text="IP или имя машины с запущенным CaseChamp dbserver." Classes="muted" />
+                        </StackPanel>
+                        <TextBox Grid.Row="0" Grid.Column="1"
+                                 Text="{Binding Host, Mode=TwoWay}"
+                                 PlaceholderText="127.0.0.1" />
+
+                        <StackPanel Grid.Row="1" Grid.Column="0" Spacing="2">
+                            <TextBlock Text="Порт" />
+                            <TextBlock Text="HTTP-порт сервера (по умолчанию 8080)." Classes="muted" />
+                        </StackPanel>
+                        <NumericUpDown Grid.Row="1" Grid.Column="1"
+                                       Value="{Binding Port, Mode=TwoWay}"
+                                       Minimum="1"
+                                       Maximum="65535"
+                                       FormatString="0" />
+
+                        <StackPanel Grid.Row="2" Grid.Column="0" Spacing="2">
+                            <TextBlock Text="Подключаться при запуске" />
+                            <TextBlock Text="Автоматический ping сервера при старте приложения." Classes="muted" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Row="2" Grid.Column="1"
+                                      IsChecked="{Binding AutoConnect, Mode=TwoWay}"
+                                      HorizontalAlignment="Right" />
+
+                        <StackPanel Grid.Row="3" Grid.Column="0" Spacing="2">
+                            <TextBlock Text="Запускать локальный dbserver автоматически" />
+                            <TextBlock Text="Если сервер не отвечает, GUI попробует запустить build/dbserver рядом с проектом."
+                                       Classes="muted" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Row="3" Grid.Column="1"
+                                      IsChecked="{Binding AutoStartLocalServer, Mode=TwoWay}"
+                                      HorizontalAlignment="Right" />
+                    </Grid>
+
+                    <StackPanel Orientation="Horizontal" Spacing="14" Margin="0,4,0,0">
+                        <Button Classes="accent"
+                                Content="↻  Применить и переподключиться"
+                                Command="{Binding ReconnectCommand}" />
+                        <Border Classes="badge neutral" Padding="12,6">
+                            <TextBlock Text="{Binding ConnectionStatusText}"
+                                       Classes="subtle"
+                                       VerticalAlignment="Center" />
+                        </Border>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            
+            <Border Classes="card">
+                <StackPanel Spacing="14">
+                    <StackPanel Orientation="Horizontal" Spacing="10">
+                        <TextBlock Text="🧪" FontSize="18" VerticalAlignment="Center" />
+                        <TextBlock Text="Экспериментальные функции" Classes="h2" VerticalAlignment="Center" />
+                        <Border Classes="badge neutral" Padding="8,2" VerticalAlignment="Center" Margin="6,0,0,0">
+                            <TextBlock Text="beta" Classes="muted" FontSize="11" />
+                        </Border>
+                    </StackPanel>
+
+                    <Grid ColumnDefinitions="*,260" RowDefinitions="Auto" RowSpacing="14" ColumnSpacing="20">
+                        <StackPanel Grid.Row="0" Grid.Column="0" Spacing="2">
+                            <TextBlock Text="Чат-режим SQL" />
+                            <TextBlock Text="Превращает SQL-консоль в диалог: запросы и ответы-таблицы идут сверху вниз, как в чате. По умолчанию выключено."
+                                       Classes="muted" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Row="0" Grid.Column="1"
+                                      IsChecked="{Binding ChatModeEnabled, Mode=TwoWay}"
+                                      HorizontalAlignment="Right" />
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+            
+            <Border Classes="card">
+                <StackPanel Spacing="14">
+                    <StackPanel Orientation="Horizontal" Spacing="10">
+                        <TextBlock Text="👤" FontSize="18" VerticalAlignment="Center" />
+                        <TextBlock Text="Аккаунт" Classes="h2" VerticalAlignment="Center" />
+                    </StackPanel>
+
+                    <TextBlock Classes="muted" TextWrapping="Wrap"
+                               Text="Логин на сервере задаётся при входе. Поле «отображаемое имя» меняет только подпись на панели." />
+
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="Логин на сервере" Classes="subtle" />
+                        <TextBlock Text="{Binding ServerLogin}" Classes="mono" />
+                    </StackPanel>
+
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="Отображаемое имя" Classes="subtle" />
+                        <TextBox Text="{Binding AccountDisplayName, Mode=TwoWay}"
+                                 PlaceholderText="подпись на панели слева" />
+                    </StackPanel>
+
+                    <CheckBox Content="Запоминать пароль на этом компьютере (AES-GCM в файле настроек)"
+                              IsChecked="{Binding RememberPassword, Mode=TwoWay}" />
+
+                    <StackPanel Spacing="8" IsVisible="{Binding !IsAdminAccount}">
+                        <TextBlock Text="Аватар" Classes="subtle" />
+                        <Button Classes="ghost" Content="Выбрать файл…" Command="{Binding PickAvatarCommand}" />
+                        <TextBlock Text="{Binding AvatarPath}" Classes="muted" TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+
+                    <TextBlock Text="Смена пароля на сервере" Classes="h2" FontSize="15" />
+
+                    <TextBox Text="{Binding PwdOld, Mode=TwoWay}" PasswordChar="•" PlaceholderText="Текущий пароль" />
+                    <TextBox Text="{Binding PwdNew, Mode=TwoWay}" PasswordChar="•" PlaceholderText="Новый пароль" />
+                    <TextBox Text="{Binding PwdNew2, Mode=TwoWay}" PasswordChar="•" PlaceholderText="Повтор нового пароля" />
+
+                    <CheckBox Content="После смены обновить сохранённый пароль (если включено запоминание)"
+                              IsChecked="{Binding UpdateStoredPasswordAfterChange, Mode=TwoWay}" />
+
+                    <TextBlock Text="{Binding AccountMessage}"
+                               Foreground="{DynamicResource WarnBrush}"
+                               TextWrapping="Wrap"
+                               IsVisible="{Binding HasAccountMessage}" />
+
+                    <Button Classes="accent"
+                            Content="Сохранить раздел «Аккаунт»"
+                            Command="{Binding SaveAccountCommand}" />
+                </StackPanel>
+            </Border>
+
+            
+            <Border Classes="card">
+                <StackPanel Spacing="6">
+                    <StackPanel Orientation="Horizontal" Spacing="10">
+                        <TextBlock Text="ℹ" FontSize="18" VerticalAlignment="Center" />
+                        <TextBlock Text="О приложении" Classes="h2" VerticalAlignment="Center" />
+                    </StackPanel>
+                    <TextBlock Text="CaseChamp DB Studio — GUI-клиент учебной СУБД CaseChamp."
+                               Classes="subtle" />
+                    <TextBlock Text="Версия 0.1.0 · .NET 10 · Avalonia"
+                               Classes="muted" />
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>
