@@ -222,8 +222,10 @@
                         <TextBlock Text="ℹ" FontSize="18" VerticalAlignment="Center" />
                         <TextBlock Text="О приложении" Classes="h2" VerticalAlignment="Center" />
                     </StackPanel>
-                    <TextBlock Text="CaseChamp DB Studio — GUI-клиент учебной СУБД CaseChamp."
+                    <TextBlock Text="СУБД команды Топит_Еленинг — GUI-клиент учебной СУБД CaseChamp."
                                Classes="subtle" />
+                    <TextBlock Text="lms_abce_и_Гаяна"
+                               Classes="muted" />
                     <TextBlock Text="Версия 0.1.0 · .NET 10 · Avalonia"
                                Classes="muted" />
                 </StackPanel>
