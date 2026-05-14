@@ -1,5 +1,6 @@
 #include "engine/executor.hpp"
 #include "engine/cell_value.hpp"
+#include "engine/crypto.hpp"
 #include <cctype>
 #include <stdexcept>
 #include <algorithm>
@@ -416,7 +417,7 @@ void Executor::checkPermission(const std::string& table_name, const std::string&
     }
 
     // Админ имеет полный доступ
-    if (current_user_ == "admin") return;
+    if (isAdmin()) return;
 
     if (current_db_.empty()) {
         throw std::runtime_error("No database selected. Use: USE <database>;");
@@ -525,7 +526,7 @@ json Executor::execCreateDB(const CreateDatabaseStatement* q) {
 }
 
 json Executor::execUse(const UseDatabaseStatement* q) {
-    if (q->database_name == "system" && current_user_ != "admin") {
+    if (q->database_name == "system" && !isAdmin()) {
         return err("Permission denied: only admin can use the 'system' database.");
     }
     if (storage_.databaseExists(q->database_name)) {
@@ -546,7 +547,7 @@ json Executor::execDropDB(const DropDatabaseStatement* q) {
     }
     // Только владелец или админ может удалить БД
     std::string owner = storage_.getDbOwner(q->database_name);
-    if (current_user_ != "admin" && owner != current_user_) {
+    if (!isAdmin() && owner != current_user_) {
         return err("Permission denied: only owner '" + owner + "' or admin can drop this database.");
     }
     if (storage_.dropDatabase(q->database_name)) {
@@ -793,7 +794,7 @@ json Executor::execShowDatabases() {
     auto dbs = storage_.listDatabases();
     json rows = json::array();
     for (const auto& db : dbs) {
-        if (db == "system" && current_user_ != "admin") continue;
+        if (db == "system" && !isAdmin()) continue;
         rows.push_back({db});
     }
     return {{"success", true}, {"columns", {"Database"}}, {"rows", rows}};
@@ -1735,8 +1736,8 @@ std::vector<Row> Executor::execute_subquery(const SelectStatement* q, const Tabl
 }
 
 json Executor::execCreateUser(const CreateUserStatement* q) {
-    // Только админ может создавать пользователей через CREATE USER
-    if (current_user_ != "admin") return err("Only admin can use CREATE USER. Use REGISTER for self-registration.");
+    // Только глобальный админ может создавать пользователей через CREATE USER
+    if (!isAdmin()) return err("Only global admin can use CREATE USER. Use REGISTER for self-registration.");
 
     auto existing = storage_.indexLookup("system", "sys_users", "username", q->username);
     if (!existing.empty()) return err("User already exists.");
@@ -1744,7 +1745,8 @@ json Executor::execCreateUser(const CreateUserStatement* q) {
     auto sch = storage_.getTableSchema("system", "sys_users");
     Row row(sch.columns.size());
     row[1] = coerce_string_to_cell_column(sch.columns[1], q->username, false);
-    row[2] = coerce_string_to_cell_column(sch.columns[2], q->password, false);
+    row[2] = coerce_string_to_cell_column(sch.columns[2], hashPassword(q->password), false);
+    row[3] = coerce_string_to_cell_column(sch.columns[3], "0", false);
     std::map<int, long> dummy;
     applyDefaultsAndAutoincrement("system", sch, "sys_users", row, dummy);
     storage_.appendRows("system", "sys_users", {row});
@@ -1769,7 +1771,7 @@ nlohmann::json Executor::execSetUser(const SetUserStatement* q) {
         stored_pass = cell_to_where_string(user_row[2]);
     }
     
-    if (stored_pass != q->password) return err("Invalid password for user '" + q->username + "'.");
+    if (stored_pass != hashPassword(q->password)) return err("Invalid password for user '" + q->username + "'.");
 
     current_user_ = q->username;
     json res = ok("Context switched to user: " + current_user_);
@@ -1788,7 +1790,7 @@ json Executor::execGrant(const GrantStatement* q) {
 }
 
 json Executor::execRegister(const RegisterStatement* q) {
-    if (q->username == "admin") return err("Cannot register as 'admin'.");
+    // Remove hardcoded "admin" rejection, anyone can register but they won't be admin.
     auto existing = storage_.indexLookup("system", "sys_users", "username", q->username);
     if (!existing.empty()) return err("User '" + q->username + "' already exists.");
     if (q->password.empty()) return err("Password cannot be empty.");
@@ -1796,7 +1798,8 @@ json Executor::execRegister(const RegisterStatement* q) {
     auto sch = storage_.getTableSchema("system", "sys_users");
     Row row(sch.columns.size());
     row[1] = coerce_string_to_cell_column(sch.columns[1], q->username, false);
-    row[2] = coerce_string_to_cell_column(sch.columns[2], q->password, false);
+    row[2] = coerce_string_to_cell_column(sch.columns[2], hashPassword(q->password), false);
+    row[3] = coerce_string_to_cell_column(sch.columns[3], "0", false);
     std::map<int, long> dummy;
     applyDefaultsAndAutoincrement("system", sch, "sys_users", row, dummy);
     storage_.appendRows("system", "sys_users", {row});
@@ -1817,7 +1820,7 @@ json Executor::execLogin(const LoginStatement* q) {
     if (user_row.size() > 2 && user_row[2].has_value()) {
         stored_pass = cell_to_where_string(user_row[2]);
     }
-    if (stored_pass != q->password) return err("Invalid password.");
+    if (stored_pass != hashPassword(q->password)) return err("Invalid password.");
 
     current_user_ = q->username;
     json res = ok("Logged in as '" + current_user_ + "'.");
@@ -1835,12 +1838,12 @@ json Executor::execChangePassword(const ChangePasswordStatement* q) {
     if (user_row.size() > 2 && user_row[2].has_value()) {
         stored_pass = cell_to_where_string(user_row[2]);
     }
-    if (stored_pass != q->old_password) return err("Invalid current password.");
+    if (stored_pass != hashPassword(q->old_password)) return err("Invalid current password.");
     if (q->new_password.empty()) return err("New password cannot be empty.");
 
     auto sch = storage_.getTableSchema("system", "sys_users");
     Row new_row = user_row;
-    new_row[2] = coerce_string_to_cell_column(sch.columns[2], q->new_password, false);
+    new_row[2] = coerce_string_to_cell_column(sch.columns[2], hashPassword(q->new_password), false);
 
     performUpdate("system", "sys_users", sch, user_row, new_row);
     storage_.upsertClusterRowWal("system", "sys_users", sch, &user_row, new_row);
@@ -1854,31 +1857,33 @@ json Executor::execGrantDdl(const GrantDdlStatement* q) {
     // Проверяем, что БД существует
     if (!storage_.databaseExists(q->db_name)) return err("Database '" + q->db_name + "' does not exist.");
 
-    // Только владелец или админ может выдавать DDL
+    // Только владелец или админ может выдавать права на БД
     std::string owner = storage_.getDbOwner(q->db_name);
-    if (current_user_ != "admin" && owner != current_user_) {
-        return err("Permission denied: only owner '" + owner + "' can grant DDL on '" + q->db_name + "'.");
+    if (!isAdmin() && owner != current_user_) {
+        return err("Permission denied: only owner '" + owner + "' or admin can grant privileges on '" + q->db_name + "'.");
     }
 
     // Проверяем, что юзер существует
     auto user_pks = storage_.indexLookup("system", "sys_users", "username", q->username);
     if (user_pks.empty()) return err("User '" + q->username + "' does not exist.");
 
+    // Мы можем выдавать EDITOR или DDL
+    std::string role_to_grant = "editor"; // Default for now, or we could parse it from SQL.
+    
     // Проверяем, нет ли уже такого гранта
-    if (storage_.hasDbDdlGrant(q->db_name, q->username)) {
-        return ok("User '" + q->username + "' already has DDL on '" + q->db_name + "'.");
-    }
-
-    auto sch = storage_.getTableSchema("system", "sys_ddl_grants");
+    // (Для простоты мы сейчас просто добавляем новую запись или обновляем существующую)
+    
+    auto sch = storage_.getTableSchema("system", "sys_db_grants");
     Row row(sch.columns.size());
     row[1] = coerce_string_to_cell_column(sch.columns[1], q->db_name, false);
     row[2] = coerce_string_to_cell_column(sch.columns[2], q->username, false);
+    row[3] = coerce_string_to_cell_column(sch.columns[3], role_to_grant, false);
     std::map<int, long> dummy;
-    applyDefaultsAndAutoincrement("system", sch, "sys_ddl_grants", row, dummy);
-    storage_.appendRows("system", "sys_ddl_grants", {row});
-    storage_.indexInsertRow("system", "sys_ddl_grants", sch, row);
+    applyDefaultsAndAutoincrement("system", sch, "sys_db_grants", row, dummy);
+    storage_.appendRows("system", "sys_db_grants", {row});
+    storage_.indexInsertRow("system", "sys_db_grants", sch, row);
 
-    return ok("Granted DDL on '" + q->db_name + "' to user '" + q->username + "'.");
+    return ok("Granted " + role_to_grant + " on '" + q->db_name + "' to user '" + q->username + "'.");
 }
 
 json Executor::execRevokeDdl(const RevokeDdlStatement* q) {
@@ -1887,15 +1892,15 @@ json Executor::execRevokeDdl(const RevokeDdlStatement* q) {
     if (!storage_.databaseExists(q->db_name)) return err("Database '" + q->db_name + "' does not exist.");
 
     std::string owner = storage_.getDbOwner(q->db_name);
-    if (current_user_ != "admin" && owner != current_user_) {
-        return err("Permission denied: only owner '" + owner + "' can revoke DDL on '" + q->db_name + "'.");
+    if (!isAdmin() && owner != current_user_) {
+        return err("Permission denied: only owner '" + owner + "' or admin can revoke privileges on '" + q->db_name + "'.");
     }
 
     if (!storage_.hasDbDdlGrant(q->db_name, q->username)) {
-        return err("User '" + q->username + "' does not have DDL rights on '" + q->db_name + "'.");
+        return err("User '" + q->username + "' does not have rights on '" + q->db_name + "'.");
     }
 
-    auto grants = storage_.readAllRows("system", "sys_ddl_grants");
+    auto grants = storage_.readAllRows("system", "sys_db_grants");
     std::vector<Row> to_delete;
     for (const auto& row : grants) {
         if (row.size() >= 3 && row[1].has_value() && row[2].has_value()) {
@@ -1908,9 +1913,9 @@ json Executor::execRevokeDdl(const RevokeDdlStatement* q) {
 
     int total_deleted = 0;
     if (!to_delete.empty()) {
-        performDelete("system", "sys_ddl_grants", to_delete, total_deleted);
+        performDelete("system", "sys_db_grants", to_delete, total_deleted);
     }
-    return ok("Revoked DDL on '" + q->db_name + "' from user '" + q->username + "'.");
+    return ok("Revoked privileges on '" + q->db_name + "' from user '" + q->username + "'.");
 }
 
 json Executor::execLogout() {
@@ -1919,6 +1924,17 @@ json Executor::execLogout() {
     json res = ok("Logged out successfully.");
     res["type"] = "logout";
     return res;
+}
+
+bool Executor::isAdmin() const {
+    if (current_user_.empty()) return false;
+    auto user_pks = storage_.indexLookup("system", "sys_users", "username", current_user_);
+    if (user_pks.empty()) return false;
+    Row row = storage_.findRow("system", "sys_users", user_pks[0]);
+    if (row.size() > 3 && row[3].has_value() && cell_to_where_string(row[3]) == "1") {
+        return true;
+    }
+    return false;
 }
 
 } // namespace db

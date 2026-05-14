@@ -1210,7 +1210,7 @@ private:
 
         // Ошибки регистрации
         assert_error("RBAC: Дубликат регистрации", "REGISTER alice PASSWORD 'xxx';", "already exists");
-        assert_error("RBAC: Регистрация admin", "REGISTER admin PASSWORD 'xxx';", "Cannot register");
+        assert_error("RBAC: Регистрация admin", "REGISTER admin PASSWORD 'xxx';", "already exists");
         assert_error("RBAC: Пустой пароль", "REGISTER nobody PASSWORD '';", "Password cannot be empty");
 
         // Аутентификация через LOGIN
@@ -1301,7 +1301,7 @@ private:
         assert_success("RBAC: Admin CREATE USER", "CREATE USER charlie PASSWORD 'c123';");
 
         executor.setThreadLocalUser("alice");
-        assert_error("RBAC: Alice CREATE USER", "CREATE USER nobody PASSWORD 'x';", "Only admin");
+        assert_error("RBAC: Alice CREATE USER", "CREATE USER nobody PASSWORD 'x';", "Only global admin");
 
         // ═══ 10. Legacy commands → deprecation ═══
         executor.setThreadLocalUser("admin");

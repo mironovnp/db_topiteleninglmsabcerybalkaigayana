@@ -2,6 +2,7 @@
 #include "engine/row_codec.hpp"                 
 #include "engine/cell_value.hpp"                
 #include "engine/storage/storage_internal.hpp"  
+#include "engine/crypto.hpp"
 #include <iostream>
 
 namespace db {
@@ -60,7 +61,8 @@ void Storage::initializeSystemTables(const std::string& db_name) {
     TableSchema sys_users{ "sys_users", {
         make_col("user_id", "INT", true),
         make_col("username", "VARCHAR(50)"),
-        make_col("password_hash", "VARCHAR(255)")
+        make_col("password_hash", "VARCHAR(255)"),
+        make_col("is_admin", "INT")
     }, 0, {} };
     sys_users.columns[1].unique = true;
     createTable(db_name, sys_users);
@@ -74,13 +76,14 @@ void Storage::initializeSystemTables(const std::string& db_name) {
     sys_db_owners.columns[1].unique = true;
     createTable(db_name, sys_db_owners);
 
-    // Таблица DDL-грантов (owner может дать DDL-права другому юзеру)
-    TableSchema sys_ddl_grants{ "sys_ddl_grants", {
+    // Таблица грантов на БД (owner может дать права другому юзеру)
+    TableSchema sys_db_grants{ "sys_db_grants", {
         make_col("id", "INT", true),
         make_col("db_name", "VARCHAR(100)"),
-        make_col("username", "VARCHAR(50)")
+        make_col("username", "VARCHAR(50)"),
+        make_col("role", "VARCHAR(20)") // "editor", "read-only" etc.
     }, 0, {} };
-    createTable(db_name, sys_ddl_grants);
+    createTable(db_name, sys_db_grants);
 
     auto make_row = [](const TableSchema& sch, const std::vector<std::string>& vals) {
         Row r;
@@ -91,13 +94,13 @@ void Storage::initializeSystemTables(const std::string& db_name) {
     };
 
     // Создаём дефолтного админа
-    appendRows(db_name, "sys_users", { make_row(sys_users, {"1", "admin", "admin"}) });
+    appendRows(db_name, "sys_users", { make_row(sys_users, {"1", "admin", hashPassword("admin"), "1"}) });
 
     // Индексы
     createIndex(db_name, "sys_users", "idx_sys_users_username", "username");
     createIndex(db_name, "sys_db_owners", "idx_sys_db_owners_dbname", "db_name");
-    createIndex(db_name, "sys_ddl_grants", "idx_sys_ddl_grants_dbname", "db_name");
-    createIndex(db_name, "sys_ddl_grants", "idx_sys_ddl_grants_username", "username");
+    createIndex(db_name, "sys_db_grants", "idx_sys_db_grants_dbname", "db_name");
+    createIndex(db_name, "sys_db_grants", "idx_sys_db_grants_username", "username");
 
     flushAllPools();
 }
@@ -141,11 +144,12 @@ std::string Storage::getDbOwner(const std::string& db_name) const {
 }
 
 bool Storage::hasDbDdlGrant(const std::string& db_name, const std::string& username) const {
-    auto pks = indexLookup("system", "sys_ddl_grants", "db_name", db_name);
+    auto pks = indexLookup("system", "sys_db_grants", "db_name", db_name);
     for (const auto& pk : pks) {
-        Row row = findRow("system", "sys_ddl_grants", pk);
-        if (row.size() > 2 && cell_to_where_string(row[2]) == username) {
-            return true;
+        Row row = findRow("system", "sys_db_grants", pk);
+        if (row.size() > 3 && row[2].has_value() && cell_to_where_string(row[2]) == username) {
+            std::string role = cell_to_where_string(row[3]);
+            if (role == "editor" || role == "ddl") return true;
         }
     }
     return false;
@@ -155,18 +159,31 @@ bool Storage::checkPrivilege(const std::string& db_name,
                              const std::string& username,
                              const std::string& object_name, 
                              const std::string& privilege) const {
-    // Новая модель: владелец имеет все права, остальные — только DML
-    // Админ имеет все права всегда
-    if (username == "admin") return true;
+    // 1. Глобальный админ имеет все права всегда
+    auto user_pks = indexLookup("system", "sys_users", "username", username);
+    if (!user_pks.empty()) {
+        Row row = findRow("system", "sys_users", user_pks[0]);
+        if (row.size() > 3 && row[3].has_value() && cell_to_where_string(row[3]) == "1") {
+            return true;
+        }
+    }
     
+    // 2. Владелец БД имеет все права в своей базе
     std::string owner = getDbOwner(db_name);
-    
-    // Если пользователь — владелец БД, он имеет все права
     if (owner == username) return true;
     
-    // DML-привилегии разрешены для всех пользователей
-    if (privilege == "SELECT" || privilege == "INSERT" || 
-        privilege == "UPDATE" || privilege == "DELETE") {
+    // 3. Проверка грантов внутри БД (например, роль editor)
+    auto grant_pks = indexLookup("system", "sys_db_grants", "db_name", db_name);
+    for (const auto& pk : grant_pks) {
+        Row row = findRow("system", "sys_db_grants", pk);
+        if (row.size() > 3 && row[2].has_value() && cell_to_where_string(row[2]) == username) {
+            std::string role = cell_to_where_string(row[3]);
+            if (role == "editor") return true; // Editor в этой БД может всё (кроме drop db, что проверяется в Executor)
+        }
+    }
+    
+    // По умолчанию обычным пользователям разрешено только чтение (SELECT)
+    if (privilege == "SELECT") {
         return true;
     }
     
