@@ -10,7 +10,7 @@
         x:DataType="vm:MainWindowViewModel"
         Title="СУБД Топит_Еленинг"
         Width="1280" Height="800"
-        MinWidth="1000" MinHeight="640"
+        MinWidth="720" MinHeight="480"
         WindowStartupLocation="CenterScreen"
         Background="{DynamicResource BackgroundBrush}">
 

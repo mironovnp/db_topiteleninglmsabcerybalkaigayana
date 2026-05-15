@@ -2,6 +2,7 @@ using System;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
@@ -39,6 +40,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private double _editorFontSize = 14;
 
     private bool _authOverlayVisible = true;
+    private bool _isFinishingAuth;
+    private readonly CancellationTokenSource _startupCts = new();
     private Bitmap? _accountAvatarBitmap;
     private Bitmap? _sidebarBrandBitmap;
     private string _accountPanelLabel = string.Empty;
@@ -65,7 +68,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         Text2Sql = text2SqlViewModel;
         Settings = settingsViewModel;
 
-        Auth = new AuthViewModel(client, settingsService, authGateCompletion);
+        Auth = new AuthViewModel(client, settingsService, authGateCompletion, CancelStartupInitialization);
 
         NavItems = new ObservableCollection<NavItemViewModel>
         {
@@ -83,7 +86,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
         SelectedNavItem = NavItems[0];
 
-        RefreshDatabasesCommand = new AsyncRelayCommand(LoadDatabasesAsync, () => !_isLoadingDatabases);
+        RefreshDatabasesCommand = new AsyncRelayCommand(
+            () => LoadDatabasesAsync(refreshSchema: true),
+            () => !_isLoadingDatabases);
         LogoutCommand = new AsyncRelayCommand(LogoutAsyncImpl, () => !AuthOverlayVisible);
 
         _client.StateChanged += OnClientStateChanged;
@@ -141,10 +146,35 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private async Task CompleteAuthenticationGateCoreAsync()
     {
-        AuthOverlayVisible = false;
-        await PostAuthBootstrapAsync();
-        await LoadDatabasesAsync();
-        RefreshAccountAppearance();
+        _isFinishingAuth = true;
+        Auth.StatusText = "Загрузка интерфейса…";
+
+        try
+        {
+            await PostAuthBootstrapAsync().ConfigureAwait(false);
+            await LoadDatabasesAsync(refreshSchema: false).ConfigureAwait(false);
+
+            await PostToUiAsync(() =>
+            {
+                AuthOverlayVisible = false;
+                Auth.StatusText = string.Empty;
+                RefreshAccountAppearance();
+                OnPropertyChanged(nameof(IsAdminUser));
+            });
+        }
+        catch (Exception ex)
+        {
+            await PostToUiAsync(() =>
+            {
+                AuthOverlayVisible = true;
+                Auth.StatusText = $"Ошибка после входа: {ex.Message}";
+            });
+            Notifications.Push("Ошибка после входа", ex.Message, NotificationKind.Error);
+        }
+        finally
+        {
+            _isFinishingAuth = false;
+        }
     }
 
     public string AccountPanelLabel
@@ -164,8 +194,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             ? "?"
             : char.ToUpperInvariant(AccountPanelLabel[0]).ToString();
 
-    public bool IsAdminUser =>
-        string.Equals(_client.CurrentUser, "admin", StringComparison.OrdinalIgnoreCase);
+    public bool IsAdminUser => _client.IsGlobalAdmin;
 
     public bool ShowAvatarOnPanel =>
         !IsAdminUser && AccountAvatarBitmap is not null;
@@ -370,74 +399,98 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public double NavItemHeight => _compactMode ? 32 : 40;
 
+    public void CancelStartupInitialization()
+    {
+        try
+        {
+            _startupCts.Cancel();
+        }
+        catch
+        {
+        }
+    }
+
     public async Task InitializeAsync()
     {
-        await _settingsService.LoadAsync();
-        var s = _settingsService.Current;
-        _themeService.Apply(s.Theme);
-        Sql.IsChatMode = s.ChatModeEnabled;
-        AutoCollapseSidebar = s.SidebarAutoCollapse;
-        _client.Configure(s.Host, s.Port);
-        RefreshAccountAppearance();
-        RefreshSidebarBrand();
-
-        if (!s.AutoConnect)
+        var ct = _startupCts.Token;
+        try
         {
-            AuthOverlayVisible = false;
-            return;
-        }
+            await _settingsService.LoadAsync().ConfigureAwait(true);
+            ct.ThrowIfCancellationRequested();
 
-        var ok = await _client.PingAsync();
-        if (!ok && s.AutoStartLocalServer)
-        {
-            ok = await TryStartLocalServerAsync(s.Host, s.Port);
-        }
+            var s = _settingsService.Current;
+            _themeService.Apply(s.Theme);
+            Sql.IsChatMode = s.ChatModeEnabled;
+            AutoCollapseSidebar = s.SidebarAutoCollapse;
+            _client.Configure(s.Host, s.Port);
+            RefreshAccountAppearance();
+            RefreshSidebarBrand();
 
-        if (!ok)
-        {
+            if (!s.AutoConnect)
+            {
+                AuthOverlayVisible = false;
+                return;
+            }
+
+            var ok = await EnsureServerReachableAsync(ct).ConfigureAwait(true);
+            ct.ThrowIfCancellationRequested();
+            if (!ok)
+            {
+                AuthOverlayVisible = true;
+                Auth.StatusText = "Нет связи с сервером. Проверьте настройки или запустите dbserver.";
+                return;
+            }
+
+            if (await Auth.TrySilentLoginAsync(ct).ConfigureAwait(true))
+            {
+                return;
+            }
+
+            ct.ThrowIfCancellationRequested();
             AuthOverlayVisible = true;
-            Auth.StatusText = "Нет связи с сервером. Проверьте настройки или запустите dbserver.";
-            return;
         }
-
-        if (await Auth.TrySilentLoginAsync())
+        catch (OperationCanceledException)
         {
-            return;
         }
-
-        AuthOverlayVisible = true;
     }
 
     private async Task PostAuthBootstrapAsync()
     {
-        try
+        if (_client.IsGlobalAdmin)
         {
-            var user = _client.CurrentUser ?? string.Empty;
-            if (string.Equals(user, "admin", StringComparison.OrdinalIgnoreCase))
-            {
-                var use = await _client.ExecuteAsync("USE system;").ConfigureAwait(false);
-                if (!use.Success)
-                {
-                    Notifications.Push("База system", use.Message, NotificationKind.Warning);
-                }
-            }
-            else
-            {
-                var names = await _schemaService.GetDatabasesAsync().ConfigureAwait(false);
-                var first = names.FirstOrDefault(n =>
-                    !string.Equals(n, "system", StringComparison.OrdinalIgnoreCase));
-                if (!string.IsNullOrEmpty(first))
-                {
-                    await _schemaService.UseDatabaseAsync(first).ConfigureAwait(false);
-                    Sql.Schema.CurrentDatabase = first;
-                    await Sql.Schema.RefreshAsync().ConfigureAwait(false);
-                }
-            }
+            return;
         }
-        catch (Exception ex)
+
+        var names = await _schemaService.GetDatabasesAsync().ConfigureAwait(false);
+        var first = names.FirstOrDefault(n =>
+            !string.Equals(n, "system", StringComparison.OrdinalIgnoreCase));
+        if (string.IsNullOrEmpty(first))
         {
-            Notifications.Push("Контекст после входа", ex.Message, NotificationKind.Warning);
+            return;
         }
+
+        await _schemaService.UseDatabaseAsync(first).ConfigureAwait(false);
+        await PostToUiAsync(() => Sql.Schema.CurrentDatabase = first);
+    }
+
+    public Task<bool> EnsureServerReachableAsync(CancellationToken cancellationToken = default) =>
+        EnsureServerReachableCoreAsync(cancellationToken);
+
+    private async Task<bool> EnsureServerReachableCoreAsync(CancellationToken cancellationToken)
+    {
+        var s = _settingsService.Current;
+        _client.Configure(s.Host, s.Port);
+        if (await _client.PingAsync(cancellationToken).ConfigureAwait(false))
+        {
+            return true;
+        }
+
+        if (!s.AutoStartLocalServer)
+        {
+            return false;
+        }
+
+        return await TryStartLocalServerAsync(s.Host, s.Port, cancellationToken).ConfigureAwait(false);
     }
 
     private Task LogoutAsyncImpl()
@@ -528,7 +581,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         });
     }
 
-    private async Task<bool> TryStartLocalServerAsync(string host, int port)
+    private async Task<bool> TryStartLocalServerAsync(string host, int port, CancellationToken cancellationToken = default)
     {
         var exe = _localServer.FindExecutable();
         if (exe is null)
@@ -543,7 +596,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         Notifications.Push("Запуск локального dbserver...", $"Использую {exe}", NotificationKind.Info, TimeSpan.FromSeconds(4));
         try
         {
-            var started = await _localServer.StartAsync(host, port, async ct => await _client.PingAsync(ct));
+            var started = await _localServer.StartAsync(
+                host,
+                port,
+                async ct => await _client.PingAsync(ct).ConfigureAwait(false),
+                cancellationToken).ConfigureAwait(false);
             if (started)
             {
                 Notifications.Push("Локальный сервер готов", $"dbserver слушает {host}:{port}", NotificationKind.Info, TimeSpan.FromSeconds(4));
@@ -562,35 +619,51 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
     }
 
-    private async Task LoadDatabasesAsync()
+    private async Task LoadDatabasesAsync(bool refreshSchema = true)
     {
-        _isLoadingDatabases = true;
-        RefreshDatabasesCommand.RaiseCanExecuteChanged();
+        await PostToUiAsync(() =>
+        {
+            _isLoadingDatabases = true;
+            RefreshDatabasesCommand.RaiseCanExecuteChanged();
+        });
+
         try
         {
-            var names = await _schemaService.GetDatabasesAsync();
-            Databases.Clear();
-            foreach (var name in names)
-            {
-                Databases.Add(new DatabaseTabViewModel(name));
-            }
-            OnPropertyChanged(nameof(HasDatabases));
-
+            var names = await _schemaService.GetDatabasesAsync().ConfigureAwait(false);
             var currentDb = _client.CurrentDb;
-            if (!string.IsNullOrEmpty(currentDb))
+
+            await PostToUiAsync(() =>
             {
+                Databases.Clear();
+                foreach (var name in names)
+                {
+                    Databases.Add(new DatabaseTabViewModel(name));
+                }
+                OnPropertyChanged(nameof(HasDatabases));
+
+                if (string.IsNullOrEmpty(currentDb))
+                {
+                    return;
+                }
+
                 foreach (var db in Databases)
                 {
-                    if (string.Equals(db.Name, currentDb, StringComparison.Ordinal))
+                    if (!string.Equals(db.Name, currentDb, StringComparison.Ordinal))
                     {
-                        db.IsActive = true;
-                        _selectedDatabase = db;
-                        OnPropertyChanged(nameof(SelectedDatabase));
-                        Sql.Schema.CurrentDatabase = db.Name;
-                        await Sql.Schema.RefreshAsync();
-                        break;
+                        continue;
                     }
+
+                    db.IsActive = true;
+                    _selectedDatabase = db;
+                    OnPropertyChanged(nameof(SelectedDatabase));
+                    Sql.Schema.CurrentDatabase = db.Name;
+                    break;
                 }
+            });
+
+            if (refreshSchema && !string.IsNullOrEmpty(currentDb))
+            {
+                await PostToUiAsync(() => Sql.Schema.RefreshAsync());
             }
         }
         catch (Exception ex)
@@ -599,8 +672,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
         finally
         {
-            _isLoadingDatabases = false;
-            RefreshDatabasesCommand.RaiseCanExecuteChanged();
+            await PostToUiAsync(() =>
+            {
+                _isLoadingDatabases = false;
+                RefreshDatabasesCommand.RaiseCanExecuteChanged();
+            });
         }
     }
 
@@ -623,16 +699,28 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
     }
 
-    private async void OnSchemaInvalidationRequested(object? sender, string sql)
+    private void OnSchemaInvalidationRequested(object? sender, string sql)
+    {
+        _ = Task.Run(() => ReloadAfterDdlAsync(sql));
+    }
+
+    private async Task ReloadAfterDdlAsync(string sql)
     {
         try
         {
-            await LoadDatabasesAsync();
-            if (!string.IsNullOrEmpty(_client.CurrentDb))
+            var catalogOnly = IsDatabaseCatalogChange(sql);
+            await LoadDatabasesAsync(refreshSchema: !catalogOnly).ConfigureAwait(false);
+
+            if (catalogOnly || string.IsNullOrEmpty(_client.CurrentDb))
             {
-                Sql.Schema.CurrentDatabase = _client.CurrentDb;
-                await Sql.Schema.RefreshAsync();
+                return;
             }
+
+            await PostToUiAsync(async () =>
+            {
+                Sql.Schema.CurrentDatabase = _client.CurrentDb!;
+                await Sql.Schema.RefreshAsync();
+            });
         }
         catch (Exception ex)
         {
@@ -640,16 +728,49 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
     }
 
+    private static bool IsDatabaseCatalogChange(string sql)
+    {
+        var t = sql.TrimStart();
+        return t.StartsWith("CREATE DATABASE", StringComparison.OrdinalIgnoreCase)
+               || t.StartsWith("DROP DATABASE", StringComparison.OrdinalIgnoreCase);
+    }
+
     private void OnClientStateChanged(object? sender, EventArgs e)
     {
-        Dispatcher.UIThread.Post(async () =>
+        _ = Task.Run(async () =>
         {
-            UpdateConnectionBadge();
-            if (_isConnected && Databases.Count == 0 && !AuthOverlayVisible)
+            await PostToUiAsync(() => UpdateConnectionBadge()).ConfigureAwait(false);
+            if (_isConnected
+                && Databases.Count == 0
+                && !AuthOverlayVisible
+                && !_isFinishingAuth
+                && !string.IsNullOrEmpty(_client.CurrentUser))
             {
-                await LoadDatabasesAsync();
+                await LoadDatabasesAsync(refreshSchema: false).ConfigureAwait(false);
             }
         });
+    }
+
+    private static async Task PostToUiAsync(Action action)
+    {
+        if (Dispatcher.UIThread.CheckAccess())
+        {
+            action();
+            return;
+        }
+
+        await Dispatcher.UIThread.InvokeAsync(action);
+    }
+
+    private static async Task PostToUiAsync(Func<Task> action)
+    {
+        if (Dispatcher.UIThread.CheckAccess())
+        {
+            await action();
+            return;
+        }
+
+        await Dispatcher.UIThread.InvokeAsync(action);
     }
 
     private void UpdateConnectionBadge()
@@ -673,6 +794,15 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public void Dispose()
     {
+        try
+        {
+            _startupCts.Cancel();
+            _startupCts.Dispose();
+        }
+        catch
+        {
+        }
+
         _client.StateChanged -= OnClientStateChanged;
         _settingsService.SettingsChanged -= OnSettingsChanged;
         Sql.SchemaInvalidationRequested -= OnSchemaInvalidationRequested;

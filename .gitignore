@@ -18,3 +18,8 @@ test_output.txt
 CaseChampGui/bin/
 CaseChampGui/obj/
 *.user
+CaseChampGui/*.lscache
+
+# GUI launcher local files (WSL / run.sh)
+.casechamp-gui.log
+.casechamp-gui.pid

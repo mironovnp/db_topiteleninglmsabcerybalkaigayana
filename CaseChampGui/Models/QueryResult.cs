@@ -29,6 +29,9 @@ public sealed class QueryResult
     [JsonPropertyName("current_user")]
     public string? CurrentUser { get; set; }
 
+    [JsonPropertyName("is_admin")]
+    public bool IsAdmin { get; set; }
+
     [JsonPropertyName("session_id")]
     public string? SessionId { get; set; }
 

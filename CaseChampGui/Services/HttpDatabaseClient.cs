@@ -17,6 +17,7 @@ public sealed class HttpDatabaseClient : IDatabaseClient, IDisposable
     };
 
     private readonly HttpClient _http;
+    private readonly SemaphoreSlim _httpSerial = new(1, 1);
     private readonly object _sync = new();
 
     private string _host = "127.0.0.1";
@@ -24,6 +25,7 @@ public sealed class HttpDatabaseClient : IDatabaseClient, IDisposable
     private ConnectionStatus _status = ConnectionStatus.Disconnected;
     private string? _currentDb;
     private string? _currentUser;
+    private bool _isGlobalAdmin;
     private string? _sessionId;
 
     public HttpDatabaseClient()
@@ -48,6 +50,7 @@ public sealed class HttpDatabaseClient : IDatabaseClient, IDisposable
     public int Port { get { lock (_sync) return _port; } }
     public string? CurrentDb { get { lock (_sync) return _currentDb; } }
     public string? CurrentUser { get { lock (_sync) return _currentUser; } }
+    public bool IsGlobalAdmin { get { lock (_sync) return _isGlobalAdmin; } }
     public string? SessionId { get { lock (_sync) return _sessionId; } }
 
     public event EventHandler? StateChanged;
@@ -63,27 +66,36 @@ public sealed class HttpDatabaseClient : IDatabaseClient, IDisposable
             _sessionId = null;
             _currentDb = null;
             _currentUser = null;
+            _isGlobalAdmin = false;
         }
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
     public async Task<bool> PingAsync(CancellationToken cancellationToken = default)
     {
-        Status = ConnectionStatus.Connecting;
+        await _httpSerial.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            cts.CancelAfter(TimeSpan.FromSeconds(4));
-            var url = $"http://{Host}:{Port}/ping";
-            using var response = await _http.GetAsync(url, cts.Token).ConfigureAwait(false);
-            var ok = response.IsSuccessStatusCode;
-            Status = ok ? ConnectionStatus.Connected : ConnectionStatus.Failed;
-            return ok;
+            Status = ConnectionStatus.Connecting;
+            try
+            {
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                cts.CancelAfter(TimeSpan.FromSeconds(4));
+                var url = $"http://{Host}:{Port}/ping";
+                using var response = await _http.GetAsync(url, cts.Token).ConfigureAwait(false);
+                var ok = response.IsSuccessStatusCode;
+                Status = ok ? ConnectionStatus.Connected : ConnectionStatus.Failed;
+                return ok;
+            }
+            catch
+            {
+                Status = ConnectionStatus.Failed;
+                return false;
+            }
         }
-        catch
+        finally
         {
-            Status = ConnectionStatus.Failed;
-            return false;
+            _httpSerial.Release();
         }
     }
 
@@ -94,54 +106,62 @@ public sealed class HttpDatabaseClient : IDatabaseClient, IDisposable
             return QueryResult.Fail("Запрос пуст.");
         }
 
-        var request = new QueryRequest
-        {
-            Sql = sql,
-            DryRun = dryRun,
-            CurrentDb = CurrentDb ?? string.Empty,
-            CurrentUser = CurrentUser ?? string.Empty,
-            SessionId = SessionId,
-        };
-
-        var url = $"http://{Host}:{Port}/query";
-
+        await _httpSerial.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            using var response = await _http.PostAsJsonAsync(url, request, JsonOptions, cancellationToken).ConfigureAwait(false);
-            if (!response.IsSuccessStatusCode)
+            var request = new QueryRequest
+            {
+                Sql = sql,
+                DryRun = dryRun,
+                CurrentDb = CurrentDb ?? string.Empty,
+                CurrentUser = CurrentUser ?? string.Empty,
+                SessionId = SessionId,
+            };
+
+            var url = $"http://{Host}:{Port}/query";
+
+            try
+            {
+                using var response = await _http.PostAsJsonAsync(url, request, JsonOptions, cancellationToken).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                {
+                    Status = ConnectionStatus.Failed;
+                    return QueryResult.Fail($"HTTP {(int)response.StatusCode}: {response.ReasonPhrase}");
+                }
+
+                var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+                var result = JsonSerializer.Deserialize<QueryResult>(json, new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true,
+                }) ?? QueryResult.Fail("Пустой ответ сервера.");
+
+                UpdateSessionFromResult(result);
+                Status = ConnectionStatus.Connected;
+                return result;
+            }
+            catch (TaskCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return QueryResult.Fail("Запрос отменён.");
+            }
+            catch (TaskCanceledException)
             {
                 Status = ConnectionStatus.Failed;
-                return QueryResult.Fail($"HTTP {(int)response.StatusCode}: {response.ReasonPhrase}");
+                return QueryResult.Fail("Превышено время ожидания ответа сервера.");
             }
-
-            var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            var result = JsonSerializer.Deserialize<QueryResult>(json, new JsonSerializerOptions
+            catch (HttpRequestException ex)
             {
-                PropertyNameCaseInsensitive = true,
-            }) ?? QueryResult.Fail("Пустой ответ сервера.");
-
-            UpdateSessionFromResult(result);
-            Status = ConnectionStatus.Connected;
-            return result;
+                Status = ConnectionStatus.Failed;
+                return QueryResult.Fail($"Нет связи с сервером: {ex.Message}");
+            }
+            catch (Exception ex)
+            {
+                Status = ConnectionStatus.Failed;
+                return QueryResult.Fail($"Ошибка клиента: {ex.Message}");
+            }
         }
-        catch (TaskCanceledException) when (cancellationToken.IsCancellationRequested)
+        finally
         {
-            return QueryResult.Fail("Запрос отменён.");
-        }
-        catch (TaskCanceledException)
-        {
-            Status = ConnectionStatus.Failed;
-            return QueryResult.Fail("Превышено время ожидания ответа сервера.");
-        }
-        catch (HttpRequestException ex)
-        {
-            Status = ConnectionStatus.Failed;
-            return QueryResult.Fail($"Нет связи с сервером: {ex.Message}");
-        }
-        catch (Exception ex)
-        {
-            Status = ConnectionStatus.Failed;
-            return QueryResult.Fail($"Ошибка клиента: {ex.Message}");
+            _httpSerial.Release();
         }
     }
 
@@ -165,6 +185,14 @@ public sealed class HttpDatabaseClient : IDatabaseClient, IDisposable
                 _currentUser = result.CurrentUser;
                 changed = true;
             }
+            if (!string.IsNullOrEmpty(result.SessionId) || !string.IsNullOrEmpty(_sessionId))
+            {
+                if (result.IsAdmin != _isGlobalAdmin)
+                {
+                    _isGlobalAdmin = result.IsAdmin;
+                    changed = true;
+                }
+            }
         }
         if (changed)
         {
@@ -180,6 +208,7 @@ public sealed class HttpDatabaseClient : IDatabaseClient, IDisposable
             if (_sessionId is not null) { _sessionId = null; changed = true; }
             if (_currentDb is not null) { _currentDb = null; changed = true; }
             if (_currentUser is not null) { _currentUser = null; changed = true; }
+            if (_isGlobalAdmin) { _isGlobalAdmin = false; changed = true; }
         }
         if (changed)
         {
@@ -199,5 +228,9 @@ public sealed class HttpDatabaseClient : IDatabaseClient, IDisposable
         ClearSession();
     }
 
-    public void Dispose() => _http.Dispose();
+    public void Dispose()
+    {
+        _httpSerial.Dispose();
+        _http.Dispose();
+    }
 }

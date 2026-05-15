@@ -25,6 +25,12 @@ public sealed class LocalServerService : IDisposable
             return Path.GetFullPath(explicitOverride);
         }
 
+        var projectData = TryFindProjectDataDirectory();
+        if (projectData is not null)
+        {
+            return projectData;
+        }
+
         string baseDir;
         if (OperatingSystem.IsWindows())
         {
@@ -47,6 +53,33 @@ public sealed class LocalServerService : IDisposable
         }
 
         return Path.Combine(baseDir, "CaseChamp", "data");
+    }
+
+    public static string? TryFindProjectDataDirectory()
+    {
+        try
+        {
+            var dir = new DirectoryInfo(AppContext.BaseDirectory);
+            var serverName = OperatingSystem.IsWindows() ? "dbserver.exe" : "dbserver";
+            for (var depth = 0; depth < 10 && dir is not null; depth++, dir = dir.Parent)
+            {
+                var dataPath = Path.Combine(dir.FullName, "data");
+                var hasData = Directory.Exists(dataPath);
+                var hasBuild = File.Exists(Path.Combine(dir.FullName, "build", serverName))
+                               || Directory.Exists(Path.Combine(dir.FullName, "build"));
+                var looksLikeRepo = File.Exists(Path.Combine(dir.FullName, "CMakeLists.txt"))
+                                    || File.Exists(Path.Combine(dir.FullName, "run.sh"));
+                if (hasData && (hasBuild || looksLikeRepo))
+                {
+                    return Path.GetFullPath(dataPath);
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        return null;
     }
 
     private static void MigrateLegacyDataIfNeeded(string targetDir)

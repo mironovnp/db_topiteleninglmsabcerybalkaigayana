@@ -20,6 +20,7 @@ public interface IDatabaseClient
     int Port { get; }
     string? CurrentDb { get; }
     string? CurrentUser { get; }
+    bool IsGlobalAdmin { get; }
     string? SessionId { get; }
 
     event EventHandler? StateChanged;

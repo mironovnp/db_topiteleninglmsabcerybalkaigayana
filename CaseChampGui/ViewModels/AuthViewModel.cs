@@ -1,5 +1,6 @@
 using System;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using CaseChampGui.Models;
 using CaseChampGui.Services;
@@ -13,6 +14,7 @@ public sealed class AuthViewModel : ObservableObject
     private readonly IDatabaseClient _client;
     private readonly ISettingsService _settingsService;
     private readonly Func<Task> _onAuthenticated;
+    private readonly Action? _cancelStartupInitialization;
 
     private string _username = string.Empty;
     private string _password = string.Empty;
@@ -22,11 +24,16 @@ public sealed class AuthViewModel : ObservableObject
     private string _statusText = string.Empty;
     private bool _isBusy;
 
-    public AuthViewModel(IDatabaseClient client, ISettingsService settingsService, Func<Task> onAuthenticated)
+    public AuthViewModel(
+        IDatabaseClient client,
+        ISettingsService settingsService,
+        Func<Task> onAuthenticated,
+        Action? cancelStartupInitialization = null)
     {
         _client = client;
         _settingsService = settingsService;
         _onAuthenticated = onAuthenticated;
+        _cancelStartupInitialization = cancelStartupInitialization;
 
         var s = settingsService.Current;
         _rememberPassword = s.RememberPassword;
@@ -120,7 +127,7 @@ public sealed class AuthViewModel : ObservableObject
         StatusText = string.Empty;
     }
 
-    public async Task<bool> TrySilentLoginAsync()
+    public async Task<bool> TrySilentLoginAsync(CancellationToken cancellationToken = default)
     {
         var s = _settingsService.Current;
         if (!s.RememberPassword ||
@@ -135,8 +142,10 @@ public sealed class AuthViewModel : ObservableObject
 
         if (!UsernameRegex.IsMatch(s.LastUsername.Trim())) return false;
 
+        cancellationToken.ThrowIfCancellationRequested();
+
         var sql = $"LOGIN {s.LastUsername.Trim()} PASSWORD {SqlString(pwd)};";
-        var res = await _client.ExecuteAsync(sql).ConfigureAwait(true);
+        var res = await _client.ExecuteAsync(sql, false, cancellationToken).ConfigureAwait(true);
         if (!res.Success) return false;
 
         await PersistAuthSettingsAsync(s.LastUsername.Trim(), pwd).ConfigureAwait(true);
@@ -146,6 +155,7 @@ public sealed class AuthViewModel : ObservableObject
 
     private async Task SubmitAsync()
     {
+        _cancelStartupInitialization?.Invoke();
         IsBusy = true;
         try
         {
@@ -190,10 +200,12 @@ public sealed class AuthViewModel : ObservableObject
                 }
             }
 
+            StatusText = "Загрузка списка баз…";
             await PersistAuthSettingsAsync(u, Password).ConfigureAwait(true);
             Password = string.Empty;
             ConfirmPassword = string.Empty;
             await _onAuthenticated().ConfigureAwait(true);
+            StatusText = string.Empty;
         }
         finally
         {

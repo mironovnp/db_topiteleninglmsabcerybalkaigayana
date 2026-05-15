@@ -26,6 +26,42 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         DataContextChanged += OnDataContextChanged;
+        Opened += OnWindowOpened;
+        Closed += OnWindowClosed;
+    }
+
+    private void OnWindowClosed(object? sender, EventArgs e)
+    {
+        if (global::Avalonia.Application.Current?.ApplicationLifetime
+            is Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime desktop
+            && desktop.MainWindow == this)
+        {
+            desktop.Shutdown();
+        }
+    }
+
+    private void OnWindowOpened(object? sender, EventArgs e)
+    {
+        if (Screens.Primary is not { } screen)
+        {
+            Activate();
+            return;
+        }
+
+        var wa = screen.WorkingArea;
+        var pos = Position;
+        var offScreen = pos.X < wa.X - 64 || pos.Y < wa.Y - 64
+                        || pos.X > wa.X + wa.Width || pos.Y > wa.Y + wa.Height;
+        if (offScreen)
+        {
+            var w = Math.Clamp((int)Width, 720, wa.Width);
+            var h = Math.Clamp((int)Height, 480, wa.Height);
+            Position = new PixelPoint(
+                wa.X + Math.Max(0, (wa.Width - w) / 2),
+                wa.Y + Math.Max(0, (wa.Height - h) / 2));
+        }
+
+        Activate();
     }
 
     private void OnDataContextChanged(object? sender, EventArgs e)

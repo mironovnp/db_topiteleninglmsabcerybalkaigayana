@@ -1,6 +1,7 @@
 using System;
 using System.Threading.Tasks;
 using Avalonia;
+using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
 using Avalonia.Media;
@@ -15,10 +16,6 @@ namespace CaseChampGui;
 
 public partial class App : Application
 {
-    private HttpDatabaseClient? _client;
-    private NotificationService? _notifications;
-    private LocalServerService? _localServer;
-
     public override void Initialize()
     {
         AvaloniaXamlLoader.Load(this);
@@ -30,40 +27,121 @@ public partial class App : Application
 
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
+            desktop.ShutdownMode = ShutdownMode.OnMainWindowClose;
+
+            var loading = new LoadingWindow();
+            desktop.MainWindow = loading;
+            base.OnFrameworkInitializationCompleted();
+
+            loading.Show();
+            loading.Activate();
+
+            _ = Dispatcher.UIThread.InvokeAsync(() => OpenMainWindowAsync(desktop, loading));
+        }
+        else
+        {
+            base.OnFrameworkInitializationCompleted();
+        }
+    }
+
+    private static async Task OpenMainWindowAsync(
+        IClassicDesktopStyleApplicationLifetime desktop,
+        Window loading)
+    {
+        await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Render);
+
+        MainWindow? mainWindow = null;
+        MainWindowViewModel? mainVm = null;
+        LocalServerService? localServer = null;
+        HttpDatabaseClient? client = null;
+
+        try
+        {
             var settingsService = new JsonSettingsService();
             settingsService.Load();
             var themeService = new ThemeService();
-            _client = new HttpDatabaseClient();
+            themeService.Apply(settingsService.Current.Theme);
+
+            client = new HttpDatabaseClient();
             var text2Sql = new DisabledText2SqlService();
-            _notifications = new NotificationService();
-            _localServer = new LocalServerService();
-            var schemaService = new SchemaService(_client);
+            var notifications = new NotificationService();
+            localServer = new LocalServerService();
+            var schemaService = new SchemaService(client);
             var schemaPane = new SchemaPaneViewModel(schemaService);
 
-            var sqlVm = new SqlViewModel(_client, schemaPane, _notifications);
+            var sqlVm = new SqlViewModel(client, schemaPane, notifications);
             var text2SqlVm = new Text2SqlViewModel(text2Sql);
-            var settingsVm = new SettingsViewModel(settingsService, themeService, _client);
-            MainWindowViewModel? mainVm = null;
+            var settingsVm = new SettingsViewModel(settingsService, themeService, client);
+
             mainVm = new MainWindowViewModel(
-                _client, settingsService, themeService, schemaService, _localServer, _notifications,
+                client, settingsService, themeService, schemaService, localServer, notifications,
                 sqlVm, text2SqlVm, settingsVm,
                 () => mainVm!.CompleteAuthenticationGateAsync());
 
-            HookGlobalExceptionHandlers(_notifications);
+            HookGlobalExceptionHandlers(notifications);
 
-            var window = new MainWindow { DataContext = mainVm };
-            desktop.MainWindow = window;
-            desktop.Exit += (_, _) =>
+            mainWindow = new MainWindow { DataContext = mainVm };
+            desktop.MainWindow = mainWindow;
+
+            var shutdownRequested = false;
+            void ShutdownApp()
             {
-                mainVm?.Dispose();
-                _localServer?.Dispose();
-                _client?.Dispose();
-            };
+                if (shutdownRequested) return;
+                shutdownRequested = true;
+
+                try
+                {
+                    mainVm.Dispose();
+                    localServer.Dispose();
+                    client.Dispose();
+                }
+                catch
+                {
+                }
+
+                desktop.Shutdown();
+            }
+
+            desktop.Exit += (_, _) => ShutdownApp();
+            mainWindow.Closed += (_, _) => ShutdownApp();
+
+            mainWindow.Show();
+            mainWindow.Activate();
+            mainWindow.WindowState = WindowState.Normal;
 
             _ = SafeInitialize(mainVm);
         }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[CaseChamp GUI] {ex}");
+            if (mainWindow is null)
+            {
+                var error = new Window
+                {
+                    Title = "СУБД Топит_Еленинг — ошибка",
+                    Width = 520,
+                    Height = 200,
+                    WindowStartupLocation = WindowStartupLocation.CenterScreen,
+                    Background = new SolidColorBrush(Color.Parse("#F2EDE4")),
+                    Content = new TextBlock
+                    {
+                        Text = ex.Message,
+                        TextWrapping = TextWrapping.Wrap,
+                        Margin = new Thickness(24),
+                        Foreground = new SolidColorBrush(Color.Parse("#A33A3A")),
+                    },
+                };
+                desktop.MainWindow = error;
+                error.Show();
+                error.Activate();
+            }
+        }
+        finally
+        {
+            loading.Close();
+        }
 
-        base.OnFrameworkInitializationCompleted();
+        await Task.CompletedTask;
     }
 
     private void ApplyFluentAccentPalettes()
@@ -81,8 +159,6 @@ public partial class App : Application
             {
                 Accent = Color.FromUInt32(0xFFE2E6ED),
             };
-            // FluentTheme.Palettes only accepts Light and Dark (Avalonia 12). Theme "Iu5" uses
-            // App.Resources ThemeDictionary (Iu5Theme.axaml); accent there is AccentBrush #00E5FF.
             break;
         }
     }
@@ -92,6 +168,9 @@ public partial class App : Application
         try
         {
             await vm.InitializeAsync();
+        }
+        catch (OperationCanceledException)
+        {
         }
         catch (Exception ex)
         {
