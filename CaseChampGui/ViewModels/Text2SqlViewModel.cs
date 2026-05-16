@@ -33,11 +33,13 @@ public sealed class Text2SqlViewModel : ObservableObject
         IText2SqlService service,
         IMistralApiKeyStore apiKeys,
         IDatabaseClient client,
+        SchemaPaneViewModel schema,
         NotificationService notifications)
     {
         _service = service;
         _apiKeys = apiKeys;
         _client = client;
+        Schema = schema;
         _notifications = notifications;
 
         SaveApiKeyCommand = new AsyncRelayCommand(SaveApiKeyAsync, () => !string.IsNullOrWhiteSpace(ApiKeyInput));
@@ -182,6 +184,8 @@ public sealed class Text2SqlViewModel : ObservableObject
     public ObservableCollection<string> Columns { get; } = new();
     public ObservableCollection<IList<string>> Rows { get; } = new();
 
+    public SchemaPaneViewModel Schema { get; }
+
     public AsyncRelayCommand SaveApiKeyCommand { get; }
     public AsyncRelayCommand TranslateAndRunCommand { get; }
     public RelayCommand ClearCommand { get; }
@@ -197,7 +201,12 @@ public sealed class Text2SqlViewModel : ObservableObject
     /// <summary>Raised after successful DDL that changes the database catalog (CREATE/DROP DATABASE).</summary>
     public event EventHandler<string>? CatalogSqlExecuted;
 
-    public void OnSectionActivated() => RefreshApiKeyState();
+    public void OnSectionActivated()
+    {
+        RefreshApiKeyState();
+        if (Schema.HasDatabase)
+            _ = Schema.RefreshAsync();
+    }
 
     public void RefreshApiKeyState()
     {
@@ -384,6 +393,9 @@ public sealed class Text2SqlViewModel : ObservableObject
                 CatalogSqlExecuted?.Invoke(this, statement);
             }
         }
+
+        if (Schema.HasDatabase)
+            _ = Schema.RefreshAsync();
     }
 
     private static bool IsCatalogSql(string sql)

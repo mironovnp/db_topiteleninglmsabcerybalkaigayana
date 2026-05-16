@@ -1,0 +1,77 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:CaseChampGui.ViewModels"
+             x:Class="CaseChampGui.Views.SchemaPaneView"
+             x:DataType="vm:SchemaPaneViewModel">
+
+    <Border Background="{DynamicResource SurfaceBrush}"
+            BorderBrush="{DynamicResource BorderSoftBrush}"
+            BorderThickness="1"
+            CornerRadius="10">
+        <DockPanel LastChildFill="True">
+            <Border DockPanel.Dock="Top"
+                    Padding="14,12"
+                    BorderBrush="{DynamicResource BorderSoftBrush}"
+                    BorderThickness="0,0,0,1">
+                <Grid ColumnDefinitions="*,Auto">
+                    <StackPanel Spacing="2">
+                        <TextBlock Text="{Binding Title}" FontWeight="SemiBold" FontSize="13" />
+                        <TextBlock Text="{Binding StatusText}" Classes="muted" FontSize="11" />
+                    </StackPanel>
+                    <Button Grid.Column="1"
+                            Classes="ghost"
+                            Content="↻"
+                            FontSize="13"
+                            Padding="8,4"
+                            ToolTip.Tip="Обновить схему таблиц"
+                            Command="{Binding RefreshCommand}" />
+                </Grid>
+            </Border>
+
+            <ScrollViewer Padding="6,4">
+                <ItemsControl ItemsSource="{Binding Tables}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate DataType="vm:SchemaTableViewModel">
+                            <Expander Classes="schema"
+                                      IsExpanded="{Binding IsExpanded, Mode=TwoWay}"
+                                      Margin="0,2">
+                                <Expander.Header>
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <TextBlock Text="🞎" VerticalAlignment="Center" />
+                                        <TextBlock Text="{Binding Name}"
+                                                   FontWeight="SemiBold"
+                                                   VerticalAlignment="Center" />
+                                        <TextBlock Text="{Binding Columns.Count, StringFormat='({0})'}"
+                                                   Classes="muted"
+                                                   VerticalAlignment="Center" />
+                                    </StackPanel>
+                                </Expander.Header>
+                                <ItemsControl ItemsSource="{Binding Columns}" Margin="22,4,4,8">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid ColumnDefinitions="*,Auto" Margin="0,2">
+                                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                                    <TextBlock Text="{Binding Name}"
+                                                               Classes="mono"
+                                                               FontSize="12" />
+                                                    <TextBlock Text="{Binding Key}"
+                                                               Classes="muted"
+                                                               FontSize="10"
+                                                               VerticalAlignment="Center" />
+                                                </StackPanel>
+                                                <TextBlock Grid.Column="1"
+                                                           Text="{Binding Type}"
+                                                           Classes="muted mono"
+                                                           FontSize="11" />
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </Expander>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+        </DockPanel>
+    </Border>
+</UserControl>

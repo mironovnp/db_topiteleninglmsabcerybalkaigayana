@@ -78,7 +78,7 @@ public partial class App : Application
             var text2Sql = new MistralText2SqlService(mistralApiKeys, schemaService);
 
             var sqlVm = new SqlViewModel(client, schemaPane, notifications);
-            var text2SqlVm = new Text2SqlViewModel(text2Sql, mistralApiKeys, client, notifications);
+            var text2SqlVm = new Text2SqlViewModel(text2Sql, mistralApiKeys, client, schemaPane, notifications);
             var settingsVm = new SettingsViewModel(settingsService, themeService, client, mistralApiKeys);
 
             mainVm = new MainWindowViewModel(

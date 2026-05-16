@@ -287,7 +287,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public bool IsText2SqlVisible => CurrentSection == AppSection.Text2Sql;
     public bool IsSettingsVisible => CurrentSection == AppSection.Settings;
 
-    public bool ShowDatabaseBar => CurrentSection == AppSection.Sql;
+    public bool ShowDatabaseBar =>
+        CurrentSection is AppSection.Sql or AppSection.Text2Sql;
 
     public string CurrentSectionTitle => CurrentSection switch
     {
