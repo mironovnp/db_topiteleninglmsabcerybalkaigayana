@@ -108,14 +108,189 @@ static bool isSqlStart(const std::string& first_word) {
            first_word == "LOGOUT" || first_word == "CHANGE";
 }
 
+static std::string buildSchemaContext(db::DBClient& client, std::string& error) {
+    auto tables = client.executeQuery("SHOW TABLES;");
+    if (!tables.success) {
+        error = "Не удалось получить схему БД: " + tables.message;
+        return {};
+    }
+    if (tables.rows.empty()) {
+        error = "Отсутствует информация о таблицах: в текущей базе нет таблиц.";
+        return {};
+    }
+
+    std::ostringstream schema;
+    for (const auto& row : tables.rows) {
+        if (row.empty()) continue;
+        const std::string table = row[0];
+        auto cols = client.executeQuery("SHOW COLUMNS FROM " + table + ";");
+        if (!cols.success) {
+            error = "Не удалось получить схему таблицы '" + table + "': " + cols.message;
+            return {};
+        }
+
+        schema << "TABLE " << table << " (";
+        for (size_t i = 0; i < cols.rows.size(); ++i) {
+            const auto& c = cols.rows[i];
+            if (c.size() < 2) continue;
+            if (i > 0) schema << ", ";
+            schema << c[0] << " " << c[1];
+            if (c.size() > 2 && c[2] == "NO") schema << " NOT NULL";
+            if (c.size() > 3 && c[3] == "PRI") schema << " PRIMARY KEY";
+            else if (c.size() > 3 && c[3] == "UNI") schema << " UNIQUE";
+        }
+        schema << ")\n";
+    }
+    return schema.str();
+}
+
+static std::string extractJsonObject(const std::string& text) {
+    size_t begin = text.find('{');
+    size_t end = text.rfind('}');
+    if (begin == std::string::npos || end == std::string::npos || begin > end)
+        return {};
+    return text.substr(begin, end - begin + 1);
+}
+
+static std::string readApiKeyFromFile(const std::string& path) {
+    std::ifstream in(path);
+    if (!in) return {};
+    std::string key;
+    std::getline(in, key);
+    return trim(key);
+}
+
+static bool isPlaceholderApiKey(const std::string& key) {
+    return key.empty() || key == "put-your-mistral-api-key-here" ||
+           key.find("PASTE_") != std::string::npos ||
+           key.find("YOUR_") != std::string::npos;
+}
+
+static void ensureMistralApiKeyFile(const std::string& path) {
+    std::ifstream existing(path);
+    if (existing.good()) return;
+
+    std::ofstream out(path);
+    if (!out) return;
+    out << "put-your-mistral-api-key-here\n";
+}
+
+static std::string loadMistralApiKey() {
+    if (const char* env_key = std::getenv("MISTRAL_API_KEY")) {
+        std::string key = trim(env_key);
+        if (!isPlaceholderApiKey(key)) return key;
+    }
+
+    if (const char* env_file = std::getenv("MISTRAL_API_KEY_FILE")) {
+        std::string key = readApiKeyFromFile(env_file);
+        if (!isPlaceholderApiKey(key)) return key;
+    }
+
+    constexpr const char* canonical_key_file = "mistral_api_key";
+    std::string key = readApiKeyFromFile(canonical_key_file);
+    if (!isPlaceholderApiKey(key)) return key;
+
+    for (const char* legacy_path : {".mistral_api_key", ".mistral_api_key.example"}) {
+        key = readApiKeyFromFile(legacy_path);
+        if (!isPlaceholderApiKey(key)) {
+            std::ofstream out(canonical_key_file);
+            if (out) out << key << "\n";
+            return key;
+        }
+    }
+
+    ensureMistralApiKeyFile(canonical_key_file);
+    return {};
+}
+
+static bool generateSqlWithMistral(const std::string& ru_request,
+                                   const std::string& schema_context,
+                                   std::string& sql,
+                                   std::string& message) {
+    std::string api_key = loadMistralApiKey();
+    if (api_key.empty()) {
+        message = "API ключ Mistral не задан. Установите MISTRAL_API_KEY, MISTRAL_API_KEY_FILE "
+                  "или заполните локальный файл mistral_api_key.";
+        return false;
+    }
+    std::string model = "mistral-small-latest";
+    if (const char* env_model = std::getenv("MISTRAL_MODEL")) {
+        if (*env_model) model = env_model;
+    }
+
+    nlohmann::json body;
+    body["model"] = model;
+    body["temperature"] = 0.0;
+    body["messages"] = nlohmann::json::array({
+        {
+            {"role", "system"},
+            {"content",
+             "Ты переводишь точные русскоязычные запросы пользователя в SQL для учебной СУБД. "
+             "Используй только переданную схему. Не выдумывай таблицы, колонки, значения и условия. "
+             "Если для корректного SQL не хватает таблицы, колонки, условия, периода, значения или другой "
+             "обязательной информации, верни JSON: {\"success\":false,\"message\":\"Отсутствует информация о ...\"}. "
+             "Если информации достаточно, верни только JSON: {\"success\":true,\"sql\":\"...\"}. "
+             "SQL должен быть одним запросом без markdown и без пояснений."}
+        },
+        {
+            {"role", "user"},
+            {"content", "Схема базы данных:\n" + schema_context + "\nЗадача на русском:\n" + ru_request}
+        }
+    });
+
+    httplib::SSLClient cli("api.mistral.ai", 443);
+    cli.set_connection_timeout(10);
+    cli.set_read_timeout(60);
+    cli.enable_server_certificate_verification(true);
+
+    httplib::Headers headers = {
+        {"Authorization", "Bearer " + api_key},
+        {"Content-Type", "application/json"}
+    };
+    auto res = cli.Post("/v1/chat/completions", headers, body.dump(), "application/json");
+    if (!res) {
+        message = "Не удалось подключиться к Mistral API.";
+        return false;
+    }
+    if (res->status < 200 || res->status >= 300) {
+        message = "Mistral API вернул HTTP " + std::to_string(res->status) + ": " + res->body;
+        return false;
+    }
+
+    try {
+        auto response = nlohmann::json::parse(res->body);
+        std::string content = response["choices"][0]["message"]["content"].get<std::string>();
+        auto parsed = nlohmann::json::parse(extractJsonObject(content));
+        if (!parsed.value("success", false)) {
+            message = parsed.value("message", "Отсутствует информация о задаче.");
+            return false;
+        }
+        sql = trim(parsed.value("sql", ""));
+        if (sql.empty()) {
+            message = "Mistral API вернул пустой SQL.";
+            return false;
+        }
+        return true;
+    } catch (const std::exception& e) {
+        message = std::string("Не удалось разобрать ответ Mistral API: ") + e.what();
+        return false;
+    }
+}
+
 static bool handleText2Sql(db::DBClient& client, const std::string& request, std::string& prompt_db, std::string& prompt_user) {
-    auto ai_res = client.executeText2Sql(request);
-    if (!ai_res.success) {
-        std::cout << "\033[31m[TEXT2SQL]\033[0m " << ai_res.message << "\n\n";
+    std::string schema_error;
+    std::string schema = buildSchemaContext(client, schema_error);
+    if (schema.empty()) {
+        std::cout << "\033[31m[TEXT2SQL]\033[0m " << schema_error << "\n\n";
         return true;
     }
 
-    std::string sql = ai_res.message;
+    std::string sql;
+    std::string msg;
+    if (!generateSqlWithMistral(request, schema, sql, msg)) {
+        std::cout << "\033[31m[TEXT2SQL]\033[0m " << msg << "\n\n";
+        return true;
+    }
 
     std::cout << "\033[36m[TEXT2SQL]\033[0m " << sql << "\n";
     auto result = client.executeQuery(sql);

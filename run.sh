@@ -63,8 +63,8 @@ start_dbserver_if_needed() {
             return 0
         fi
     fi
-    echo "[CaseChamp] Starting dbserver on 127.0.0.1:8080 (data: $DATA_DIR)..."
-    ./build/dbserver --host 127.0.0.1 --port 8080 --data-dir "$DATA_DIR" &
+    echo "[CaseChamp] Starting dbserver on 0.0.0.0:8080 (data: $DATA_DIR)..."
+    ./build/dbserver --host 0.0.0.0 --port 8080 --data-dir "$DATA_DIR" &
     DB_PID=$!
     for _ in $(seq 1 40); do
         if curl -sf "http://127.0.0.1:8080/ping" >/dev/null 2>&1; then
