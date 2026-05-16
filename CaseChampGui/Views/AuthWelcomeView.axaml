@@ -77,7 +77,8 @@
                 </CheckBox>
 
                 <TextBlock Text="{Binding StatusText}"
-                           Foreground="{DynamicResource ErrorBrush}"
+                           Classes.auth-status="{Binding HasStatus}"
+                           Classes.auth-status-error="{Binding IsStatusError}"
                            TextWrapping="Wrap"
                            IsVisible="{Binding HasStatus}" />
 

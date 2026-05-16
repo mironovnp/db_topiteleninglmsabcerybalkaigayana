@@ -32,8 +32,11 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private const double SidebarCollapsedWidth = 84;
     private const double SidebarExpandedWidth = 224;
+    private const double NarrowWindowMaxWidth = 1060;
+
     private bool _autoCollapseSidebar = true;
     private bool _isSidebarHovered;
+    private double _windowWidth = 1280;
 
     private bool _compactMode;
     private bool _animationsEnabled = true;
@@ -95,6 +98,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _settingsService.SettingsChanged += OnSettingsChanged;
         _themeService.ThemeApplied += (_, _) => RefreshSidebarBrand();
         Sql.SchemaInvalidationRequested += OnSchemaInvalidationRequested;
+        Text2Sql.CatalogSqlExecuted += OnSchemaInvalidationRequested;
         Settings.ChatModeChanged += (_, enabled) => Sql.IsChatMode = enabled;
         Settings.SidebarAutoCollapseChanged += (_, value) => AutoCollapseSidebar = value;
         Settings.CompactModeChanged += (_, value) => CompactMode = value;
@@ -109,6 +113,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         UpdateConnectionBadge();
         RefreshAccountAppearance();
         RefreshSidebarBrand();
+        UiThread.Post(RefreshCommandStates);
     }
 
     public Bitmap? SidebarBrandBitmap
@@ -131,50 +136,66 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             if (SetProperty(ref _authOverlayVisible, value))
             {
+                OnPropertyChanged(nameof(IsMainChromeVisible));
                 LogoutCommand.RaiseCanExecuteChanged();
+                RefreshCommandStates();
             }
         }
     }
 
-    public Task CompleteAuthenticationGateAsync()
-    {
-        var d = Dispatcher.UIThread;
-        if (d.CheckAccess())
-            return CompleteAuthenticationGateCoreAsync();
-        return d.InvokeAsync(CompleteAuthenticationGateCoreAsync);
-    }
+    public bool IsMainChromeVisible => !AuthOverlayVisible;
+
+    public Task CompleteAuthenticationGateAsync() =>
+        UiThread.RunAsync(CompleteAuthenticationGateCoreAsync);
 
     private async Task CompleteAuthenticationGateCoreAsync()
     {
         _isFinishingAuth = true;
-        Auth.StatusText = "Загрузка интерфейса…";
+        Auth.SetStatus("Загрузка интерфейса…", isError: false);
 
         try
         {
+            // Show main UI immediately so a slow /query does not leave a blank window.
+            AuthOverlayVisible = false;
+            Auth.ClearStatus();
+            RefreshAccountAppearance();
+            OnPropertyChanged(nameof(IsAdminUser));
+
             await PostAuthBootstrapAsync().ConfigureAwait(false);
             await LoadDatabasesAsync(refreshSchema: false).ConfigureAwait(false);
 
-            await PostToUiAsync(() =>
-            {
-                AuthOverlayVisible = false;
-                Auth.StatusText = string.Empty;
-                RefreshAccountAppearance();
-                OnPropertyChanged(nameof(IsAdminUser));
-            });
+            RefreshAccountAppearance();
+            OnPropertyChanged(nameof(IsAdminUser));
         }
         catch (Exception ex)
         {
-            await PostToUiAsync(() =>
-            {
-                AuthOverlayVisible = true;
-                Auth.StatusText = $"Ошибка после входа: {ex.Message}";
-            });
+            AuthOverlayVisible = true;
+            Auth.SetStatus($"Ошибка после входа: {ex.Message}", isError: true);
             Notifications.Push("Ошибка после входа", ex.Message, NotificationKind.Error);
         }
         finally
         {
             _isFinishingAuth = false;
+            RefreshCommandStates();
         }
+    }
+
+    public void RefreshCommandStates()
+    {
+        void Refresh()
+        {
+            RefreshDatabasesCommand.RaiseCanExecuteChanged();
+            LogoutCommand.RaiseCanExecuteChanged();
+            Auth.SubmitCommand.RaiseCanExecuteChanged();
+            Sql.RefreshCommandStates();
+            Text2Sql.RefreshCommandStates();
+            Settings.RefreshCommandStates();
+        }
+
+        if (Dispatcher.UIThread.CheckAccess())
+            Refresh();
+        else
+            Dispatcher.UIThread.Post(Refresh);
     }
 
     public string AccountPanelLabel
@@ -256,6 +277,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 OnPropertyChanged(nameof(CurrentSectionSubtitle));
                 OnPropertyChanged(nameof(CurrentSectionIcon));
                 OnPropertyChanged(nameof(ShowDatabaseBar));
+                if (value == AppSection.Text2Sql)
+                    Text2Sql.OnSectionActivated();
             }
         }
     }
@@ -277,7 +300,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public string CurrentSectionSubtitle => CurrentSection switch
     {
         AppSection.Sql => "Прямой ввод SQL и выполнение на сервере CaseChamp",
-        AppSection.Text2Sql => "Перевод запросов с русского языка в SQL (скоро)",
+        AppSection.Text2Sql => "Перевод запросов с русского на SQL через Mistral AI",
         AppSection.Settings => "Параметры приложения и подключения",
         _ => string.Empty,
     };
@@ -333,6 +356,21 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public AsyncRelayCommand RefreshDatabasesCommand { get; }
 
+    public double WindowWidth
+    {
+        get => _windowWidth;
+        set
+        {
+            if (!SetProperty(ref _windowWidth, value)) return;
+            if (IsNarrowWindow && _isSidebarHovered)
+                IsSidebarHovered = false;
+            OnPropertyChanged(nameof(IsSidebarExpanded));
+            OnPropertyChanged(nameof(SidebarWidth));
+        }
+    }
+
+    private bool IsNarrowWindow => _windowWidth < NarrowWindowMaxWidth;
+
     public bool AutoCollapseSidebar
     {
         get => _autoCollapseSidebar;
@@ -359,7 +397,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
     }
 
-    public bool IsSidebarExpanded => !AutoCollapseSidebar || IsSidebarHovered;
+    public bool IsSidebarExpanded =>
+        !IsNarrowWindow && (!AutoCollapseSidebar || IsSidebarHovered);
 
     public double SidebarWidth => IsSidebarExpanded ? SidebarExpandedWidth : SidebarCollapsedWidth;
 
@@ -415,42 +454,67 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         var ct = _startupCts.Token;
         try
         {
-            await _settingsService.LoadAsync().ConfigureAwait(true);
+            await _settingsService.LoadAsync().ConfigureAwait(false);
             ct.ThrowIfCancellationRequested();
 
             var s = _settingsService.Current;
-            _themeService.Apply(s.Theme);
-            Sql.IsChatMode = s.ChatModeEnabled;
-            AutoCollapseSidebar = s.SidebarAutoCollapse;
-            _client.Configure(s.Host, s.Port);
-            RefreshAccountAppearance();
-            RefreshSidebarBrand();
+            await UiThread.RunAsync(() =>
+            {
+                _themeService.Apply(s.Theme);
+                Sql.IsChatMode = s.ChatModeEnabled;
+                AutoCollapseSidebar = s.SidebarAutoCollapse;
+                _client.Configure(s.Host, s.Port);
+                RefreshAccountAppearance();
+                RefreshSidebarBrand();
+            });
 
             if (!s.AutoConnect)
             {
-                AuthOverlayVisible = false;
+                await UiThread.RunAsync(() =>
+                {
+                    if (!ShouldKeepAuthenticatedChrome())
+                    {
+                        AuthOverlayVisible = string.IsNullOrEmpty(_client.CurrentUser);
+                    }
+                });
                 return;
             }
 
-            var ok = await EnsureServerReachableAsync(ct).ConfigureAwait(true);
+            var ok = await EnsureServerReachableAsync(ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested();
             if (!ok)
             {
-                AuthOverlayVisible = true;
-                Auth.StatusText = "Нет связи с сервером. Проверьте настройки или запустите dbserver.";
+                await UiThread.RunAsync(() =>
+                {
+                    if (!ShouldKeepAuthenticatedChrome())
+                    {
+                        AuthOverlayVisible = true;
+                        Auth.SetStatus("Нет связи с сервером. Проверьте настройки или запустите dbserver.", isError: true);
+                    }
+                });
                 return;
             }
 
-            if (await Auth.TrySilentLoginAsync(ct).ConfigureAwait(true))
+            if (await Auth.TrySilentLoginAsync(ct).ConfigureAwait(false))
             {
                 return;
             }
 
             ct.ThrowIfCancellationRequested();
-            AuthOverlayVisible = true;
+            await UiThread.RunAsync(() =>
+            {
+                if (!ShouldKeepAuthenticatedChrome())
+                {
+                    AuthOverlayVisible = true;
+                }
+            });
         }
         catch (OperationCanceledException)
         {
+        }
+        finally
+        {
+            await UiThread.RunAsync(RefreshCommandStates);
         }
     }
 
@@ -701,7 +765,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     private void OnSchemaInvalidationRequested(object? sender, string sql)
     {
-        _ = Task.Run(() => ReloadAfterDdlAsync(sql));
+        _ = ReloadAfterDdlAsync(sql);
     }
 
     private async Task ReloadAfterDdlAsync(string sql)
@@ -735,18 +799,21 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                || t.StartsWith("DROP DATABASE", StringComparison.OrdinalIgnoreCase);
     }
 
+    private bool ShouldKeepAuthenticatedChrome()
+        => _isFinishingAuth || !string.IsNullOrEmpty(_client.CurrentUser);
+
     private void OnClientStateChanged(object? sender, EventArgs e)
     {
-        _ = Task.Run(async () =>
+        UiThread.Post(() =>
         {
-            await PostToUiAsync(() => UpdateConnectionBadge()).ConfigureAwait(false);
+            UpdateConnectionBadge();
             if (_isConnected
                 && Databases.Count == 0
                 && !AuthOverlayVisible
                 && !_isFinishingAuth
                 && !string.IsNullOrEmpty(_client.CurrentUser))
             {
-                await LoadDatabasesAsync(refreshSchema: false).ConfigureAwait(false);
+                _ = LoadDatabasesAsync(refreshSchema: false);
             }
         });
     }
@@ -806,6 +873,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _client.StateChanged -= OnClientStateChanged;
         _settingsService.SettingsChanged -= OnSettingsChanged;
         Sql.SchemaInvalidationRequested -= OnSchemaInvalidationRequested;
+        Text2Sql.CatalogSqlExecuted -= OnSchemaInvalidationRequested;
         AccountAvatarBitmap?.Dispose();
         SidebarBrandBitmap = null;
     }

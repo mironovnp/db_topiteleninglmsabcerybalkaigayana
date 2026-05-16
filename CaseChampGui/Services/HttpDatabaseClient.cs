@@ -185,7 +185,7 @@ public sealed class HttpDatabaseClient : IDatabaseClient, IDisposable
                 _currentUser = result.CurrentUser;
                 changed = true;
             }
-            if (!string.IsNullOrEmpty(result.SessionId) || !string.IsNullOrEmpty(_sessionId))
+            if (!string.IsNullOrEmpty(_currentUser) || !string.IsNullOrEmpty(result.CurrentUser))
             {
                 if (result.IsAdmin != _isGlobalAdmin)
                 {

@@ -28,6 +28,13 @@ public partial class MainWindow : Window
         DataContextChanged += OnDataContextChanged;
         Opened += OnWindowOpened;
         Closed += OnWindowClosed;
+        SizeChanged += OnWindowSizeChanged;
+    }
+
+    private void OnWindowSizeChanged(object? sender, SizeChangedEventArgs e)
+    {
+        if (DataContext is MainWindowViewModel vm)
+            vm.WindowWidth = e.NewSize.Width;
     }
 
     private void OnWindowClosed(object? sender, EventArgs e)
@@ -42,6 +49,8 @@ public partial class MainWindow : Window
 
     private void OnWindowOpened(object? sender, EventArgs e)
     {
+        (DataContext as MainWindowViewModel)?.RefreshCommandStates();
+
         if (Screens.Primary is not { } screen)
         {
             Activate();
@@ -52,6 +61,9 @@ public partial class MainWindow : Window
         var pos = Position;
         var offScreen = pos.X < wa.X - 64 || pos.Y < wa.Y - 64
                         || pos.X > wa.X + wa.Width || pos.Y > wa.Y + wa.Height;
+        if (DataContext is MainWindowViewModel vm)
+            vm.WindowWidth = Width;
+
         if (offScreen)
         {
             var w = Math.Clamp((int)Width, 720, wa.Width);
@@ -74,7 +86,9 @@ public partial class MainWindow : Window
         if (_vm is not null)
         {
             _vm.PropertyChanged += OnVmPropertyChanged;
+            _vm.WindowWidth = Width;
             ApplySidebarAnimation();
+            _vm.RefreshCommandStates();
         }
     }
 
@@ -112,16 +126,12 @@ public partial class MainWindow : Window
     private void OnSidebarPointerEntered(object? sender, PointerEventArgs e)
     {
         if (DataContext is MainWindowViewModel vm)
-        {
             vm.IsSidebarHovered = true;
-        }
     }
 
     private void OnSidebarPointerExited(object? sender, PointerEventArgs e)
     {
         if (DataContext is MainWindowViewModel vm)
-        {
             vm.IsSidebarHovered = false;
-        }
     }
 }

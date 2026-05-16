@@ -12,13 +12,17 @@ namespace CaseChampGui.Views;
 
 public partial class SqlView : UserControl
 {
+    private const double MinToolbarWidthForShortcutHint = 620;
+
     private SqlViewModel? _vm;
+    private Control? _editorToolbar;
 
     public SqlView()
     {
         InitializeComponent();
         DataContextChanged += OnDataContextChanged;
         AttachedToVisualTree += OnAttachedToVisualTree;
+        DetachedFromVisualTree += OnDetachedFromVisualTree;
         ActualThemeVariantChanged += (_, _) => RebuildResultsTable();
     }
 
@@ -27,6 +31,34 @@ public partial class SqlView : UserControl
         AttachEditorShortcuts(this.FindControl<TextBox>("EditorTextBox"));
         AttachEditorShortcuts(this.FindControl<TextBox>("ChatInputBox"));
         RebuildResultsTable();
+
+        _editorToolbar = this.FindControl<Control>("EditorToolbar");
+        if (_editorToolbar is not null)
+        {
+            _editorToolbar.SizeChanged += OnEditorToolbarSizeChanged;
+            UpdateShortcutHintVisibility();
+        }
+    }
+
+    private void OnDetachedFromVisualTree(object? sender, VisualTreeAttachmentEventArgs e)
+    {
+        if (_editorToolbar is not null)
+        {
+            _editorToolbar.SizeChanged -= OnEditorToolbarSizeChanged;
+            _editorToolbar = null;
+        }
+    }
+
+    private void OnEditorToolbarSizeChanged(object? sender, SizeChangedEventArgs e)
+        => UpdateShortcutHintVisibility();
+
+    private void UpdateShortcutHintVisibility()
+    {
+        var hint = this.FindControl<TextBlock>("CtrlEnterHint");
+        if (hint is null || _editorToolbar is null) return;
+
+        var width = _editorToolbar.Bounds.Width;
+        hint.IsVisible = width <= 0 || width >= MinToolbarWidthForShortcutHint;
     }
 
     private void AttachEditorShortcuts(TextBox? box)
@@ -71,7 +103,13 @@ public partial class SqlView : UserControl
         }
     }
 
-    private void OnResultsChanged(object? sender, EventArgs e) => RebuildResultsTable();
+    private void OnResultsChanged(object? sender, EventArgs e)
+    {
+        if (Dispatcher.UIThread.CheckAccess())
+            RebuildResultsTable();
+        else
+            Dispatcher.UIThread.Post(RebuildResultsTable);
+    }
 
     private void OnMessagesChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {

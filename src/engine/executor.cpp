@@ -1808,6 +1808,7 @@ json Executor::execRegister(const RegisterStatement* q) {
     current_user_ = q->username;
     json res = ok("User '" + q->username + "' registered and logged in.");
     res["current_user"] = current_user_;
+    res["is_admin"] = isAdmin();
     return res;
 }
 
@@ -1825,6 +1826,7 @@ json Executor::execLogin(const LoginStatement* q) {
     current_user_ = q->username;
     json res = ok("Logged in as '" + current_user_ + "'.");
     res["current_user"] = current_user_;
+    res["is_admin"] = isAdmin();
     return res;
 }
 

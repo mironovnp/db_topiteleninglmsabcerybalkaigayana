@@ -1,6 +1,7 @@
 using System;
 using System.Threading.Tasks;
 using System.Windows.Input;
+using Avalonia.Threading;
 
 namespace CaseChampGui.ViewModels;
 
@@ -64,17 +65,25 @@ public sealed class AsyncRelayCommand : ICommand
         try
         {
             _isRunning = true;
-            RaiseCanExecuteChanged();
-            await _execute();
+            NotifyCanExecuteChanged();
+            await _execute().ConfigureAwait(false);
         }
         finally
         {
             _isRunning = false;
-            RaiseCanExecuteChanged();
+            NotifyCanExecuteChanged();
         }
     }
 
     public event EventHandler? CanExecuteChanged;
 
-    public void RaiseCanExecuteChanged() => CanExecuteChanged?.Invoke(this, EventArgs.Empty);
+    public void RaiseCanExecuteChanged() => NotifyCanExecuteChanged();
+
+    private void NotifyCanExecuteChanged()
+    {
+        if (Dispatcher.UIThread.CheckAccess())
+            CanExecuteChanged?.Invoke(this, EventArgs.Empty);
+        else
+            Dispatcher.UIThread.Post(() => CanExecuteChanged?.Invoke(this, EventArgs.Empty));
+    }
 }

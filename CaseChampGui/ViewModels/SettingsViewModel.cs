@@ -1,12 +1,13 @@
 using System;
+using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using CaseChampGui.Models;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
-using CaseChampGui.Models;
 using CaseChampGui.Services;
 
 namespace CaseChampGui.ViewModels;
@@ -18,6 +19,7 @@ public sealed class SettingsViewModel : ObservableObject
     private readonly ISettingsService _settingsService;
     private readonly ThemeService _themeService;
     private readonly IDatabaseClient _client;
+    private readonly IMistralApiKeyStore _mistralApiKeys;
 
     private AppTheme _theme;
     private string _host = string.Empty;
@@ -37,23 +39,53 @@ public sealed class SettingsViewModel : ObservableObject
     private string _pwdOld = string.Empty;
     private string _pwdNew = string.Empty;
     private string _pwdNew2 = string.Empty;
-    private bool _updateStoredPasswordAfterChange = true;
     private string? _avatarPath;
     private string _accountMessage = string.Empty;
     private bool _isSavingAccount;
+    private string _mistralApiKeyInput = string.Empty;
+    private string _mistralKeyStatus = string.Empty;
+    private string _mistralKeyMessage = string.Empty;
+    private string _adminOrgMistralKeyInput = string.Empty;
+    private string _adminUserMistralTarget = string.Empty;
+    private string _adminUserMistralKeyInput = string.Empty;
+    private MistralKeyChoiceItem? _selectedMistralKeyChoice;
+    private MistralPolicyOption? _selectedAdminMistralPolicy;
+    private bool _isUpdatingMistralSelection;
 
-    public SettingsViewModel(ISettingsService settingsService, ThemeService themeService, IDatabaseClient client)
+    public SettingsViewModel(
+        ISettingsService settingsService,
+        ThemeService themeService,
+        IDatabaseClient client,
+        IMistralApiKeyStore mistralApiKeys)
     {
         _settingsService = settingsService;
         _themeService = themeService;
         _client = client;
+        _mistralApiKeys = mistralApiKeys;
+
+        AdminMistralPolicyOptions =
+        [
+            new(MistralKeyPolicyPreset.UserChoice, "Пользователи выбирают сами"),
+            new(MistralKeyPolicyPreset.ForceOrganization, "Только ключ организации"),
+            new(MistralKeyPolicyPreset.ForcePersonal, "Только личный ключ"),
+            new(MistralKeyPolicyPreset.ForceSharedPc, "Только общий ключ с этого ПК"),
+        ];
+        MistralKeyChoices = new ObservableCollection<MistralKeyChoiceItem>();
 
         ReloadFromSettings();
+        RefreshMistralKeyState();
 
         ReconnectCommand = new AsyncRelayCommand(ReconnectAsync, () => !_isReconnecting);
         SaveCommand = new AsyncRelayCommand(SaveAsync);
         SaveAccountCommand = new AsyncRelayCommand(SaveAccountAsync, () => !_isSavingAccount);
         PickAvatarCommand = new AsyncRelayCommand(PickAvatarAsync, () => !IsAdminAccount);
+        SaveMistralKeyCommand = new AsyncRelayCommand(SaveMistralKeyAsync, () => !string.IsNullOrWhiteSpace(MistralApiKeyInput));
+        SaveAdminOrgMistralKeyCommand = new AsyncRelayCommand(SaveAdminOrgMistralKeyAsync,
+            () => IsAdminAccount && !string.IsNullOrWhiteSpace(AdminOrgMistralKeyInput));
+        SaveAdminUserMistralKeyCommand = new AsyncRelayCommand(SaveAdminUserMistralKeyAsync,
+            () => IsAdminAccount
+                  && !string.IsNullOrWhiteSpace(AdminUserMistralTarget)
+                  && !string.IsNullOrWhiteSpace(AdminUserMistralKeyInput));
 
         _client.StateChanged += (_, _) =>
         {
@@ -62,10 +94,141 @@ public sealed class SettingsViewModel : ObservableObject
                 UpdateConnectionStatusText();
                 OnPropertyChanged(nameof(IsAdminAccount));
                 OnPropertyChanged(nameof(ServerLogin));
+                SaveAdminOrgMistralKeyCommand.RaiseCanExecuteChanged();
+                SaveAdminUserMistralKeyCommand.RaiseCanExecuteChanged();
+                RefreshMistralKeyState();
             });
         };
         UpdateConnectionStatusText();
         _settingsService.SettingsChanged += (_, _) => ReloadFromSettings();
+        _mistralApiKeys.ApiKeyChanged += (_, _) => Dispatcher.UIThread.Post(RefreshMistralKeyState);
+    }
+
+    public ObservableCollection<MistralKeyChoiceItem> MistralKeyChoices { get; }
+
+    public MistralKeyChoiceItem? SelectedMistralKeyChoice
+    {
+        get => _selectedMistralKeyChoice;
+        set
+        {
+            if (_isUpdatingMistralSelection) return;
+            if (value is null || !value.IsSelectable) return;
+            if (!SetProperty(ref _selectedMistralKeyChoice, value)) return;
+            _mistralApiKeys.SelectionMode = value.Mode;
+            RefreshMistralKeyState();
+        }
+    }
+
+    public string ActiveMistralKeyBadge => _mistralApiKeys.ActiveKeyBadge;
+
+    public bool IsMistralKeyChoiceLocked => _mistralApiKeys.IsKeyChoiceLocked;
+
+    public string MistralKeyChoiceLockHint => _mistralApiKeys.KeyChoiceLockHint;
+
+    public bool HasMistralKeyChoiceLockHint => !string.IsNullOrWhiteSpace(MistralKeyChoiceLockHint);
+
+    public bool CanEditMistralSharing => !IsMistralKeyChoiceLocked;
+
+    public bool CanShareMistralKey => CanEditMistralSharing && HasMistralPersonalKey;
+
+    public MistralPolicyOption[] AdminMistralPolicyOptions { get; }
+
+    public MistralPolicyOption? SelectedAdminMistralPolicy
+    {
+        get => _selectedAdminMistralPolicy;
+        set
+        {
+            if (value is null || !SetProperty(ref _selectedAdminMistralPolicy, value)) return;
+            if (!IsAdminAccount) return;
+            _mistralApiKeys.KeyPolicyPreset = value.Value;
+            RefreshMistralKeyState();
+        }
+    }
+
+    public string MistralApiKeyInput
+    {
+        get => _mistralApiKeyInput;
+        set
+        {
+            if (SetProperty(ref _mistralApiKeyInput, value))
+                SaveMistralKeyCommand.RaiseCanExecuteChanged();
+        }
+    }
+
+    public string MistralKeyStatus
+    {
+        get => _mistralKeyStatus;
+        private set => SetProperty(ref _mistralKeyStatus, value);
+    }
+
+    public string MistralKeyMessage
+    {
+        get => _mistralKeyMessage;
+        private set
+        {
+            if (SetProperty(ref _mistralKeyMessage, value))
+                OnPropertyChanged(nameof(HasMistralKeyMessage));
+        }
+    }
+
+    public bool HasMistralKeyMessage => !string.IsNullOrWhiteSpace(MistralKeyMessage);
+
+    public bool HasMistralKey => _mistralApiKeys.HasValidKey;
+
+    public bool HasMistralPersonalKey => _mistralApiKeys.HasPersonalKey;
+
+    public string MistralKeyFileHint => _mistralApiKeys.PersonalKeyFilePath;
+
+    public bool MistralShareMyKeyWithOthers
+    {
+        get => _mistralApiKeys.SharePersonalKeyWithOthers;
+        set
+        {
+            _mistralApiKeys.SharePersonalKeyWithOthers = value;
+            OnPropertyChanged();
+            RefreshMistralKeyState();
+        }
+    }
+
+    public bool MistralUseSharedKeyFallback
+    {
+        get => _mistralApiKeys.UseSharedKeyFallback;
+        set
+        {
+            _mistralApiKeys.UseSharedKeyFallback = value;
+            OnPropertyChanged();
+            RefreshMistralKeyState();
+        }
+    }
+
+    public string AdminOrgMistralKeyInput
+    {
+        get => _adminOrgMistralKeyInput;
+        set
+        {
+            if (SetProperty(ref _adminOrgMistralKeyInput, value))
+                SaveAdminOrgMistralKeyCommand.RaiseCanExecuteChanged();
+        }
+    }
+
+    public string AdminUserMistralTarget
+    {
+        get => _adminUserMistralTarget;
+        set
+        {
+            if (SetProperty(ref _adminUserMistralTarget, value))
+                SaveAdminUserMistralKeyCommand.RaiseCanExecuteChanged();
+        }
+    }
+
+    public string AdminUserMistralKeyInput
+    {
+        get => _adminUserMistralKeyInput;
+        set
+        {
+            if (SetProperty(ref _adminUserMistralKeyInput, value))
+                SaveAdminUserMistralKeyCommand.RaiseCanExecuteChanged();
+        }
     }
 
     public bool IsAdminAccount =>
@@ -101,12 +264,6 @@ public sealed class SettingsViewModel : ObservableObject
     {
         get => _pwdNew2;
         set => SetProperty(ref _pwdNew2, value);
-    }
-
-    public bool UpdateStoredPasswordAfterChange
-    {
-        get => _updateStoredPasswordAfterChange;
-        set => SetProperty(ref _updateStoredPasswordAfterChange, value);
     }
 
     public string? AvatarPath
@@ -278,6 +435,20 @@ public sealed class SettingsViewModel : ObservableObject
     public AsyncRelayCommand SaveCommand { get; }
     public AsyncRelayCommand SaveAccountCommand { get; }
     public AsyncRelayCommand PickAvatarCommand { get; }
+    public AsyncRelayCommand SaveMistralKeyCommand { get; }
+    public AsyncRelayCommand SaveAdminOrgMistralKeyCommand { get; }
+    public AsyncRelayCommand SaveAdminUserMistralKeyCommand { get; }
+
+    public void RefreshCommandStates()
+    {
+        ReconnectCommand.RaiseCanExecuteChanged();
+        SaveCommand.RaiseCanExecuteChanged();
+        SaveAccountCommand.RaiseCanExecuteChanged();
+        PickAvatarCommand.RaiseCanExecuteChanged();
+        SaveMistralKeyCommand.RaiseCanExecuteChanged();
+        SaveAdminOrgMistralKeyCommand.RaiseCanExecuteChanged();
+        SaveAdminUserMistralKeyCommand.RaiseCanExecuteChanged();
+    }
 
     public Task SaveAsync() => _settingsService.SaveAsync(BuildSettings());
 
@@ -403,21 +574,12 @@ public sealed class SettingsViewModel : ObservableObject
                 PwdNew = string.Empty;
                 PwdNew2 = string.Empty;
 
-                if (RememberPassword && UpdateStoredPasswordAfterChange)
+                if (RememberPassword)
                 {
                     var b = BuildSettings();
                     b.EncryptedPassword = CredentialProtector.Encrypt(newPlain);
                     await _settingsService.SaveAsync(b).ConfigureAwait(false);
                     AccountMessage = "Пароль на сервере и в сохранённых учётных данных обновлён.";
-                    return;
-                }
-
-                if (RememberPassword && !UpdateStoredPasswordAfterChange)
-                {
-                    var b = BuildSettings();
-                    b.EncryptedPassword = null;
-                    await _settingsService.SaveAsync(b).ConfigureAwait(false);
-                    AccountMessage = "Пароль на сервере обновлён. Сохранённый пароль сброшен — введите его вручную при следующем входе.";
                     return;
                 }
 
@@ -438,6 +600,100 @@ public sealed class SettingsViewModel : ObservableObject
     }
 
     private static string SqlString(string p) => "'" + (p ?? "").Replace("'", "''") + "'";
+
+    private void RefreshMistralKeyState()
+    {
+        MistralKeyStatus = _mistralApiKeys.HasValidKey
+            ? "Text2SQL готов к работе с выбранным ключом."
+            : "Ключ не задан — выберите источник ниже или сохраните личный ключ.";
+
+        MistralKeyChoices.Clear();
+        foreach (var choice in _mistralApiKeys.GetKeyChoices())
+        {
+            if (choice.MapsToSource == MistralKeySource.Environment && choice.Title.StartsWith("Переменная"))
+                continue;
+            MistralKeyChoices.Add(choice);
+        }
+
+        _isUpdatingMistralSelection = true;
+        _selectedMistralKeyChoice = MistralKeyChoices.FirstOrDefault(c => c.IsActive && c.IsSelectable)
+            ?? MistralKeyChoices.FirstOrDefault(c => c.IsActive)
+            ?? MistralKeyChoices.FirstOrDefault(c => c.IsSelectable);
+        OnPropertyChanged(nameof(SelectedMistralKeyChoice));
+        _isUpdatingMistralSelection = false;
+
+        if (IsAdminAccount)
+        {
+            _selectedAdminMistralPolicy = AdminMistralPolicyOptions.FirstOrDefault(o => o.Value == _mistralApiKeys.KeyPolicyPreset)
+                ?? AdminMistralPolicyOptions[0];
+            OnPropertyChanged(nameof(SelectedAdminMistralPolicy));
+        }
+
+        OnPropertyChanged(nameof(HasMistralKey));
+        OnPropertyChanged(nameof(HasMistralPersonalKey));
+        OnPropertyChanged(nameof(MistralShareMyKeyWithOthers));
+        OnPropertyChanged(nameof(MistralUseSharedKeyFallback));
+        OnPropertyChanged(nameof(ActiveMistralKeyBadge));
+        OnPropertyChanged(nameof(IsMistralKeyChoiceLocked));
+        OnPropertyChanged(nameof(MistralKeyChoiceLockHint));
+        OnPropertyChanged(nameof(HasMistralKeyChoiceLockHint));
+        OnPropertyChanged(nameof(CanEditMistralSharing));
+        OnPropertyChanged(nameof(CanShareMistralKey));
+    }
+
+    private async Task SaveMistralKeyAsync()
+    {
+        MistralKeyMessage = string.Empty;
+        try
+        {
+            _mistralApiKeys.SavePersonalApiKey(MistralApiKeyInput);
+            MistralApiKeyInput = string.Empty;
+            RefreshMistralKeyState();
+            MistralKeyMessage = "Личный API-ключ Mistral сохранён.";
+        }
+        catch (Exception ex)
+        {
+            MistralKeyMessage = ex.Message;
+        }
+
+        await Task.CompletedTask;
+    }
+
+    private async Task SaveAdminOrgMistralKeyAsync()
+    {
+        MistralKeyMessage = string.Empty;
+        try
+        {
+            _mistralApiKeys.SaveOrganizationApiKey(AdminOrgMistralKeyInput);
+            AdminOrgMistralKeyInput = string.Empty;
+            RefreshMistralKeyState();
+            MistralKeyMessage = "Общий ключ организации сохранён (просмотр недоступен).";
+        }
+        catch (Exception ex)
+        {
+            MistralKeyMessage = ex.Message;
+        }
+
+        await Task.CompletedTask;
+    }
+
+    private async Task SaveAdminUserMistralKeyAsync()
+    {
+        MistralKeyMessage = string.Empty;
+        try
+        {
+            _mistralApiKeys.SaveApiKeyForUser(AdminUserMistralTarget, AdminUserMistralKeyInput);
+            AdminUserMistralKeyInput = string.Empty;
+            RefreshMistralKeyState();
+            MistralKeyMessage = $"Ключ для пользователя «{AdminUserMistralTarget.Trim()}» сохранён (просмотр недоступен).";
+        }
+        catch (Exception ex)
+        {
+            MistralKeyMessage = ex.Message;
+        }
+
+        await Task.CompletedTask;
+    }
 
     private async Task PickAvatarAsync()
     {

@@ -15,5 +15,5 @@
                FontSize="16"
                HorizontalAlignment="Center"
                VerticalAlignment="Center"
-               Foreground="#5C4D3A" />
+               Foreground="{DynamicResource TextBrush}" />
 </Window>

@@ -29,6 +29,8 @@ public:
         current_user_ = user;
     }
 
+    bool isAdmin() const;
+
 private:
     Storage storage_;
 
@@ -38,7 +40,6 @@ private:
     inline thread_local static const Row* outer_row_ = nullptr;
 
     inline thread_local static std::string current_user_ = ""; 
-    bool isAdmin() const;
 
     // --- Session & RBAC ---
     std::unordered_map<std::string, bool> priv_cache_;

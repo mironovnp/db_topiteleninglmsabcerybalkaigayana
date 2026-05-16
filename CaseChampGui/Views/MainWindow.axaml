@@ -10,16 +10,14 @@
         x:DataType="vm:MainWindowViewModel"
         Title="СУБД Топит_Еленинг"
         Width="1280" Height="800"
-        MinWidth="720" MinHeight="480"
+        MinWidth="720"
+        MinHeight="480"
         WindowStartupLocation="CenterScreen"
         Background="{DynamicResource BackgroundBrush}">
 
     <Panel>
-        <Grid ColumnDefinitions="Auto,*"
-              IsVisible="{Binding !AuthOverlayVisible}">
+        <Grid ColumnDefinitions="Auto,*">
 
-            
-            
             <Border Grid.Column="0"
                     Name="SidebarHost"
                     Width="{Binding SidebarWidth}"
@@ -367,7 +365,8 @@
                 HorizontalAlignment="Stretch"
                 VerticalAlignment="Stretch"
                 Background="{DynamicResource AuthGateBackgroundBrush}"
-                IsVisible="{Binding AuthOverlayVisible}">
+                IsVisible="{Binding AuthOverlayVisible}"
+                IsHitTestVisible="{Binding AuthOverlayVisible}">
             <ScrollViewer HorizontalScrollBarVisibility="Disabled"
                           VerticalScrollBarVisibility="Auto"
                           HorizontalAlignment="Stretch"

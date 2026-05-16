@@ -29,6 +29,11 @@ public partial class App : Application
         {
             desktop.ShutdownMode = ShutdownMode.OnMainWindowClose;
 
+            var settingsService = new JsonSettingsService();
+            settingsService.Load();
+            var themeService = new ThemeService();
+            themeService.Apply(settingsService.Current.Theme);
+
             var loading = new LoadingWindow();
             desktop.MainWindow = loading;
             base.OnFrameworkInitializationCompleted();
@@ -36,7 +41,7 @@ public partial class App : Application
             loading.Show();
             loading.Activate();
 
-            _ = Dispatcher.UIThread.InvokeAsync(() => OpenMainWindowAsync(desktop, loading));
+            _ = Dispatcher.UIThread.InvokeAsync(() => OpenMainWindowAsync(desktop, loading, settingsService, themeService));
         }
         else
         {
@@ -46,7 +51,9 @@ public partial class App : Application
 
     private static async Task OpenMainWindowAsync(
         IClassicDesktopStyleApplicationLifetime desktop,
-        Window loading)
+        Window loading,
+        JsonSettingsService settingsService,
+        ThemeService themeService)
     {
         await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Render);
 
@@ -57,21 +64,22 @@ public partial class App : Application
 
         try
         {
-            var settingsService = new JsonSettingsService();
-            settingsService.Load();
-            var themeService = new ThemeService();
-            themeService.Apply(settingsService.Current.Theme);
-
             client = new HttpDatabaseClient();
-            var text2Sql = new DisabledText2SqlService();
+            var mistralApiKeys = new MistralApiKeyStore();
+            void SyncMistralUser()
+            {
+                mistralApiKeys.SetCurrentUser(client.CurrentUser, client.IsGlobalAdmin);
+            }
+            client.StateChanged += (_, _) => Dispatcher.UIThread.Post(SyncMistralUser);
             var notifications = new NotificationService();
             localServer = new LocalServerService();
             var schemaService = new SchemaService(client);
             var schemaPane = new SchemaPaneViewModel(schemaService);
+            var text2Sql = new MistralText2SqlService(mistralApiKeys, schemaService);
 
             var sqlVm = new SqlViewModel(client, schemaPane, notifications);
-            var text2SqlVm = new Text2SqlViewModel(text2Sql);
-            var settingsVm = new SettingsViewModel(settingsService, themeService, client);
+            var text2SqlVm = new Text2SqlViewModel(text2Sql, mistralApiKeys, client, notifications);
+            var settingsVm = new SettingsViewModel(settingsService, themeService, client, mistralApiKeys);
 
             mainVm = new MainWindowViewModel(
                 client, settingsService, themeService, schemaService, localServer, notifications,
@@ -79,6 +87,8 @@ public partial class App : Application
                 () => mainVm!.CompleteAuthenticationGateAsync());
 
             HookGlobalExceptionHandlers(notifications);
+
+            SyncMistralUser();
 
             mainWindow = new MainWindow { DataContext = mainVm };
             desktop.MainWindow = mainWindow;
@@ -94,6 +104,7 @@ public partial class App : Application
                     mainVm.Dispose();
                     localServer.Dispose();
                     client.Dispose();
+                    text2Sql.Dispose();
                 }
                 catch
                 {

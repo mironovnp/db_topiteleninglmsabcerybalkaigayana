@@ -85,7 +85,11 @@
         <Setter Property="RenderTransform" Value="none" />
     </Style>
 
-    <Style Selector="Button:pointerover /template/ ContentPresenter">
+    <Style Selector="Button:pointerover">
+        <Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+    </Style>
+
+    <Style Selector="Button:pointerover /template/ ContentPresenter#PART_ContentPresenter">
         <Setter Property="Background" Value="{DynamicResource SurfaceMutedBrush}" />
         <Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
     </Style>
@@ -111,7 +115,12 @@
         <Setter Property="TextElement.Foreground" Value="{DynamicResource AccentForegroundBrush}" />
     </Style>
 
-    <Style Selector="Button.accent:pointerover /template/ ContentPresenter">
+    <Style Selector="Button.accent:pointerover">
+        <Setter Property="Background" Value="{DynamicResource AccentHoverBrush}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource AccentHoverBrush}" />
+    </Style>
+
+    <Style Selector="Button.accent:pointerover /template/ ContentPresenter#PART_ContentPresenter">
         <Setter Property="Background" Value="{DynamicResource AccentHoverBrush}" />
         <Setter Property="BorderBrush" Value="{DynamicResource AccentHoverBrush}" />
         <Setter Property="TextElement.Foreground" Value="{DynamicResource AccentForegroundBrush}" />
@@ -127,7 +136,7 @@
         <Setter Property="BorderBrush" Value="Transparent" />
     </Style>
 
-    <Style Selector="Button.ghost:pointerover /template/ ContentPresenter">
+    <Style Selector="Button.ghost:pointerover /template/ ContentPresenter#PART_ContentPresenter">
         <Setter Property="Background" Value="{DynamicResource SurfaceMutedBrush}" />
         <Setter Property="BorderBrush" Value="Transparent" />
     </Style>
@@ -498,6 +507,14 @@
     <Style Selector="Border.badge.neutral">
         <Setter Property="Background" Value="{DynamicResource SurfaceMutedBrush}" />
         <Setter Property="BorderBrush" Value="{DynamicResource BorderSoftBrush}" />
+    </Style>
+
+    <Style Selector="TextBlock.auth-status">
+        <Setter Property="Foreground" Value="{DynamicResource MutedTextBrush}" />
+    </Style>
+
+    <Style Selector="TextBlock.auth-status-error">
+        <Setter Property="Foreground" Value="{DynamicResource ErrorBrush}" />
     </Style>
 
 </Styles>

@@ -300,6 +300,10 @@ json Server::attach_session_context(const std::string& session_id, json result) 
     result["session_id"] = session_id;
     result["current_db"] = stored.current_db;
     result["current_user"] = stored.current_user;
+    if (!stored.current_user.empty()) {
+        executor_.setThreadLocalUser(stored.current_user);
+        result["is_admin"] = executor_.isAdmin();
+    }
     return result;
 }
 

@@ -29,8 +29,8 @@ public sealed class SqlViewModel : ObservableObject
         _notifications = notifications;
         Schema = schema;
 
-        ExecuteCommand = new AsyncRelayCommand(() => RunAsync(false), () => !IsBusy && !string.IsNullOrWhiteSpace(SqlText));
-        DryRunCommand = new AsyncRelayCommand(() => RunAsync(true), () => !IsBusy && !string.IsNullOrWhiteSpace(SqlText));
+        ExecuteCommand = new AsyncRelayCommand(() => RunAsync(false), () => !IsBusy);
+        DryRunCommand = new AsyncRelayCommand(() => RunAsync(true), () => !IsBusy);
         ClearCommand = new RelayCommand(() =>
         {
             SqlText = string.Empty;
@@ -146,6 +146,12 @@ public sealed class SqlViewModel : ObservableObject
     public AsyncRelayCommand ExecuteCommand { get; }
     public AsyncRelayCommand DryRunCommand { get; }
     public RelayCommand ClearCommand { get; }
+
+    public void RefreshCommandStates()
+    {
+        ExecuteCommand.RaiseCanExecuteChanged();
+        DryRunCommand.RaiseCanExecuteChanged();
+    }
     public RelayCommand ClearChatCommand { get; }
     public RelayCommand ClearHistoryCommand { get; }
     public RelayCommand<QueryHistoryItem> UseHistoryCommand { get; }
@@ -169,61 +175,115 @@ public sealed class SqlViewModel : ObservableObject
     private async Task RunAsync(bool dryRun)
     {
         var sql = SqlText;
-        if (string.IsNullOrWhiteSpace(sql)) return;
-
-        IsBusy = true;
-        StatusMessage = dryRun ? "Проверка запроса..." : "Выполнение запроса...";
-
-        ChatMessageViewModel? chatMessage = null;
-        if (IsChatMode && !dryRun)
+        if (string.IsNullOrWhiteSpace(sql))
         {
-            chatMessage = new ChatMessageViewModel(sql);
-            Messages.Add(chatMessage);
-            SqlText = string.Empty;
-        }
-        else
-        {
-            ResetResults();
+            await UiThread.RunAsync(() =>
+            {
+                StatusMessage = "Введите SQL-запрос.";
+                HasMessage = true;
+                IsError = true;
+                ResultMessage = "Поле запроса пусто.";
+            });
+            return;
         }
 
-        QueryResult result;
         try
         {
-            result = await _client.ExecuteAsync(sql, dryRun);
-        }
-        catch (Exception ex)
-        {
-            _notifications.Push("Ошибка выполнения", ex.Message, NotificationKind.Error);
-            result = QueryResult.Fail($"Внутренняя ошибка: {ex.Message}");
+            await UiThread.RunAsync(() =>
+            {
+                IsBusy = true;
+                StatusMessage = dryRun ? "Проверка запроса..." : "Выполнение запроса...";
+            });
+
+            ChatMessageViewModel? chatMessage = null;
+            await UiThread.RunAsync(() =>
+            {
+                if (IsChatMode && !dryRun)
+                {
+                    chatMessage = new ChatMessageViewModel(sql);
+                    Messages.Add(chatMessage);
+                    SqlText = string.Empty;
+                }
+                else
+                {
+                    ResetResults();
+                }
+            });
+
+            SqlScript.RunResult run;
+            try
+            {
+                run = await SqlScript.ExecuteAllAsync(
+                    _client,
+                    sql,
+                    dryRun,
+                    onStepStarted: (step, total, _) =>
+                    {
+                        if (total <= 1) return;
+                        UiThread.Post(() =>
+                        {
+                            StatusMessage = dryRun
+                                ? $"Проверка ({step}/{total})…"
+                                : $"Выполнение ({step}/{total})…";
+                        });
+                    }).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _notifications.Push("Ошибка выполнения", ex.Message, NotificationKind.Error);
+                run = new SqlScript.RunResult
+                {
+                    Success = false,
+                    LastResult = QueryResult.Fail($"Внутренняя ошибка: {ex.Message}"),
+                    TotalCount = 1,
+                };
+            }
+
+            var result = run.LastResult;
+            var capturedChat = chatMessage;
+            await UiThread.RunAsync(() =>
+            {
+                if (capturedChat is not null)
+                {
+                    capturedChat.Result = result;
+                    capturedChat.IsBusy = false;
+                    StatusMessage = result.Success
+                        ? (run.TotalCount > 1 ? $"Готово · {run.TotalCount} команд" : "Готово")
+                        : "Ошибка";
+                }
+                else
+                {
+                    ApplyResult(result, dryRun, run.TotalCount);
+                    if (!dryRun && result.Success)
+                    {
+                        SqlText = string.Empty;
+                    }
+                }
+
+                if (!dryRun && result.Success)
+                {
+                    foreach (var statement in SqlScript.SplitStatements(sql))
+                    {
+                        if (InvalidatesSchema(statement))
+                        {
+                            SchemaInvalidationRequested?.Invoke(this, statement);
+                        }
+                    }
+                }
+
+                if (!dryRun)
+                {
+                    PushHistory(sql, result);
+                }
+            });
         }
         finally
         {
-            IsBusy = false;
-        }
-
-        if (chatMessage is not null)
-        {
-            chatMessage.Result = result;
-            chatMessage.IsBusy = false;
-            StatusMessage = result.Success ? "Готово" : "Ошибка";
-        }
-        else
-        {
-            ApplyResult(result, dryRun);
-            if (!dryRun && result.Success)
+            await UiThread.RunAsync(() =>
             {
-                SqlText = string.Empty;
-            }
-        }
-
-        if (!dryRun && result.Success && InvalidatesSchema(sql))
-        {
-            SchemaInvalidationRequested?.Invoke(this, sql);
-        }
-
-        if (!dryRun)
-        {
-            PushHistory(sql, result);
+                IsBusy = false;
+                RefreshCommandStates();
+            });
         }
     }
 
@@ -253,7 +313,7 @@ public sealed class SqlViewModel : ObservableObject
         OnPropertyChanged(nameof(HasHistory));
     }
 
-    private void ApplyResult(QueryResult result, bool dryRun)
+    private void ApplyResult(QueryResult result, bool dryRun, int statementCount = 1)
     {
         if (!result.Success)
         {
@@ -272,17 +332,24 @@ public sealed class SqlViewModel : ObservableObject
             foreach (var c in result.Columns) Columns.Add(c);
             foreach (var r in result.Rows) Rows.Add(r);
             HasResults = true;
-            StatusMessage = $"Получено строк: {result.Rows.Count}";
+            StatusMessage = statementCount > 1
+                ? $"Готово · {statementCount} команд · строк: {result.Rows.Count}"
+                : $"Получено строк: {result.Rows.Count}";
         }
         else
         {
             HasResults = false;
             HasMessage = true;
             AffectedRows = result.AffectedRows;
-            ResultMessage = string.IsNullOrEmpty(result.Message)
+            var tail = string.IsNullOrEmpty(result.Message)
                 ? (dryRun ? "Синтаксис корректен." : "Готово.")
                 : result.Message;
-            StatusMessage = dryRun ? "Dry run OK" : "Готово";
+            ResultMessage = statementCount > 1
+                ? $"Выполнено команд: {statementCount}. {tail}"
+                : tail;
+            StatusMessage = dryRun
+                ? (statementCount > 1 ? $"Dry run OK · {statementCount} команд" : "Dry run OK")
+                : (statementCount > 1 ? $"Готово · {statementCount} команд" : "Готово");
         }
 
         ResultsChanged?.Invoke(this, EventArgs.Empty);

@@ -31,10 +31,14 @@
                                  Padding="18,16,18,8"
                                  PlaceholderText="SELECT * FROM users;" />
 
-                        <Grid Grid.Row="1" ColumnDefinitions="*,Auto" Margin="14,4,14,12">
-                            <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                        <WrapPanel x:Name="EditorToolbar"
+                                  Grid.Row="1"
+                                  Margin="14,4,14,12"
+                                  Orientation="Horizontal"
+                                  VerticalAlignment="Center">
                                 <Button Classes="ghost"
                                         Padding="10,5"
+                                        Margin="0,0,8,6"
                                         IsEnabled="{Binding HasHistory}">
                                     <StackPanel Orientation="Horizontal" Spacing="6">
                                         <TextBlock Text="🕘" FontSize="13" VerticalAlignment="Center" />
@@ -105,27 +109,30 @@
                                         Content="✕ Очистить"
                                         FontSize="12"
                                         Padding="10,5"
+                                        Margin="0,0,8,6"
                                         Command="{Binding ClearCommand}" />
                                 <ProgressBar IsIndeterminate="True"
                                              IsVisible="{Binding IsBusy}"
-                                             Width="80" Height="3"
+                                             Width="80"
+                                             Height="3"
+                                             Margin="0,0,8,6"
                                              Foreground="{DynamicResource AccentBrush}"
                                              VerticalAlignment="Center" />
-                            </StackPanel>
-
-                            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                                <TextBlock Text="ctrl+enter"
+                                <TextBlock x:Name="CtrlEnterHint"
+                                           Text="ctrl+enter"
                                            FontSize="11"
+                                           Margin="0,0,8,6"
                                            Foreground="{DynamicResource MutedTextBrush}"
                                            VerticalAlignment="Center" />
                                 <Button Classes="accent compact-action"
                                         Content="▶ Выполнить"
+                                        Margin="0,0,8,6"
                                         Command="{Binding ExecuteCommand}" />
                                 <Button Classes="compact-action"
                                         Content="Dry run"
+                                        Margin="0,0,0,6"
                                         Command="{Binding DryRunCommand}" />
-                            </StackPanel>
-                        </Grid>
+                        </WrapPanel>
                     </Grid>
                 </Border>
 

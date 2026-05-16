@@ -22,6 +22,7 @@ public sealed class AuthViewModel : ObservableObject
     private bool _isRegister;
     private bool _rememberPassword;
     private string _statusText = string.Empty;
+    private bool _isStatusError;
     private bool _isBusy;
 
     public AuthViewModel(
@@ -98,7 +99,7 @@ public sealed class AuthViewModel : ObservableObject
     public string StatusText
     {
         get => _statusText;
-        set
+        private set
         {
             if (SetProperty(ref _statusText, value))
             {
@@ -107,7 +108,25 @@ public sealed class AuthViewModel : ObservableObject
         }
     }
 
+    public bool IsStatusError
+    {
+        get => _isStatusError;
+        private set => SetProperty(ref _isStatusError, value);
+    }
+
     public bool HasStatus => !string.IsNullOrWhiteSpace(StatusText);
+
+    public void SetStatus(string text, bool isError)
+    {
+        StatusText = text;
+        IsStatusError = isError && !string.IsNullOrWhiteSpace(text);
+    }
+
+    public void ClearStatus()
+    {
+        StatusText = string.Empty;
+        IsStatusError = false;
+    }
 
     public bool IsBusy
     {
@@ -124,7 +143,7 @@ public sealed class AuthViewModel : ObservableObject
     private void SetRegisterMode(bool register)
     {
         IsRegister = register;
-        StatusText = string.Empty;
+        ClearStatus();
     }
 
     public async Task<bool> TrySilentLoginAsync(CancellationToken cancellationToken = default)
@@ -145,11 +164,11 @@ public sealed class AuthViewModel : ObservableObject
         cancellationToken.ThrowIfCancellationRequested();
 
         var sql = $"LOGIN {s.LastUsername.Trim()} PASSWORD {SqlString(pwd)};";
-        var res = await _client.ExecuteAsync(sql, false, cancellationToken).ConfigureAwait(true);
+        var res = await _client.ExecuteAsync(sql, false, cancellationToken).ConfigureAwait(false);
         if (!res.Success) return false;
 
-        await PersistAuthSettingsAsync(s.LastUsername.Trim(), pwd).ConfigureAwait(true);
-        await _onAuthenticated().ConfigureAwait(true);
+        await PersistAuthSettingsAsync(s.LastUsername.Trim(), pwd).ConfigureAwait(false);
+        await _onAuthenticated().ConfigureAwait(false);
         return true;
     }
 
@@ -159,17 +178,17 @@ public sealed class AuthViewModel : ObservableObject
         IsBusy = true;
         try
         {
-            StatusText = string.Empty;
+            ClearStatus();
             var u = Username.Trim();
             if (string.IsNullOrWhiteSpace(u) || string.IsNullOrWhiteSpace(Password))
             {
-                StatusText = "Введите имя пользователя и пароль.";
+                SetStatus("Введите имя пользователя и пароль.", isError: true);
                 return;
             }
 
             if (!UsernameRegex.IsMatch(u))
             {
-                StatusText = "Имя: буквы, цифры, подчёркивание; начните с буквы или _.";
+                SetStatus("Имя: буквы, цифры, подчёркивание; начните с буквы или _.", isError: true);
                 return;
             }
 
@@ -177,39 +196,46 @@ public sealed class AuthViewModel : ObservableObject
             {
                 if (!string.Equals(Password, ConfirmPassword, StringComparison.Ordinal))
                 {
-                    StatusText = "Пароли не совпадают.";
+                    SetStatus("Пароли не совпадают.", isError: true);
                     return;
                 }
 
                 var reg = $"REGISTER {u} PASSWORD {SqlString(Password)};";
-                var res = await _client.ExecuteAsync(reg).ConfigureAwait(true);
+                var res = await _client.ExecuteAsync(reg).ConfigureAwait(false);
                 if (!res.Success)
                 {
-                    StatusText = res.Message;
+                    await UiThread.RunAsync(() => SetStatus(res.Message, isError: true));
                     return;
                 }
             }
             else
             {
                 var log = $"LOGIN {u} PASSWORD {SqlString(Password)};";
-                var res = await _client.ExecuteAsync(log).ConfigureAwait(true);
+                var res = await _client.ExecuteAsync(log).ConfigureAwait(false);
                 if (!res.Success)
                 {
-                    StatusText = res.Message;
+                    await UiThread.RunAsync(() => SetStatus(res.Message, isError: true));
                     return;
                 }
             }
 
-            StatusText = "Загрузка списка баз…";
-            await PersistAuthSettingsAsync(u, Password).ConfigureAwait(true);
-            Password = string.Empty;
-            ConfirmPassword = string.Empty;
-            await _onAuthenticated().ConfigureAwait(true);
-            StatusText = string.Empty;
+            await UiThread.RunAsync(() => SetStatus("Загрузка списка баз…", isError: false));
+            await PersistAuthSettingsAsync(u, Password).ConfigureAwait(false);
+            await UiThread.RunAsync(() =>
+            {
+                Password = string.Empty;
+                ConfirmPassword = string.Empty;
+                ClearStatus();
+            });
+            await _onAuthenticated().ConfigureAwait(false);
         }
         finally
         {
-            IsBusy = false;
+            await UiThread.RunAsync(() =>
+            {
+                IsBusy = false;
+                SubmitCommand.RaiseCanExecuteChanged();
+            });
         }
     }
 

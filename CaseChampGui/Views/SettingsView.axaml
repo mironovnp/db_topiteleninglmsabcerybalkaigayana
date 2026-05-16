@@ -3,6 +3,7 @@
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:vm="using:CaseChampGui.ViewModels"
+             xmlns:models="using:CaseChampGui.Models"
              mc:Ignorable="d"
              x:Class="CaseChampGui.Views.SettingsView"
              x:DataType="vm:SettingsViewModel">
@@ -22,10 +23,8 @@
                     </StackPanel>
 
                     <Grid ColumnDefinitions="*,260" RowDefinitions="Auto,Auto,Auto,Auto,Auto" RowSpacing="14" ColumnSpacing="20">
-                        <StackPanel Grid.Row="0" Grid.Column="0" Spacing="2">
+                        <StackPanel Grid.Row="0" Grid.Column="0" Spacing="2" VerticalAlignment="Center">
                             <TextBlock Text="Тема оформления" />
-                            <TextBlock Text="Выбор применяется сразу и сохраняется в настройках."
-                                       Classes="muted" />
                         </StackPanel>
                         <ComboBox Grid.Row="0" Grid.Column="1"
                                   ItemsSource="{Binding AvailableThemes}"
@@ -55,7 +54,7 @@
 
                         <StackPanel Grid.Row="2" Grid.Column="0" Spacing="2">
                             <TextBlock Text="Сворачивать боковое меню" />
-                            <TextBlock Text="Когда включено — меню слева превращается в узкую полоску с иконками и раскрывается при наведении мыши. Выключите, чтобы оно всегда оставалось раскрытым."
+                            <TextBlock Text="В узком режиме меню остаётся свёрнутым (наведение не раскрывает его, чтобы не сжимать SQL-редактор). Если выключить — меню всегда раскрыто, минимальная ширина окна станет больше."
                                        Classes="muted"
                                        TextWrapping="Wrap" />
                         </StackPanel>
@@ -63,9 +62,8 @@
                                       IsChecked="{Binding SidebarAutoCollapse, Mode=TwoWay}"
                                       HorizontalAlignment="Right" />
 
-                        <StackPanel Grid.Row="3" Grid.Column="0" Spacing="2">
+                        <StackPanel Grid.Row="3" Grid.Column="0" Spacing="2" VerticalAlignment="Center">
                             <TextBlock Text="Плавные анимации" />
-                            <TextBlock Text="Hover, fade, переходы между разделами." Classes="muted" />
                         </StackPanel>
                         <ToggleSwitch Grid.Row="3" Grid.Column="1"
                                       IsChecked="{Binding AnimationsEnabled, Mode=TwoWay}"
@@ -119,7 +117,7 @@
 
                         <StackPanel Grid.Row="3" Grid.Column="0" Spacing="2">
                             <TextBlock Text="Запускать локальный dbserver автоматически" />
-                            <TextBlock Text="Если сервер не отвечает, GUI попробует запустить build/dbserver рядом с проектом."
+                            <TextBlock Text="Если сервер не отвечает, программа попробует запустить build/dbserver рядом с проектом."
                                        Classes="muted" TextWrapping="Wrap" />
                         </StackPanel>
                         <ToggleSwitch Grid.Row="3" Grid.Column="1"
@@ -137,6 +135,148 @@
                                        VerticalAlignment="Center" />
                         </Border>
                     </StackPanel>
+                </StackPanel>
+            </Border>
+
+            
+            <Border Classes="card">
+                <StackPanel Spacing="14">
+                    <StackPanel Orientation="Horizontal" Spacing="10">
+                        <TextBlock Text="✦" FontSize="18" VerticalAlignment="Center" />
+                        <TextBlock Text="Text2SQL / Mistral AI" Classes="h2" VerticalAlignment="Center" />
+                    </StackPanel>
+
+                    <TextBlock Text="У каждой учётной записи CaseChamp на этом компьютере — свой выбор ключа. Ключи от администратора помечены отдельно."
+                               Classes="muted"
+                               TextWrapping="Wrap" />
+
+                    <Border Padding="12,10"
+                            CornerRadius="8"
+                            BorderBrush="{DynamicResource AccentBrush}"
+                            BorderThickness="1"
+                            Background="{DynamicResource SurfaceMutedBrush}">
+                        <TextBlock Text="{Binding ActiveMistralKeyBadge}"
+                                   FontWeight="SemiBold"
+                                   TextWrapping="Wrap" />
+                    </Border>
+
+                    <TextBlock Text="{Binding MistralKeyStatus}"
+                               Classes="subtle"
+                               TextWrapping="Wrap" />
+
+                    <TextBlock Text="{Binding MistralKeyChoiceLockHint}"
+                               Classes="muted"
+                               TextWrapping="Wrap"
+                               IsVisible="{Binding HasMistralKeyChoiceLockHint}" />
+
+                    <StackPanel Spacing="6" IsEnabled="{Binding CanEditMistralSharing}">
+                        <TextBlock Text="Какой ключ использовать для Text2SQL" Classes="subtle" />
+                        <ComboBox ItemsSource="{Binding MistralKeyChoices}"
+                                  SelectedItem="{Binding SelectedMistralKeyChoice, Mode=TwoWay}"
+                                  HorizontalAlignment="Stretch"
+                                  IsEnabled="{Binding CanEditMistralSharing}">
+                            <ComboBox.ItemTemplate>
+                                <DataTemplate DataType="models:MistralKeyChoiceItem">
+                                    <StackPanel Spacing="2" Margin="0,4">
+                                        <TextBlock Text="{Binding Title}" FontWeight="SemiBold" />
+                                        <TextBlock Text="{Binding Description}"
+                                                   Classes="muted"
+                                                   FontSize="11"
+                                                   TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ComboBox.ItemTemplate>
+                        </ComboBox>
+                    </StackPanel>
+
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="Ваш личный API-ключ" Classes="subtle" />
+                        <TextBox Text="{Binding MistralApiKeyInput, Mode=TwoWay}"
+                                 PasswordChar="•"
+                                 PlaceholderText="Вставьте ключ Mistral для текущего пользователя" />
+                        <TextBlock Text="{Binding MistralKeyFileHint}"
+                                   Classes="mono muted"
+                                   FontSize="11"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+
+                    <StackPanel Orientation="Horizontal" Spacing="10">
+                        <Button Classes="accent"
+                                Content="Сохранить личный ключ"
+                                Command="{Binding SaveMistralKeyCommand}" />
+                    </StackPanel>
+
+                    <StackPanel Spacing="4">
+                        <CheckBox Content="Отдавать свой ключ другим на этом ПК"
+                                  IsChecked="{Binding MistralShareMyKeyWithOthers, Mode=TwoWay}"
+                                  IsEnabled="{Binding CanShareMistralKey}" />
+                        <TextBlock Classes="muted"
+                                   FontSize="11"
+                                   TextWrapping="Wrap"
+                                   Margin="28,0,0,0"
+                                   Text="Вы разрешаете другим учётным записям CaseChamp на этом компьютере пользоваться вашим Mistral-ключом, если у них нет своего." />
+                    </StackPanel>
+
+                    <StackPanel Spacing="4">
+                        <CheckBox Content="Принимать общий ключ с этого ПК"
+                                  IsChecked="{Binding MistralUseSharedKeyFallback, Mode=TwoWay}"
+                                  IsEnabled="{Binding CanEditMistralSharing}" />
+                        <TextBlock Classes="muted"
+                                   FontSize="11"
+                                   TextWrapping="Wrap"
+                                   Margin="28,0,0,0"
+                                   Text="Вы разрешаете себе использовать чужой ключ, если кто-то другой на этом ПК включил «Отдавать свой ключ…» выше. Работает в режимах «Автоматически» и «Общий с ПК»." />
+                    </StackPanel>
+
+                    <TextBlock Text="{Binding MistralKeyMessage}"
+                               Foreground="{DynamicResource WarnBrush}"
+                               TextWrapping="Wrap"
+                               IsVisible="{Binding HasMistralKeyMessage}" />
+
+                    <Border IsVisible="{Binding IsAdminAccount}"
+                            Padding="14"
+                            CornerRadius="10"
+                            BorderBrush="{DynamicResource BorderSoftBrush}"
+                            BorderThickness="1"
+                            Background="{DynamicResource SurfaceMutedBrush}">
+                        <StackPanel Spacing="12">
+                            <TextBlock Text="Администрирование ключей"
+                                       FontWeight="SemiBold"
+                                       FontSize="14" />
+                            <TextBlock Text="Администратор может задать или заменить ключ, но не может просмотреть уже сохранённый. Ключи хранятся только на этом компьютере."
+                                       Classes="muted"
+                                       TextWrapping="Wrap" />
+
+                            <TextBlock Text="Политика для всех пользователей на этом ПК" Classes="subtle" />
+                            <ComboBox ItemsSource="{Binding AdminMistralPolicyOptions}"
+                                      SelectedItem="{Binding SelectedAdminMistralPolicy, Mode=TwoWay}"
+                                      HorizontalAlignment="Stretch">
+                                <ComboBox.ItemTemplate>
+                                    <DataTemplate DataType="vm:MistralPolicyOption">
+                                        <TextBlock Text="{Binding Label}" />
+                                    </DataTemplate>
+                                </ComboBox.ItemTemplate>
+                            </ComboBox>
+
+                            <TextBlock Text="Общий ключ для всех без личного" Classes="subtle" />
+                            <TextBox Text="{Binding AdminOrgMistralKeyInput, Mode=TwoWay}"
+                                     PasswordChar="•"
+                                     PlaceholderText="Новый ключ организации (только ввод)" />
+                            <Button Classes="accent"
+                                    Content="Сохранить общий ключ организации"
+                                    Command="{Binding SaveAdminOrgMistralKeyCommand}" />
+
+                            <TextBlock Text="Ключ для конкретного пользователя" Classes="subtle" Margin="0,6,0,0" />
+                            <TextBox Text="{Binding AdminUserMistralTarget, Mode=TwoWay}"
+                                     PlaceholderText="имя пользователя CaseChamp" />
+                            <TextBox Text="{Binding AdminUserMistralKeyInput, Mode=TwoWay}"
+                                     PasswordChar="•"
+                                     PlaceholderText="API-ключ для этого пользователя" />
+                            <Button Classes="accent"
+                                    Content="Задать ключ пользователю"
+                                    Command="{Binding SaveAdminUserMistralKeyCommand}" />
+                        </StackPanel>
+                    </Border>
                 </StackPanel>
             </Border>
 
@@ -186,7 +326,7 @@
                                  PlaceholderText="подпись на панели слева" />
                     </StackPanel>
 
-                    <CheckBox Content="Запоминать пароль на этом компьютере (AES-GCM в файле настроек)"
+                    <CheckBox Content="Запоминать пароль на этом компьютере"
                               IsChecked="{Binding RememberPassword, Mode=TwoWay}" />
 
                     <StackPanel Spacing="8" IsVisible="{Binding !IsAdminAccount}">
@@ -200,9 +340,6 @@
                     <TextBox Text="{Binding PwdOld, Mode=TwoWay}" PasswordChar="•" PlaceholderText="Текущий пароль" />
                     <TextBox Text="{Binding PwdNew, Mode=TwoWay}" PasswordChar="•" PlaceholderText="Новый пароль" />
                     <TextBox Text="{Binding PwdNew2, Mode=TwoWay}" PasswordChar="•" PlaceholderText="Повтор нового пароля" />
-
-                    <CheckBox Content="После смены обновить сохранённый пароль (если включено запоминание)"
-                              IsChecked="{Binding UpdateStoredPasswordAfterChange, Mode=TwoWay}" />
 
                     <TextBlock Text="{Binding AccountMessage}"
                                Foreground="{DynamicResource WarnBrush}"

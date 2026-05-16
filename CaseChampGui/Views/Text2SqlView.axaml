@@ -3,6 +3,7 @@
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:vm="using:CaseChampGui.ViewModels"
+             xmlns:views="using:CaseChampGui.Views"
              mc:Ignorable="d"
              x:Class="CaseChampGui.Views.Text2SqlView"
              x:DataType="vm:Text2SqlViewModel">
@@ -11,48 +12,202 @@
           RowDefinitions="Auto,*">
 
         <StackPanel Grid.Row="0" Spacing="6" Margin="2,0,2,16">
-            <StackPanel Orientation="Horizontal" Spacing="10">
-                <TextBlock Text="{Binding HintTitle}"
-                           FontSize="15"
-                           FontWeight="SemiBold"
-                           Foreground="{DynamicResource TextBrush}"
-                           VerticalAlignment="Center" />
-                <Border Classes="pill" Padding="8,2" VerticalAlignment="Center">
-                    <TextBlock Text="preview" Classes="muted" FontSize="11" />
-                </Border>
-            </StackPanel>
-            <TextBlock Text="{Binding HintSubtitle}"
+            <TextBlock Text="Text2SQL"
+                       FontSize="15"
+                       FontWeight="SemiBold"
+                       Foreground="{DynamicResource TextBrush}" />
+            <TextBlock Text="Опишите задачу на русском — Mistral переведёт её в SQL и выполнит на сервере."
                        FontSize="12"
                        Foreground="{DynamicResource MutedTextBrush}"
                        TextWrapping="Wrap" />
         </StackPanel>
 
-        <Border Grid.Row="1" Classes="editor-card">
-            <Grid RowDefinitions="*,Auto">
-                <TextBox Grid.Row="0"
-                         Classes="editor flat"
-                         Text="{Binding InputText, Mode=TwoWay}"
-                         IsEnabled="{Binding IsEnabled}"
-                         AcceptsReturn="True"
-                         TextWrapping="Wrap"
-                         Padding="20,18,20,8"
-                         PlaceholderText="Опишите запрос на русском языке. Например: покажи всех пользователей старше 25 лет." />
+        <Panel Grid.Row="1">
+
+            <Border Classes="card"
+                    IsVisible="{Binding NeedsApiKeySetup}"
+                    Padding="20">
+                <StackPanel Spacing="14" MaxWidth="640">
+                    <TextBlock Text="API-ключ Mistral"
+                               FontSize="15"
+                               FontWeight="SemiBold" />
+                    <TextBlock Text="Выберите источник ключа в «Настройки → Text2SQL» или сохраните личный ключ ниже. Ключи от администратора помечены в списке."
+                               TextWrapping="Wrap"
+                               Classes="muted"
+                               FontSize="12" />
+                    <TextBlock Text="Для перевода нужен ключ Mistral. Он хранится локально и не отправляется на сервер CaseChamp."
+                               Classes="muted"
+                               TextWrapping="Wrap" />
+
+                    <TextBox Text="{Binding ApiKeyInput, Mode=TwoWay}"
+                             PasswordChar="•"
+                             PlaceholderText="Вставьте API-ключ Mistral" />
+
+                    <TextBlock TextWrapping="Wrap"
+                               Classes="muted"
+                               FontSize="12"
+                               LineHeight="18">
+                        <Run Text="Как получить ключ:" FontWeight="SemiBold" />
+                        <LineBreak />
+                        <Run Text="1. Откройте " />
+                        <Run Text="https://console.mistral.ai/" />
+                        <Run Text=" и войдите в аккаунт." />
+                        <LineBreak />
+                        <Run Text="2. В разделе API keys создайте новый ключ." />
+                        <LineBreak />
+                        <Run Text="3. Скопируйте ключ (показывается один раз) и вставьте в поле выше." />
+                        <LineBreak />
+                        <Run Text="Ключ можно изменить позже в разделе «Настройки»." />
+                    </TextBlock>
+
+                    <StackPanel Orientation="Horizontal" Spacing="10">
+                        <Button Classes="accent"
+                                Content="Сохранить ключ"
+                                Command="{Binding SaveApiKeyCommand}" />
+                    </StackPanel>
+
+                    <TextBlock Text="{Binding ApiSetupMessage}"
+                               TextWrapping="Wrap"
+                               IsVisible="{Binding HasApiSetupMessage}"
+                               Foreground="{DynamicResource WarnBrush}" />
+                </StackPanel>
+            </Border>
+
+            <Grid IsVisible="{Binding IsWorkspaceVisible}"
+                  RowDefinitions="Auto,Auto,Auto,Auto,*">
+
+                <Border Grid.Row="0"
+                        Padding="10,8"
+                        Margin="0,0,0,8"
+                        CornerRadius="8"
+                        Background="{DynamicResource SurfaceMutedBrush}">
+                    <TextBlock Text="{Binding ActiveKeyBadge}"
+                               FontSize="12"
+                               FontWeight="SemiBold"
+                               TextWrapping="Wrap" />
+                </Border>
 
                 <Border Grid.Row="1"
-                        BorderBrush="{DynamicResource BorderSoftBrush}"
-                        BorderThickness="0,1,0,0"
-                        Padding="20,12">
-                    <StackPanel Orientation="Horizontal" Spacing="10">
-                        <TextBlock Text="◌"
-                                   FontSize="14"
-                                   Foreground="{DynamicResource MutedTextBrush}"
-                                   VerticalAlignment="Center" />
-                        <TextBlock Text="AI-переводчик пока отключён — раздел появится в одном из следующих обновлений."
-                                   Classes="muted"
-                                   VerticalAlignment="Center" />
+                        IsVisible="{Binding ShowSharedKeyNotice}"
+                        Classes="card"
+                        Padding="14,12"
+                        Margin="0,0,0,12"
+                        BorderBrush="{DynamicResource AccentBrush}"
+                        BorderThickness="1">
+                    <Grid ColumnDefinitions="*,Auto">
+                        <TextBlock Grid.Column="0"
+                                   Text="{Binding SharedKeyNotice}"
+                                   TextWrapping="Wrap"
+                                   Classes="subtle" />
+                        <Button Grid.Column="1"
+                                Classes="ghost compact-action"
+                                Content="Понятно"
+                                Margin="12,0,0,0"
+                                VerticalAlignment="Top"
+                                Command="{Binding DismissSharedKeyNoticeCommand}" />
+                    </Grid>
+                </Border>
+
+                <Border Grid.Row="2" Classes="editor-card" Margin="0,0,0,12">
+                    <Grid RowDefinitions="*,Auto">
+                        <TextBox Grid.Row="0"
+                                 x:Name="RequestTextBox"
+                                 Classes="editor flat"
+                                 Text="{Binding InputText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                 AcceptsReturn="True"
+                                 TextWrapping="Wrap"
+                                 MinHeight="100"
+                                 Padding="20,18,20,8"
+                                 PlaceholderText="Например: покажи имена всех пользователей старше 25 лет" />
+
+                        <Border Grid.Row="1"
+                                BorderBrush="{DynamicResource BorderSoftBrush}"
+                                BorderThickness="0,1,0,0"
+                                Padding="16,12">
+                            <Grid ColumnDefinitions="*,Auto">
+                                <TextBlock Grid.Column="0"
+                                           Text="{Binding StatusMessage}"
+                                           Classes="muted"
+                                           VerticalAlignment="Center" />
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
+                                    <Button Classes="ghost compact-action"
+                                            Content="Очистить"
+                                            Command="{Binding ClearCommand}" />
+                                    <Button Classes="accent compact-action"
+                                            Content="▶ Перевести и выполнить"
+                                            Command="{Binding TranslateAndRunCommand}" />
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                    </Grid>
+                </Border>
+
+                <Border Grid.Row="3"
+                        IsVisible="{Binding HasGeneratedSql}"
+                        Classes="card"
+                        Padding="14,12"
+                        Margin="0,0,0,12">
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="Сгенерированный SQL" Classes="subtle" FontSize="12" />
+                        <TextBlock Text="{Binding GeneratedSql}"
+                                   Classes="mono"
+                                   FontSize="13"
+                                   TextWrapping="Wrap" />
                     </StackPanel>
                 </Border>
+
+                <Grid Grid.Row="4" RowDefinitions="Auto,Auto,*">
+                    <TextBlock Grid.Row="0"
+                               Text="Результат"
+                               FontSize="13"
+                               FontWeight="SemiBold"
+                               Margin="2,0,0,8" />
+
+                    <Border Grid.Row="1"
+                            IsVisible="{Binding HasMessage}"
+                            Margin="0,0,0,10"
+                            Padding="12,10"
+                            CornerRadius="8"
+                            BorderBrush="{DynamicResource BorderSoftBrush}"
+                            BorderThickness="1"
+                            Background="{DynamicResource SurfaceMutedBrush}">
+                        <TextBlock Text="{Binding ResultMessage}"
+                                   Classes="mono"
+                                   FontSize="13"
+                                   TextWrapping="Wrap" />
+                    </Border>
+
+                    <Panel Grid.Row="2">
+                        <StackPanel HorizontalAlignment="Center"
+                                    VerticalAlignment="Center"
+                                    Spacing="10"
+                                    Margin="0,24">
+                            <StackPanel.IsVisible>
+                                <Binding Path="HasResults" Converter="{x:Static views:NegateBoolConverter.Instance}" />
+                            </StackPanel.IsVisible>
+                            <TextBlock Text="◌"
+                                       FontSize="36"
+                                       HorizontalAlignment="Center"
+                                       Foreground="{DynamicResource MutedTextBrush}" />
+                            <TextBlock Text="Здесь появятся строки результата"
+                                       Classes="muted"
+                                       HorizontalAlignment="Center" />
+                        </StackPanel>
+
+                        <Border IsVisible="{Binding HasResults}"
+                                BorderBrush="{DynamicResource BorderSoftBrush}"
+                                BorderThickness="1"
+                                CornerRadius="8"
+                                ClipToBounds="True"
+                                Background="{DynamicResource SurfaceBrush}">
+                            <ScrollViewer HorizontalScrollBarVisibility="Auto"
+                                          VerticalScrollBarVisibility="Auto">
+                                <Grid x:Name="ResultsGrid" MinWidth="100" />
+                            </ScrollViewer>
+                        </Border>
+                    </Panel>
+                </Grid>
             </Grid>
-        </Border>
+        </Panel>
     </Grid>
 </UserControl>
