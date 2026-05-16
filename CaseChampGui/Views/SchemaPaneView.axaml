@@ -36,15 +36,29 @@
                                       IsExpanded="{Binding IsExpanded, Mode=TwoWay}"
                                       Margin="0,2">
                                 <Expander.Header>
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <TextBlock Text="🞎" VerticalAlignment="Center" />
-                                        <TextBlock Text="{Binding Name}"
-                                                   FontWeight="SemiBold"
-                                                   VerticalAlignment="Center" />
-                                        <TextBlock Text="{Binding Columns.Count, StringFormat='({0})'}"
-                                                   Classes="muted"
-                                                   VerticalAlignment="Center" />
-                                    </StackPanel>
+                                    <Grid ColumnDefinitions="*,Auto">
+                                        <StackPanel Grid.Column="0"
+                                                    Orientation="Horizontal"
+                                                    Spacing="8">
+                                            <TextBlock Text="🞎" VerticalAlignment="Center" />
+                                            <TextBlock Text="{Binding Name}"
+                                                       FontWeight="SemiBold"
+                                                       VerticalAlignment="Center" />
+                                            <TextBlock Text="{Binding Columns.Count, StringFormat='({0})'}"
+                                                       Classes="muted"
+                                                       VerticalAlignment="Center" />
+                                        </StackPanel>
+                                        <Button Grid.Column="1"
+                                                Classes="ghost"
+                                                Content="▤"
+                                                FontSize="12"
+                                                Padding="6,2"
+                                                Margin="4,0,0,0"
+                                                VerticalAlignment="Center"
+                                                ToolTip.Tip="Открыть в разделе «Таблицы»"
+                                                Command="{Binding $parent[UserControl].((vm:SchemaPaneViewModel)DataContext).OpenTableCommand}"
+                                                CommandParameter="{Binding Name}" />
+                                    </Grid>
                                 </Expander.Header>
                                 <ItemsControl ItemsSource="{Binding Columns}" Margin="22,4,4,8">
                                     <ItemsControl.ItemTemplate>

@@ -1,0 +1,132 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="using:CaseChampGui.ViewModels"
+             mc:Ignorable="d"
+             x:Class="CaseChampGui.Views.TableBrowseView"
+             x:DataType="vm:TableBrowseViewModel">
+
+    <Grid RowDefinitions="*,Auto"
+          Margin="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).ContentMargin, FallbackValue='28,20,28,24'}">
+
+        <Panel Grid.Row="0">
+
+            <Border Background="{DynamicResource SurfaceBrush}"
+                    BorderBrush="{DynamicResource BorderSoftBrush}"
+                    BorderThickness="1"
+                    CornerRadius="10"
+                    ClipToBounds="True"
+                    IsVisible="{Binding ShowGrid}">
+                <ScrollViewer x:Name="DataScroll"
+                              HorizontalScrollBarVisibility="Auto"
+                              VerticalScrollBarVisibility="Auto"
+                              Background="{DynamicResource SurfaceBrush}">
+                    <Grid x:Name="DataGridHost"
+                          Background="{DynamicResource SurfaceBrush}"
+                          MinWidth="400"
+                          MinHeight="200" />
+                </ScrollViewer>
+            </Border>
+
+            <TextBlock Text="{Binding CenterMessage}"
+                       FontSize="14"
+                       Foreground="{DynamicResource MutedTextBrush}"
+                       TextWrapping="Wrap"
+                       TextAlignment="Center"
+                       MaxWidth="480"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center"
+                       IsVisible="{Binding ShowCenterMessage}" />
+
+            <ProgressBar IsIndeterminate="True"
+                         Height="3"
+                         VerticalAlignment="Top"
+                         Margin="16,0"
+                         Foreground="{DynamicResource AccentBrush}"
+                         IsVisible="{Binding IsLoading}" />
+        </Panel>
+
+        <Border Grid.Row="1"
+                Margin="0,14,0,0"
+                Padding="0,12,0,0"
+                BorderBrush="{DynamicResource BorderSoftBrush}"
+                BorderThickness="0,1,0,0">
+            <Grid RowDefinitions="Auto,Auto">
+                <DockPanel Grid.Row="0" LastChildFill="True" Margin="0,0,0,8">
+                    <StackPanel DockPanel.Dock="Right"
+                                Orientation="Horizontal"
+                                Spacing="6"
+                                VerticalAlignment="Center">
+                        <Button Classes="ghost"
+                                Content="‹"
+                                FontSize="14"
+                                Padding="10,4"
+                                ToolTip.Tip="Предыдущая страница"
+                                Command="{Binding PrevPageCommand}" />
+                        <Button Classes="ghost"
+                                Content="›"
+                                FontSize="14"
+                                Padding="10,4"
+                                ToolTip.Tip="Следующая страница"
+                                Command="{Binding NextPageCommand}" />
+                        <Button Classes="ghost"
+                                Content="↻"
+                                FontSize="13"
+                                Padding="8,4"
+                                ToolTip.Tip="Обновить список таблиц"
+                                Command="{Binding RefreshTablesCommand}" />
+                        <Button Classes="ghost"
+                                Content="⟳"
+                                FontSize="13"
+                                Padding="8,4"
+                                ToolTip.Tip="Обновить данные таблицы"
+                                Command="{Binding RefreshDataCommand}" />
+                    </StackPanel>
+
+                    <TextBlock DockPanel.Dock="Left"
+                               Text="ТАБЛИЦЫ"
+                               FontSize="10"
+                               FontWeight="Bold"
+                               LetterSpacing="1.4"
+                               Foreground="{DynamicResource MutedTextBrush}"
+                               VerticalAlignment="Center"
+                               Margin="0,0,16,0" />
+
+                    <Border DockPanel.Dock="Left"
+                            Width="1"
+                            Margin="0,4,16,4"
+                            Background="{DynamicResource BorderSoftBrush}" />
+
+                    <TextBlock Classes="muted"
+                               VerticalAlignment="Center"
+                               Text="В базе нет таблиц."
+                               IsVisible="{Binding !HasTables}" />
+
+                    <ListBox Classes="dbtabs"
+                             ItemsSource="{Binding TableNames}"
+                             SelectedItem="{Binding SelectedTable, Mode=TwoWay}"
+                             IsVisible="{Binding HasTables}"
+                             HorizontalAlignment="Left">
+                        <ListBox.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <StackPanel Orientation="Horizontal" />
+                            </ItemsPanelTemplate>
+                        </ListBox.ItemsPanel>
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding}" FontSize="12" VerticalAlignment="Center" />
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </DockPanel>
+
+                <TextBlock Grid.Row="1"
+                           Text="{Binding StatusText}"
+                           Classes="muted"
+                           FontSize="11"
+                           Margin="2,0,0,0" />
+            </Grid>
+        </Border>
+    </Grid>
+</UserControl>

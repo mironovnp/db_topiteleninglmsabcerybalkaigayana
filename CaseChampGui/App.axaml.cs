@@ -79,11 +79,12 @@ public partial class App : Application
 
             var sqlVm = new SqlViewModel(client, schemaPane, notifications);
             var text2SqlVm = new Text2SqlViewModel(text2Sql, mistralApiKeys, client, schemaPane, notifications);
+            var browseVm = new TableBrowseViewModel(client, schemaService, notifications);
             var settingsVm = new SettingsViewModel(settingsService, themeService, client, mistralApiKeys);
 
             mainVm = new MainWindowViewModel(
                 client, settingsService, themeService, schemaService, localServer, notifications,
-                sqlVm, text2SqlVm, settingsVm,
+                sqlVm, text2SqlVm, browseVm, settingsVm, schemaPane,
                 () => mainVm!.CompleteAuthenticationGateAsync());
 
             HookGlobalExceptionHandlers(notifications);

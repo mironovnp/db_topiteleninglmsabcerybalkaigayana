@@ -4,6 +4,7 @@ public enum AppSection
 {
     Sql,
     Text2Sql,
+    Browse,
     Settings,
 }
 

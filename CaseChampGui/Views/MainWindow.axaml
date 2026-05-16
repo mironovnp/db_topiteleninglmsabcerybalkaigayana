@@ -354,6 +354,9 @@
                     <ContentControl Classes="section" IsVisible="{Binding IsText2SqlVisible}">
                         <views:Text2SqlView DataContext="{Binding Text2Sql}" />
                     </ContentControl>
+                    <ContentControl Classes="section" IsVisible="{Binding IsBrowseVisible}">
+                        <views:TableBrowseView DataContext="{Binding Browse}" />
+                    </ContentControl>
                     <ContentControl Classes="section" IsVisible="{Binding IsSettingsVisible}">
                         <views:SettingsView DataContext="{Binding Settings}" />
                     </ContentControl>

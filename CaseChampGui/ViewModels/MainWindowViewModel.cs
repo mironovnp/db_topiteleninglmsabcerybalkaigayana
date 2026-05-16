@@ -58,7 +58,9 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         NotificationService notifications,
         SqlViewModel sqlViewModel,
         Text2SqlViewModel text2SqlViewModel,
+        TableBrowseViewModel tableBrowseViewModel,
         SettingsViewModel settingsViewModel,
+        SchemaPaneViewModel schemaPaneViewModel,
         Func<Task> authGateCompletion)
     {
         _client = client;
@@ -69,6 +71,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         Notifications = notifications;
         Sql = sqlViewModel;
         Text2Sql = text2SqlViewModel;
+        Browse = tableBrowseViewModel;
         Settings = settingsViewModel;
 
         Auth = new AuthViewModel(client, settingsService, authGateCompletion, CancelStartupInitialization);
@@ -77,6 +80,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             new(AppSection.Sql, "SQL", "▣"),
             new(AppSection.Text2Sql, "Text2SQL", "✦"),
+            new(AppSection.Browse, "Таблицы", "▤"),
             new(AppSection.Settings, "Настройки", "⚙", isBottom: true),
         };
 
@@ -99,6 +103,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _themeService.ThemeApplied += (_, _) => RefreshSidebarBrand();
         Sql.SchemaInvalidationRequested += OnSchemaInvalidationRequested;
         Text2Sql.CatalogSqlExecuted += OnSchemaInvalidationRequested;
+        schemaPaneViewModel.OpenTableRequested += OnOpenTableFromSchema;
         Settings.ChatModeChanged += (_, enabled) => Sql.IsChatMode = enabled;
         Settings.SidebarAutoCollapseChanged += (_, value) => AutoCollapseSidebar = value;
         Settings.CompactModeChanged += (_, value) => CompactMode = value;
@@ -235,6 +240,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public NotificationService Notifications { get; }
     public SqlViewModel Sql { get; }
     public Text2SqlViewModel Text2Sql { get; }
+    public TableBrowseViewModel Browse { get; }
     public SettingsViewModel Settings { get; }
 
     public ObservableCollection<NavItemViewModel> NavItems { get; }
@@ -272,6 +278,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             {
                 OnPropertyChanged(nameof(IsSqlVisible));
                 OnPropertyChanged(nameof(IsText2SqlVisible));
+                OnPropertyChanged(nameof(IsBrowseVisible));
                 OnPropertyChanged(nameof(IsSettingsVisible));
                 OnPropertyChanged(nameof(CurrentSectionTitle));
                 OnPropertyChanged(nameof(CurrentSectionSubtitle));
@@ -279,21 +286,25 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 OnPropertyChanged(nameof(ShowDatabaseBar));
                 if (value == AppSection.Text2Sql)
                     Text2Sql.OnSectionActivated();
+                else if (value == AppSection.Browse)
+                    Browse.OnSectionActivated();
             }
         }
     }
 
     public bool IsSqlVisible => CurrentSection == AppSection.Sql;
     public bool IsText2SqlVisible => CurrentSection == AppSection.Text2Sql;
+    public bool IsBrowseVisible => CurrentSection == AppSection.Browse;
     public bool IsSettingsVisible => CurrentSection == AppSection.Settings;
 
     public bool ShowDatabaseBar =>
-        CurrentSection is AppSection.Sql or AppSection.Text2Sql;
+        CurrentSection is AppSection.Sql or AppSection.Text2Sql or AppSection.Browse;
 
     public string CurrentSectionTitle => CurrentSection switch
     {
         AppSection.Sql => "SQL Console",
         AppSection.Text2Sql => "Text2SQL",
+        AppSection.Browse => "Таблицы",
         AppSection.Settings => "Настройки",
         _ => string.Empty,
     };
@@ -302,6 +313,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     {
         AppSection.Sql => "Прямой ввод SQL и выполнение на сервере CaseChamp",
         AppSection.Text2Sql => "Перевод запросов с русского на SQL через Mistral AI",
+        AppSection.Browse => "Просмотр данных выбранной таблицы (только чтение)",
         AppSection.Settings => "Параметры приложения и подключения",
         _ => string.Empty,
     };
@@ -310,9 +322,20 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     {
         AppSection.Sql => "▣",
         AppSection.Text2Sql => "✦",
+        AppSection.Browse => "▤",
         AppSection.Settings => "⚙",
         _ => string.Empty,
     };
+
+    public void OpenBrowseTable(string tableName)
+    {
+        var browseNav = NavItems.FirstOrDefault(n => n.Section == AppSection.Browse);
+        if (browseNav is not null)
+            SelectedNavItem = browseNav;
+        Browse.SelectAndLoadTable(tableName);
+    }
+
+    private void OnOpenTableFromSchema(object? sender, string tableName) => OpenBrowseTable(tableName);
 
     public string ConnectionBadge
     {
@@ -757,6 +780,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             }
             Sql.Schema.CurrentDatabase = database;
             await Sql.Schema.RefreshAsync();
+            await Browse.OnDatabaseChangedAsync();
         }
         catch (Exception ex)
         {
@@ -785,6 +809,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             {
                 Sql.Schema.CurrentDatabase = _client.CurrentDb!;
                 await Sql.Schema.RefreshAsync();
+                await Browse.OnDatabaseChangedAsync();
             });
         }
         catch (Exception ex)
