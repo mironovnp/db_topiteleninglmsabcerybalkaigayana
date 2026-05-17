@@ -370,15 +370,50 @@
                 Background="{DynamicResource AuthGateBackgroundBrush}"
                 IsVisible="{Binding AuthOverlayVisible}"
                 IsHitTestVisible="{Binding AuthOverlayVisible}">
-            <ScrollViewer HorizontalScrollBarVisibility="Disabled"
-                          VerticalScrollBarVisibility="Auto"
-                          HorizontalAlignment="Stretch"
-                          VerticalAlignment="Stretch"
-                          HorizontalContentAlignment="Stretch"
-                          VerticalContentAlignment="Top"
-                          Padding="32,28,32,48">
-                <views:AuthWelcomeView DataContext="{Binding Auth}" />
-            </ScrollViewer>
+            <Panel>
+                <ScrollViewer HorizontalScrollBarVisibility="Disabled"
+                              VerticalScrollBarVisibility="Auto"
+                              HorizontalAlignment="Stretch"
+                              VerticalAlignment="Stretch"
+                              HorizontalContentAlignment="Stretch"
+                              VerticalContentAlignment="Top"
+                              Padding="32,28,32,48">
+                    <views:AuthWelcomeView DataContext="{Binding Auth}" />
+                </ScrollViewer>
+
+                <Border ZIndex="50"
+                        Background="{DynamicResource BackgroundBrush}"
+                        IsVisible="{Binding AuthSettingsOverlayVisible}">
+                    <Grid RowDefinitions="Auto,*">
+                        <Border Grid.Row="0"
+                                Background="{DynamicResource BackgroundBrush}"
+                                BorderBrush="{DynamicResource BorderSoftBrush}"
+                                BorderThickness="0,0,0,1"
+                                Padding="28,16,28,16">
+                            <Grid ColumnDefinitions="*,Auto">
+                                <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                                    <TextBlock Text="Настройки"
+                                               FontSize="20"
+                                               FontWeight="SemiBold"
+                                               Foreground="{DynamicResource TextBrush}" />
+                                    <TextBlock Text="Параметры приложения и подключения к серверу"
+                                               FontSize="12"
+                                               Foreground="{DynamicResource MutedTextBrush}" />
+                                </StackPanel>
+                                <Button Grid.Column="1"
+                                        Classes="ghost"
+                                        Content="✕  Назад к входу"
+                                        Command="{Binding ToggleAuthSettingsCommand}" />
+                            </Grid>
+                        </Border>
+                        <ScrollViewer Grid.Row="1"
+                                      HorizontalScrollBarVisibility="Disabled"
+                                      VerticalScrollBarVisibility="Auto">
+                            <views:SettingsView DataContext="{Binding Settings}" />
+                        </ScrollViewer>
+                    </Grid>
+                </Border>
+            </Panel>
         </Border>
 
         

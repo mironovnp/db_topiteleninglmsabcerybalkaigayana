@@ -11,7 +11,7 @@
                 Margin="12,8,12,8"
                 Spacing="16">
 
-        <Grid ColumnDefinitions="*,10,*">
+        <Grid ColumnDefinitions="*,10,*,10,Auto">
             <Button Grid.Column="0"
                     Classes="ghost"
                     HorizontalAlignment="Stretch"
@@ -28,6 +28,16 @@
                     Opacity="{Binding RegisterTabOpacity}"
                     Content="Регистрация"
                     Command="{Binding SelectRegisterCommand}" />
+            <Button Grid.Column="4"
+                    Classes="ghost"
+                    MinHeight="40"
+                    Width="40"
+                    HorizontalContentAlignment="Center"
+                    VerticalContentAlignment="Center"
+                    ToolTip.Tip="Настройки приложения и подключения"
+                    Command="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).ToggleAuthSettingsCommand}">
+                <TextBlock Text="⚙" FontSize="18" />
+            </Button>
         </Grid>
 
         <Border Classes="card"

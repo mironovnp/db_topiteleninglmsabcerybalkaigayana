@@ -43,6 +43,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     private double _editorFontSize = 14;
 
     private bool _authOverlayVisible = true;
+    private bool _authSettingsOverlayVisible;
     private bool _isFinishingAuth;
     private readonly CancellationTokenSource _startupCts = new();
     private Bitmap? _accountAvatarBitmap;
@@ -97,6 +98,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             () => LoadDatabasesAsync(refreshSchema: true),
             () => !_isLoadingDatabases);
         LogoutCommand = new AsyncRelayCommand(LogoutAsyncImpl, () => !AuthOverlayVisible);
+        ToggleAuthSettingsCommand = new RelayCommand(() => AuthSettingsOverlayVisible = !AuthSettingsOverlayVisible);
 
         _client.StateChanged += OnClientStateChanged;
         _settingsService.SettingsChanged += OnSettingsChanged;
@@ -148,6 +150,20 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         }
     }
 
+    public bool AuthSettingsOverlayVisible
+    {
+        get => _authSettingsOverlayVisible;
+        private set
+        {
+            if (SetProperty(ref _authSettingsOverlayVisible, value))
+            {
+                ToggleAuthSettingsCommand.RaiseCanExecuteChanged();
+            }
+        }
+    }
+
+    public RelayCommand ToggleAuthSettingsCommand { get; }
+
     public bool IsMainChromeVisible => !AuthOverlayVisible;
 
     public Task CompleteAuthenticationGateAsync() =>
@@ -162,6 +178,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             // Show main UI immediately so a slow /query does not leave a blank window.
             AuthOverlayVisible = false;
+            AuthSettingsOverlayVisible = false;
             Auth.ClearStatus();
             RefreshAccountAppearance();
             OnPropertyChanged(nameof(IsAdminUser));
