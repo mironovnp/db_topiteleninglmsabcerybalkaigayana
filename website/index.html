@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="topiteneninglmsabce_и_гаяна — СУБД. Скачивание клиента, документация, гайд Mistral API." />
+  <title>topiteneninglmsabce_и_гаяна</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body class="theme-light">
+  <div class="app" id="app">
+    <header class="top-bar">
+      <div class="brand-compact">
+        <img id="brand-logo" src="assets/brand_light.png" alt="Логотип проекта" width="48" height="48" />
+        <p class="brand-title">topiteneninglmsabce_и_гаяна</p>
+      </div>
+
+      <div class="top-actions">
+        <div class="theme-switcher" role="group" aria-label="Тема оформления">
+          <button type="button" class="theme-btn active" data-theme="light">Светлая</button>
+          <button type="button" class="theme-btn" data-theme="dark">Тёмная</button>
+          <button type="button" class="theme-btn" data-theme="iu5">Iu5</button>
+        </div>
+        <button
+          type="button"
+          class="menu-trigger"
+          id="menu-trigger"
+          aria-expanded="false"
+          aria-controls="nav-drawer"
+        >
+          <span class="menu-icon" aria-hidden="true">
+            <span></span><span></span><span></span>
+          </span>
+          <span class="menu-label">Разделы</span>
+        </button>
+      </div>
+    </header>
+
+    <div class="nav-backdrop" id="nav-backdrop" hidden aria-hidden="true"></div>
+
+    <aside class="nav-drawer" id="nav-drawer" aria-label="Разделы сайта" aria-hidden="true">
+      <div class="drawer-header">
+        <h2>Разделы</h2>
+        <button type="button" class="drawer-close" id="drawer-close" aria-label="Закрыть меню">×</button>
+      </div>
+      <nav class="drawer-nav" id="main-nav">
+        <button type="button" class="drawer-nav-item active" data-tab="about" aria-current="page">
+          <span class="nav-icon" aria-hidden="true">◆</span>
+          О проекте
+        </button>
+        <button type="button" class="drawer-nav-item" data-tab="team">
+          <span class="nav-icon" aria-hidden="true">◇</span>
+          Команда
+        </button>
+        <button type="button" class="drawer-nav-item" data-tab="install">
+          <span class="nav-icon" aria-hidden="true">↓</span>
+          Установка
+        </button>
+        <button type="button" class="drawer-nav-item" data-tab="mistral">
+          <span class="nav-icon" aria-hidden="true">⚿</span>
+          Mistral API
+        </button>
+        <button type="button" class="drawer-nav-item" data-tab="gol">
+          <span class="nav-icon" aria-hidden="true">⚽</span>
+          ГОООООЛ
+        </button>
+      </nav>
+    </aside>
+
+    <main class="page-main">
+      <header class="page-header">
+        <h1 id="section-title">О проекте</h1>
+        <p id="section-subtitle">Информация о СУБД topiteneninglmsabce_и_гаяна</p>
+      </header>
+
+      <div class="tab-viewport" id="tab-viewport">
+        <!-- О проекте -->
+        <section id="tab-about" class="tab-panel active prose" aria-labelledby="section-title">
+          <h2>О проекте</h2>
+          <p>
+            <strong>topiteneninglmsabce_и_гаяна</strong> — учебная система управления базами данных
+            с десктопным клиентом, консольным интерфейсом и поддержкой Text2SQL через Mistral AI.
+          </p>
+          <div class="placeholder-box">
+            Подробное описание проекта будет добавлено позже. Здесь появится информация о возможностях,
+            архитектуре и сценариях использования.
+          </div>
+          <h3>Компоненты</h3>
+          <ul>
+            <li>Движок СУБД на C++ (хранение, индексы, WAL, выполнение SQL)</li>
+            <li>Сервер <code>dbserver</code> с HTTP API</li>
+            <li>CLI <code>dbcli</code> с командой <code>\ai</code> для запросов на русском языке</li>
+            <li>Графический клиент для Windows и Linux</li>
+          </ul>
+        </section>
+
+        <!-- Команда -->
+        <section id="tab-team" class="tab-panel prose" hidden>
+          <h2>Команда разработки</h2>
+          <p>Над проектом <strong>topiteneninglmsabce_и_гаяна</strong> работают:</p>
+          <div class="team-grid">
+            <article class="team-card">
+              <img class="team-avatar" src="assets/team/mironov.png" alt="Миронов Никита" width="80" height="80" loading="lazy" />
+              <div class="team-info">
+                <p class="name">Миронов Никита</p>
+                <p class="role">Разработчик</p>
+              </div>
+            </article>
+            <article class="team-card">
+              <img class="team-avatar" src="assets/team/fedyaev.png" alt="Коротенко Андрей" width="80" height="80" loading="lazy" />
+              <div class="team-info">
+                <p class="name">Коротенко Андрей</p>
+                <p class="role">Разработчик</p>
+              </div>
+            </article>
+            <article class="team-card">
+              <img class="team-avatar" src="assets/team/nemtsov.png" alt="Немцов Иван" width="80" height="80" loading="lazy" />
+              <div class="team-info">
+                <p class="name">Немцов Иван</p>
+                <p class="role">Разработчик</p>
+              </div>
+            </article>
+            <article class="team-card">
+              <img class="team-avatar" src="assets/team/korotenko.png" alt="Федяев Александр" width="80" height="80" loading="lazy" />
+              <div class="team-info">
+                <p class="name">Федяев Александр</p>
+                <p class="role">Разработчик</p>
+              </div>
+            </article>
+            <article class="team-card">
+              <img
+                class="team-avatar team-avatar--large"
+                src="assets/team/akhmetzyanova.png"
+                alt="Ахметзянова Гаяна"
+                width="112"
+                height="112"
+                loading="lazy"
+              />
+              <div class="team-info">
+                <p class="name">Ахметзянова Гаяна</p>
+                <p class="role">Разработчик</p>
+              </div>
+            </article>
+          </div>
+
+          <div class="team-supervisor">
+            <h3>Научный руководитель</h3>
+            <article class="team-card team-card--supervisor">
+              <img class="team-avatar" src="assets/team/kolosov.png" alt="Колосов Максим Игоревич" width="80" height="80" loading="lazy" />
+              <div class="team-info">
+                <p class="name">Колосов Максим Игоревич</p>
+                <p class="role">Научный руководитель</p>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <!-- Установка -->
+        <section id="tab-install" class="tab-panel prose" hidden>
+          <h2>Установка клиента</h2>
+          <p>Скачайте сборку клиента для вашей операционной системы. После публикации релизов файлы появятся в папке <code>releases/</code> или по ссылкам GitHub Releases.</p>
+
+          <div class="download-section">
+            <article class="download-card">
+              <h3>Клиент для Windows</h3>
+              <p class="hint">Сборка для Windows (64-bit), файл <code>.exe</code></p>
+              <a
+                id="download-windows"
+                class="btn-download disabled"
+                href="releases/topiteneninglmsabce-windows.exe"
+                download="topiteneninglmsabce-windows.exe"
+                aria-disabled="true"
+              >
+                Скачать
+                <span class="badge-soon">скоро</span>
+              </a>
+            </article>
+
+            <article class="download-card">
+              <h3>Клиент для Linux</h3>
+              <p class="hint">Сборка для Linux (x64)</p>
+              <a
+                id="download-linux"
+                class="btn-download disabled"
+                href="releases/topiteneninglmsabce-linux"
+                download="topiteneninglmsabce-linux"
+                aria-disabled="true"
+              >
+                Скачать
+                <span class="badge-soon">скоро</span>
+              </a>
+            </article>
+          </div>
+
+          <h3>Инструкция (после появления релизов)</h3>
+          <p><strong>Windows:</strong> скачайте <code>.exe</code> и запустите установщик или исполняемый файл.</p>
+          <p><strong>Linux:</strong> скачайте бинарник, выдайте права на выполнение и запустите:</p>
+          <pre class="placeholder-box" style="font-family: ui-monospace, monospace; font-size: 13px;"><code>chmod +x topiteneninglmsabce-linux
+./topiteneninglmsabce-linux</code></pre>
+          <p>Для Text2SQL настройте API-ключ Mistral — см. вкладку <strong>Mistral API</strong>.</p>
+        </section>
+
+        <!-- Mistral API -->
+        <section id="tab-mistral" class="tab-panel prose" hidden>
+          <h2>Регистрация в Mistral и получение API-ключа</h2>
+          <p>
+            Для функции Text2SQL (перевод запросов с русского в SQL) каждому пользователю нужен
+            <strong>личный</strong> API-ключ Mistral. Ниже — пошаговая инструкция.
+          </p>
+
+          <div class="alert alert-warn">
+            <strong>Важно:</strong> не публикуйте ключ в Git, на скриншотах и в общих чатах.
+            Используйте свой ключ; общий ключ могут украсть или исчерпать лимиты.
+          </div>
+
+          <article class="guide-step">
+            <div class="step-header">
+              <span class="step-num">1</span>
+              <h3>Откройте сайт Mistral AI</h3>
+            </div>
+            <p>Перейдите на официальный сайт:</p>
+            <div class="guide-links">
+              <a href="https://mistral.ai/" target="_blank" rel="noopener noreferrer">mistral.ai ↗</a>
+            </div>
+            <figure class="guide-screenshot placeholder">
+              <img src="assets/guide/mistral/01-mistral-home.svg" alt="Главная страница Mistral AI" loading="lazy" data-fallback-png="01-mistral-home.png" />
+              <figcaption>Главная страница mistral.ai (замените SVG на свой скриншот PNG при необходимости)</figcaption>
+            </figure>
+          </article>
+
+          <article class="guide-step">
+            <div class="step-header">
+              <span class="step-num">2</span>
+              <h3>Откройте консоль разработчика</h3>
+            </div>
+            <p>La Plateforme — личный кабинет для API:</p>
+            <div class="guide-links">
+              <a href="https://console.mistral.ai/" target="_blank" rel="noopener noreferrer">console.mistral.ai ↗</a>
+            </div>
+            <figure class="guide-screenshot placeholder">
+              <img src="assets/guide/mistral/02-console-login.svg" alt="Страница входа в консоль Mistral" loading="lazy" data-fallback-png="02-console-login.png" />
+              <figcaption>Вход или регистрация в консоли</figcaption>
+            </figure>
+          </article>
+
+          <article class="guide-step">
+            <div class="step-header">
+              <span class="step-num">3</span>
+              <h3>Зарегистрируйтесь или войдите</h3>
+            </div>
+            <p>Используйте email или способ входа, который предложит сайт (Google, GitHub и т.д.).</p>
+            <figure class="guide-screenshot placeholder">
+              <img src="assets/guide/mistral/03-api-keys-menu.svg" alt="Меню консоли Mistral" loading="lazy" data-fallback-png="03-api-keys-menu.png" />
+              <figcaption>После входа откроется рабочая область (workspace)</figcaption>
+            </figure>
+          </article>
+
+          <article class="guide-step">
+            <div class="step-header">
+              <span class="step-num">4</span>
+              <h3>Откройте раздел API keys</h3>
+            </div>
+            <p>В боковом меню найдите пункт <strong>API keys</strong> (или <strong>Workspace → API keys</strong>).</p>
+            <figure class="guide-screenshot placeholder">
+              <img src="assets/guide/mistral/03-api-keys-menu.svg" alt="Раздел API keys" loading="lazy" data-fallback-png="03-api-keys-menu.png" />
+              <figcaption>Раздел управления ключами API</figcaption>
+            </figure>
+          </article>
+
+          <article class="guide-step">
+            <div class="step-header">
+              <span class="step-num">5</span>
+              <h3>Создайте новый ключ</h3>
+            </div>
+            <p>Нажмите <strong>Create new key</strong> / <strong>Add API key</strong>, задайте имя (например <code>topiteneninglmsabce</code>).</p>
+            <figure class="guide-screenshot placeholder">
+              <img src="assets/guide/mistral/04-create-key.svg" alt="Создание API-ключа" loading="lazy" data-fallback-png="04-create-key.png" />
+              <figcaption>Диалог создания ключа</figcaption>
+            </figure>
+          </article>
+
+          <article class="guide-step">
+            <div class="step-header">
+              <span class="step-num">6</span>
+              <h3>Скопируйте ключ</h3>
+            </div>
+            <p>Ключ показывают один раз — сразу сохраните его в надёжное место. На скриншотах для сайта используйте замазанный ключ.</p>
+            <figure class="guide-screenshot placeholder">
+              <img src="assets/guide/mistral/05-copy-key.svg" alt="Копирование API-ключа" loading="lazy" data-fallback-png="05-copy-key.png" />
+              <figcaption>Окно с созданным ключом — скопируйте и закройте</figcaption>
+            </figure>
+          </article>
+
+          <article class="guide-step">
+            <div class="step-header">
+              <span class="step-num">7</span>
+              <h3>Укажите ключ в проекте</h3>
+            </div>
+            <p>Один из способов:</p>
+            <ol>
+              <li>Файл <code>mistral_api_key</code> в корне проекта (одна строка, без кавычек)</li>
+              <li>Переменная окружения: <code>export MISTRAL_API_KEY="ваш-ключ"</code></li>
+              <li>В графическом клиенте: <strong>Настройки → Mistral</strong> — вставить и сохранить</li>
+            </ol>
+            <div class="alert alert-info">
+              Файл <code>mistral_api_key</code> указан в <code>.gitignore</code> — не коммитьте его в репозиторий.
+            </div>
+          </article>
+        </section>
+
+        <section id="tab-gol" class="tab-panel tab-panel--goal" hidden>
+          <div class="goal-stage">
+            <video
+              id="goal-video"
+              class="goal-video"
+              src="assets/goal.mp4"
+              controls
+              playsinline
+              preload="metadata"
+              aria-label="ГОООООЛ"
+            >
+              Ваш браузер не поддерживает воспроизведение видео.
+            </video>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <script src="js/app.js"></script>
+</body>
+</html>

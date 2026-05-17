@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="450" viewBox="0 0 800 450">
+  <rect width="800" height="450" fill="#0d1117"/>
+  <rect x="200" y="100" width="400" height="250" rx="12" fill="#161b22" stroke="#30363d"/>
+  <text x="400" y="160" fill="#f0f6fc" font-family="Inter,sans-serif" font-size="16" text-anchor="middle">Create API key</text>
+  <rect x="240" y="200" width="320" height="36" rx="6" fill="#0a0f14" stroke="#21262d"/>
+  <rect x="240" y="280" width="140" height="36" rx="8" fill="#00e5ff"/>
+  <text x="310" y="303" fill="#050a10" font-family="Inter,sans-serif" font-size="13" text-anchor="middle">Create</text>
+  <text x="400" y="380" fill="#6e7681" font-family="Inter,sans-serif" font-size="13" text-anchor="middle">04-create-key.png</text>
+</svg>
