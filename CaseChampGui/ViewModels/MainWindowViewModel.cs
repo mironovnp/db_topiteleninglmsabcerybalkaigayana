@@ -2,6 +2,8 @@ using System;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 using Avalonia;
@@ -613,7 +615,14 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             return false;
         }
 
-        return await TryStartLocalServerAsync(s.Host, s.Port, cancellationToken).ConfigureAwait(false);
+        var actualPort = s.Port;
+        if (!IsPortAvailable(actualPort))
+        {
+            actualPort = GetAvailablePort();
+            _client.Configure(s.Host, actualPort);
+        }
+
+        return await TryStartLocalServerAsync(s.Host, actualPort, cancellationToken).ConfigureAwait(false);
     }
 
     private Task LogoutAsyncImpl()
@@ -937,5 +946,43 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         Text2Sql.CatalogSqlExecuted -= OnSchemaInvalidationRequested;
         AccountAvatarBitmap?.Dispose();
         SidebarBrandBitmap = null;
+    }
+
+    private static bool IsPortAvailable(int port)
+    {
+        TcpListener? listener = null;
+        try
+        {
+            listener = new TcpListener(IPAddress.Loopback, port);
+            listener.Start();
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            listener?.Stop();
+        }
+    }
+
+    private static int GetAvailablePort()
+    {
+        TcpListener? listener = null;
+        try
+        {
+            listener = new TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            return ((IPEndPoint)listener.LocalEndpoint).Port;
+        }
+        catch
+        {
+            return 8080;
+        }
+        finally
+        {
+            listener?.Stop();
+        }
     }
 }

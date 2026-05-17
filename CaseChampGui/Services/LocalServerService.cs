@@ -65,11 +65,11 @@ public sealed class LocalServerService : IDisposable
             {
                 var dataPath = Path.Combine(dir.FullName, "data");
                 var hasData = Directory.Exists(dataPath);
-                var hasBuild = File.Exists(Path.Combine(dir.FullName, "build", serverName))
-                               || Directory.Exists(Path.Combine(dir.FullName, "build"));
+                var hasServer = File.Exists(Path.Combine(dir.FullName, serverName))
+                                || File.Exists(Path.Combine(dir.FullName, "build", serverName));
                 var looksLikeRepo = File.Exists(Path.Combine(dir.FullName, "CMakeLists.txt"))
                                     || File.Exists(Path.Combine(dir.FullName, "run.sh"));
-                if (hasData && (hasBuild || looksLikeRepo))
+                if (hasData && (hasServer || looksLikeRepo))
                 {
                     return Path.GetFullPath(dataPath);
                 }
@@ -239,9 +239,10 @@ public sealed class LocalServerService : IDisposable
         var name = OperatingSystem.IsWindows() ? "dbserver.exe" : "dbserver";
         var candidates = new System.Collections.Generic.List<string>
         {
+            Path.Combine(AppContext.BaseDirectory, name),
+            Path.Combine(AppContext.BaseDirectory, "build", name),
             Path.Combine(Environment.CurrentDirectory, "build", name),
             Path.Combine(Environment.CurrentDirectory, name),
-            Path.Combine(AppContext.BaseDirectory, name),
         };
 
         var dir = new DirectoryInfo(AppContext.BaseDirectory);

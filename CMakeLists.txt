@@ -53,6 +53,9 @@ add_executable(dbserver
 target_link_libraries(dbserver PRIVATE dbengine httplib::httplib OpenSSL::SSL OpenSSL::Crypto)
 target_include_directories(dbserver PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_compile_definitions(dbserver PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
+if(WIN32)
+    target_link_libraries(dbserver PRIVATE ws2_32 crypt32)
+endif()
 
 # ── Client library (static) ──
 add_library(dbclient STATIC
@@ -69,6 +72,9 @@ target_link_libraries(dbcli PRIVATE dbclient)
 target_include_directories(dbcli PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_compile_definitions(dbcli PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
 target_link_libraries(dbcli PRIVATE OpenSSL::SSL OpenSSL::Crypto nlohmann_json::nlohmann_json)
+if(WIN32)
+    target_link_libraries(dbcli PRIVATE ws2_32 crypt32)
+endif()
 
 # ── Tests executable ──
 add_executable(db_tests
