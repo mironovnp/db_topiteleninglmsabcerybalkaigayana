@@ -1,4 +1,5 @@
 build/
+build_release/
 data/
 .DS_Store
 *.swp
@@ -19,6 +20,8 @@ CaseChampGui/bin/
 CaseChampGui/obj/
 *.user
 CaseChampGui/*.lscache
+build_windows.ps1
+installer.iss
 
 # GUI launcher local files (WSL / run.sh)
 .casechamp-gui.log
