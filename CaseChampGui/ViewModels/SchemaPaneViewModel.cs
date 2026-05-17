@@ -37,10 +37,16 @@ public sealed class SchemaPaneViewModel : ObservableObject
     {
         _schemaService = schemaService;
         RefreshCommand = new AsyncRelayCommand(RefreshAsync, () => !_isLoading && !string.IsNullOrEmpty(_currentDatabase));
-        OpenTableCommand = new RelayCommand<string>(name =>
+        OpenTableCommand = new RelayCommand<object?>(param =>
         {
+            var name = param switch
+            {
+                string s => s,
+                null => null,
+                _ => param.ToString(),
+            };
             if (!string.IsNullOrWhiteSpace(name))
-                OpenTableRequested?.Invoke(this, name);
+                OpenTableRequested?.Invoke(this, name.Trim());
         });
     }
 
@@ -83,7 +89,7 @@ public sealed class SchemaPaneViewModel : ObservableObject
     }
 
     public AsyncRelayCommand RefreshCommand { get; }
-    public RelayCommand<string> OpenTableCommand { get; }
+    public RelayCommand<object?> OpenTableCommand { get; }
 
     public event EventHandler? RefreshRequested;
     public event EventHandler<string>? OpenTableRequested;

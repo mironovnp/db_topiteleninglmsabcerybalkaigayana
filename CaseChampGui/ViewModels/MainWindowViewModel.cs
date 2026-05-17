@@ -347,10 +347,19 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
 
     public void OpenBrowseTable(string tableName)
     {
+        if (string.IsNullOrWhiteSpace(tableName)) return;
+
+        Browse.RequestTableSelection(tableName);
+
         var browseNav = NavItems.FirstOrDefault(n => n.Section == AppSection.Browse);
-        if (browseNav is not null)
-            SelectedNavItem = browseNav;
-        Browse.SelectAndLoadTable(tableName);
+        if (browseNav is null) return;
+
+        var wasBrowse = CurrentSection == AppSection.Browse;
+        SelectedNavItem = browseNav;
+
+        // При смене раздела список обновит OnSectionActivated; если уже в «Таблицы» — обновим явно.
+        if (wasBrowse)
+            Browse.SelectAndLoadTable(tableName);
     }
 
     private void OnOpenTableFromSchema(object? sender, string tableName) => OpenBrowseTable(tableName);
@@ -422,6 +431,8 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             {
                 OnPropertyChanged(nameof(IsSidebarExpanded));
                 OnPropertyChanged(nameof(SidebarWidth));
+                OnPropertyChanged(nameof(ContentAreaLeftInset));
+                OnPropertyChanged(nameof(ContentAreaMargin));
             }
         }
     }
@@ -443,6 +454,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         !IsNarrowWindow && (!AutoCollapseSidebar || IsSidebarHovered);
 
     public double SidebarWidth => IsSidebarExpanded ? SidebarExpandedWidth : SidebarCollapsedWidth;
+
+    /// <summary>Отступ контента слева: при авто-сворачивании фиксирован под узкую панель, расширение — поверх таблицы.</summary>
+    public double ContentAreaLeftInset =>
+        AutoCollapseSidebar ? SidebarCollapsedWidth : SidebarWidth;
+
+    public Thickness ContentAreaMargin => new(ContentAreaLeftInset, 0, 0, 0);
 
     public bool CompactMode
     {

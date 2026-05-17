@@ -76,10 +76,11 @@ public partial class App : Application
             var schemaService = new SchemaService(client);
             var schemaPane = new SchemaPaneViewModel(schemaService);
             var text2Sql = new MistralText2SqlService(mistralApiKeys, schemaService);
+            var columnFilterTranslator = new MistralColumnFilterService(mistralApiKeys, schemaService);
 
             var sqlVm = new SqlViewModel(client, schemaPane, notifications);
             var text2SqlVm = new Text2SqlViewModel(text2Sql, mistralApiKeys, client, schemaPane, notifications);
-            var browseVm = new TableBrowseViewModel(client, schemaService, notifications);
+            var browseVm = new TableBrowseViewModel(client, schemaService, columnFilterTranslator, notifications);
             var settingsVm = new SettingsViewModel(settingsService, themeService, client, mistralApiKeys);
 
             mainVm = new MainWindowViewModel(
@@ -106,6 +107,7 @@ public partial class App : Application
                     localServer.Dispose();
                     client.Dispose();
                     text2Sql.Dispose();
+                    columnFilterTranslator.Dispose();
                 }
                 catch
                 {

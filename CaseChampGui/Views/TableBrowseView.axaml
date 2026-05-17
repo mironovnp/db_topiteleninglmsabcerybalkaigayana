@@ -82,6 +82,13 @@
                                 Padding="8,4"
                                 ToolTip.Tip="Обновить данные таблицы"
                                 Command="{Binding RefreshDataCommand}" />
+                        <Button Classes="ghost"
+                                Content="✕ фильтры"
+                                FontSize="11"
+                                Padding="8,4"
+                                ToolTip.Tip="Сбросить все фильтры столбцов"
+                                Command="{Binding ClearAllFiltersCommand}"
+                                IsVisible="{Binding HasActiveFilters}" />
                     </StackPanel>
 
                     <TextBlock DockPanel.Dock="Left"

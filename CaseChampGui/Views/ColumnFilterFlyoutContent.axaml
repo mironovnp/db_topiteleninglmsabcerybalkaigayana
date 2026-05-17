@@ -1,0 +1,88 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:CaseChampGui.ViewModels"
+             x:Class="CaseChampGui.Views.ColumnFilterFlyoutContent"
+             x:DataType="vm:TableBrowseViewModel"
+             MinWidth="300"
+             MaxWidth="360">
+
+    <Border Padding="12" Background="{DynamicResource SurfaceBrush}">
+        <StackPanel Spacing="10">
+            <TextBlock Text="{Binding FilterEditingColumn, StringFormat='Фильтр: {0}'}"
+                       FontWeight="SemiBold"
+                       FontSize="13" />
+
+            <Grid ColumnDefinitions="*,*" ColumnSpacing="6">
+                <RadioButton Grid.Column="0"
+                             GroupName="BrowseColumnFilterMode"
+                             Classes="ghost"
+                             Content="=  &gt;  &lt;"
+                             IsChecked="{Binding IsCompareFilterMode, Mode=TwoWay}"
+                             HorizontalAlignment="Stretch"
+                             HorizontalContentAlignment="Center"
+                             MinHeight="32" />
+                <RadioButton Grid.Column="1"
+                             GroupName="BrowseColumnFilterMode"
+                             Classes="ghost"
+                             Content="Text2SQL"
+                             IsChecked="{Binding IsText2SqlFilterMode, Mode=TwoWay}"
+                             HorizontalAlignment="Stretch"
+                             HorizontalContentAlignment="Center"
+                             MinHeight="32" />
+            </Grid>
+
+            <StackPanel Spacing="8" IsVisible="{Binding IsCompareFilterMode}">
+                <TextBlock Text="Сравнение с значением" Classes="muted" FontSize="11" />
+                <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
+                    <ComboBox Grid.Column="0"
+                              Width="56"
+                              SelectedItem="{Binding FilterCompareOperator, Mode=TwoWay}"
+                              ItemsSource="{Binding FilterCompareOperators}"
+                              VerticalAlignment="Center" />
+                    <TextBox Grid.Column="1"
+                             Text="{Binding FilterCompareValue, Mode=TwoWay}"
+                             PlaceholderText="Значение"
+                             VerticalAlignment="Center" />
+                </Grid>
+            </StackPanel>
+
+            <StackPanel Spacing="8" IsVisible="{Binding IsText2SqlFilterMode}">
+                <TextBlock Text="Условие на русском (без БД, таблицы и имени столбца)"
+                           Classes="muted"
+                           FontSize="11"
+                           TextWrapping="Wrap" />
+                <TextBox Text="{Binding FilterText2SqlInput, Mode=TwoWay}"
+                         AcceptsReturn="True"
+                         MinHeight="72"
+                         MaxHeight="120"
+                         TextWrapping="Wrap"
+                         PlaceholderText="например: больше 25 или содержит Иван" />
+                <TextBlock Text="{Binding FilterText2SqlHint}"
+                           Classes="muted"
+                           FontSize="10"
+                           TextWrapping="Wrap" />
+            </StackPanel>
+
+            <TextBlock Text="{Binding FilterEditorMessage}"
+                       Foreground="{DynamicResource WarnBrush}"
+                       FontSize="11"
+                       TextWrapping="Wrap"
+                       IsVisible="{Binding HasFilterEditorMessage}" />
+
+            <ProgressBar IsIndeterminate="True"
+                         Height="3"
+                         IsVisible="{Binding IsFilterEditorBusy}" />
+
+            <Grid ColumnDefinitions="*,*" ColumnSpacing="8">
+                <Button Grid.Column="0"
+                        Classes="ghost"
+                        Content="Сбросить"
+                        Command="{Binding ClearColumnFilterCommand}" />
+                <Button Grid.Column="1"
+                        Classes="accent"
+                        Content="Применить"
+                        Command="{Binding ApplyColumnFilterCommand}" />
+            </Grid>
+        </StackPanel>
+    </Border>
+</UserControl>
