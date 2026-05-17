@@ -51,6 +51,7 @@ public sealed class SettingsViewModel : ObservableObject
     private MistralKeyChoiceItem? _selectedMistralKeyChoice;
     private MistralPolicyOption? _selectedAdminMistralPolicy;
     private bool _isUpdatingMistralSelection;
+    private bool _isPreAuthMode;
 
     public SettingsViewModel(
         ISettingsService settingsService,
@@ -103,6 +104,22 @@ public sealed class SettingsViewModel : ObservableObject
         _settingsService.SettingsChanged += (_, _) => ReloadFromSettings();
         _mistralApiKeys.ApiKeyChanged += (_, _) => Dispatcher.UIThread.Post(RefreshMistralKeyState);
     }
+
+    /// <summary>Настройки с экрана входа: только подключение и оформление, без аккаунта и API-ключей.</summary>
+    public bool IsPreAuthMode
+    {
+        get => _isPreAuthMode;
+        set
+        {
+            if (!SetProperty(ref _isPreAuthMode, value))
+                return;
+            OnPropertyChanged(nameof(ShowMistralSection));
+            OnPropertyChanged(nameof(ShowAccountSection));
+        }
+    }
+
+    public bool ShowMistralSection => !IsPreAuthMode;
+    public bool ShowAccountSection => !IsPreAuthMode;
 
     public ObservableCollection<MistralKeyChoiceItem> MistralKeyChoices { get; }
 

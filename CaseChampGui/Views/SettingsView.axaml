@@ -139,7 +139,7 @@
             </Border>
 
             
-            <Border Classes="card">
+            <Border Classes="card" IsVisible="{Binding ShowMistralSection}">
                 <StackPanel Spacing="14">
                     <StackPanel Orientation="Horizontal" Spacing="10">
                         <TextBlock Text="✦" FontSize="18" VerticalAlignment="Center" />
@@ -305,7 +305,7 @@
             </Border>
 
             
-            <Border Classes="card">
+            <Border Classes="card" IsVisible="{Binding ShowAccountSection}">
                 <StackPanel Spacing="14">
                     <StackPanel Orientation="Horizontal" Spacing="10">
                         <TextBlock Text="👤" FontSize="18" VerticalAlignment="Center" />

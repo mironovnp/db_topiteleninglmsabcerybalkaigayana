@@ -7,11 +7,13 @@
 
     <!-- Center card and tabs together so tab buttons stay above the form, not at window edges -->
     <StackPanel HorizontalAlignment="Center"
-                MaxWidth="480"
+                MaxWidth="520"
                 Margin="12,8,12,8"
-                Spacing="16">
+                Spacing="16"
+                ClipToBounds="False">
 
-        <Grid ColumnDefinitions="*,10,*,10,Auto">
+        <Grid ColumnDefinitions="*,10,*,10,52"
+              ClipToBounds="False">
             <Button Grid.Column="0"
                     Classes="ghost"
                     HorizontalAlignment="Stretch"
@@ -31,12 +33,18 @@
             <Button Grid.Column="4"
                     Classes="ghost"
                     MinHeight="40"
-                    Width="40"
+                    MinWidth="48"
+                    Padding="12,8"
+                    HorizontalAlignment="Stretch"
                     HorizontalContentAlignment="Center"
                     VerticalContentAlignment="Center"
-                    ToolTip.Tip="Настройки приложения и подключения"
+                    ClipToBounds="False"
+                    ToolTip.Tip="Подключение и оформление (без входа в аккаунт)"
                     Command="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).ToggleAuthSettingsCommand}">
-                <TextBlock Text="⚙" FontSize="18" />
+                <TextBlock Text="⚙"
+                           FontSize="17"
+                           HorizontalAlignment="Center"
+                           VerticalAlignment="Center" />
             </Button>
         </Grid>
 

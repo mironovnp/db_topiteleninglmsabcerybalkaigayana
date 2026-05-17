@@ -157,6 +157,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         {
             if (SetProperty(ref _authSettingsOverlayVisible, value))
             {
+                Settings.IsPreAuthMode = value;
                 ToggleAuthSettingsCommand.RaiseCanExecuteChanged();
             }
         }

@@ -1,21 +1,29 @@
 #pragma once
 #include <string>
-#include <openssl/sha.h>
+#include <openssl/evp.h>
 #include <iomanip>
 #include <sstream>
 
 namespace db {
 
 inline std::string hashPassword(const std::string& password) {
-    unsigned char hash[SHA256_DIGEST_LENGTH];
-    SHA256_CTX sha256;
-    SHA256_Init(&sha256);
-    SHA256_Update(&sha256, password.c_str(), password.size());
-    SHA256_Final(hash, &sha256);
-    
+    unsigned char hash[EVP_MAX_MD_SIZE];
+    unsigned int hash_len = 0;
+
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (!ctx) return {};
+
+    const bool ok =
+        EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) == 1 &&
+        EVP_DigestUpdate(ctx, password.data(), password.size()) == 1 &&
+        EVP_DigestFinal_ex(ctx, hash, &hash_len) == 1;
+
+    EVP_MD_CTX_free(ctx);
+    if (!ok) return {};
+
     std::stringstream ss;
-    for (int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
-        ss << std::hex << std::setw(2) << std::setfill('0') << (int)hash[i];
+    for (unsigned int i = 0; i < hash_len; i++) {
+        ss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(hash[i]);
     }
     return ss.str();
 }
