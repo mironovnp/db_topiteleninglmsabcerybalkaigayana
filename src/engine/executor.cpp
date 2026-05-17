@@ -265,6 +265,13 @@ Value Executor::evaluateExpression(const Expression* expr, const Row& row, const
             return {on ? "true" : "false", "BOOL"};
         }
         if (lit->type == TokenType::KW_NULL) return {"", "NULL"};
+        if (lit->type == TokenType::KW_CURRENT_DATE) {
+            auto t = std::time(nullptr);
+            auto tm = *std::localtime(&t);
+            std::ostringstream oss;
+            oss << std::put_time(&tm, "%Y-%m-%d");
+            return {oss.str(), "TEXT"};
+        }
         return {lit->value, "TEXT"};
     }
     if (auto col = dynamic_cast<const ColumnExpression*>(expr)) {
@@ -899,7 +906,15 @@ void Executor::applyDefaultsAndAutoincrement(const std::string& db_name, const T
                 }
                 r[i] = CellPrimitive{static_cast<int64_t>(++last_ids[static_cast<int>(i)])};
             } else if (s.columns[i].has_default) {
-                r[i] = coerce_string_to_cell_column(s.columns[i], s.columns[i].default_value, false);
+                std::string def_val = s.columns[i].default_value;
+                if (def_val == "CURRENT_DATE") {
+                    auto t = std::time(nullptr);
+                    auto tm = *std::localtime(&t);
+                    std::ostringstream oss;
+                    oss << std::put_time(&tm, "%Y-%m-%d");
+                    def_val = oss.str();
+                }
+                r[i] = coerce_string_to_cell_column(s.columns[i], def_val, false);
             }
         }
     }

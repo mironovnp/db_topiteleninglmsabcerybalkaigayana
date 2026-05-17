@@ -46,7 +46,7 @@ static const std::unordered_map<std::string, TokenType> KEYWORDS = {
     {"ROLLBACK",TokenType::KW_ROLLBACK},
     {"REGISTER",TokenType::KW_REGISTER}, {"LOGIN",TokenType::KW_LOGIN},
     {"DDL",TokenType::KW_DDL}, {"LOGOUT",TokenType::KW_LOGOUT},
-    {"CHANGE",TokenType::KW_CHANGE},
+    {"CHANGE",TokenType::KW_CHANGE}, {"CURRENT_DATE",TokenType::KW_CURRENT_DATE},
 };
 
 using enum TokenType;
@@ -321,7 +321,11 @@ std::unique_ptr<CreateTableStatement> Parser::parseCreateTable() {
             } else if (check(KW_DEFAULT)) {
                 consume();
                 col.has_default = true;
-                col.default_value = consume().value;
+                Token def_tok = consume();
+                col.default_value = def_tok.value;
+                if (def_tok.type == KW_CURRENT_DATE && match(LPAREN)) {
+                    expect(RPAREN);
+                }
             } else if (check(KW_REFERENCES)) {
                 consume();
                 col.fk_ref_table = parseIdentifier();
@@ -399,7 +403,14 @@ std::unique_ptr<AlterTableStatement> Parser::parseAlterTable() {
         while (true) {
             if (check(KW_NOT)) { consume(); expect(KW_NULL); cd.not_null = true; }
             else if (check(KW_UNIQUE)) { consume(); cd.unique = true; }
-            else if (check(KW_DEFAULT)) { consume(); cd.has_default = true; cd.default_value = consume().value; }
+            else if (check(KW_DEFAULT)) {
+                consume(); cd.has_default = true;
+                Token def_tok = consume();
+                cd.default_value = def_tok.value;
+                if (def_tok.type == KW_CURRENT_DATE && match(LPAREN)) {
+                    expect(RPAREN);
+                }
+            }
             else if (check(KW_REFERENCES)) {
                 consume();
                 cd.fk_ref_table = parseIdentifier();
@@ -905,8 +916,11 @@ std::unique_ptr<Expression> Parser::parseExprAtom() {
     if (is_aggr_call(KW_MAX)) { consume(); return parse_aggr(AggrFunc::MAX); }
 
     Token t = cur();
-    if (t.type == STRING_LITERAL || t.type == NUMBER_LITERAL || t.type == BOOL_LITERAL) {
+    if (t.type == STRING_LITERAL || t.type == NUMBER_LITERAL || t.type == BOOL_LITERAL || t.type == KW_CURRENT_DATE) {
         consume();
+        if (t.type == KW_CURRENT_DATE && match(LPAREN)) {
+            expect(RPAREN);
+        }
         return std::make_unique<LiteralExpression>(t.value, t.type);
     }
     

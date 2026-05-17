@@ -265,9 +265,17 @@ bool Storage::alterTableAddColumn(const std::string& db_name, const std::string&
     schema.columns.push_back(new_col);
 
     for (auto& row : rows) {
-        if (new_col.has_default && !new_col.default_value.empty())
-            row.push_back(coerce_string_to_cell_column(new_col, new_col.default_value, false));
-        else if (new_col.type == "TEXT")
+        if (new_col.has_default && !new_col.default_value.empty()) {
+            std::string def_val = new_col.default_value;
+            if (def_val == "CURRENT_DATE") {
+                auto t = std::time(nullptr);
+                auto tm = *std::localtime(&t);
+                std::ostringstream oss;
+                oss << std::put_time(&tm, "%Y-%m-%d");
+                def_val = oss.str();
+            }
+            row.push_back(coerce_string_to_cell_column(new_col, def_val, false));
+        } else if (new_col.type == "TEXT")
             row.push_back(CellPrimitive{std::string{}});
         else
             row.push_back(std::nullopt);

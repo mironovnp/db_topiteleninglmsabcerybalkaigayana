@@ -277,6 +277,28 @@ private:
         assert_rows("Сложный WHERE (AND/OR)", "SELECT name FROM users WHERE age > 25 AND age < 35 OR name = 'David';", 2, {{"Bob"}, {"David"}});
         assert_rows("ORDER BY DESC", "SELECT name FROM users ORDER BY age DESC;", 3, {{"David"}, {"Bob"}, {"Alice"}});
         assert_rows("LIMIT и OFFSET", "SELECT name FROM users ORDER BY id LIMIT 1 OFFSET 1;", 1, {{"Bob"}});
+
+        auto t = std::time(nullptr);
+        auto tm = *std::localtime(&t);
+        std::ostringstream oss;
+        oss << std::put_time(&tm, "%Y-%m-%d");
+        std::string expected_date = oss.str();
+
+        assert_rows("Выборка CURRENT_DATE", "SELECT CURRENT_DATE FROM users WHERE id = 1;", 1, {{expected_date}});
+        assert_rows("Выборка CURRENT_DATE()", "SELECT CURRENT_DATE() FROM users WHERE id = 1;", 1, {{expected_date}});
+
+        executor.execute("CREATE TABLE date_test (id INT PRIMARY KEY, created_at TEXT DEFAULT CURRENT_DATE);");
+        executor.execute("INSERT INTO date_test (id) VALUES (1);");
+        assert_rows("Проверка DEFAULT CURRENT_DATE", "SELECT created_at FROM date_test WHERE id = 1;", 1, {{expected_date}});
+
+        executor.execute("CREATE TABLE limit_test (id INT PRIMARY KEY);");
+        for (int i = 1; i <= 105; ++i) {
+            executor.execute("INSERT INTO limit_test (id) VALUES (" + std::to_string(i) + ");");
+        }
+        assert_rows("Проверка лимита по умолчанию (100 строк)", "SELECT id FROM limit_test;", 100);
+        assert_rows("Проверка явного LIMIT 50", "SELECT id FROM limit_test LIMIT 50;", 50);
+        assert_rows("Проверка явного LIMIT 105", "SELECT id FROM limit_test LIMIT 105;", 105);
+        executor.execute("DROP TABLE limit_test;");
     }
 
     void test_joins() {
