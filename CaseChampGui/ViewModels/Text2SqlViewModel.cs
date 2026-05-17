@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using CaseChampGui.Models;
 using CaseChampGui.Services;
@@ -300,6 +301,16 @@ public sealed class Text2SqlViewModel : ObservableObject
 
             var sql = translation.Sql;
             var statements = SqlScript.SplitStatements(sql);
+
+            foreach (var statement in statements)
+            {
+                if (Regex.IsMatch(statement, @"^\s*SET\s+USER\b", RegexOptions.IgnoreCase))
+                {
+                    await UiThread.RunAsync(() => ApplyError("Команда SET USER запрещена для использования в графическом интерфейсе. Пожалуйста, воспользуйтесь окном авторизации."));
+                    return;
+                }
+            }
+
             await UiThread.RunAsync(() =>
             {
                 GeneratedSql = sql;

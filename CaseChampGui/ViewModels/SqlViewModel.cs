@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using CaseChampGui.Models;
 using CaseChampGui.Services;
@@ -186,6 +187,21 @@ public sealed class SqlViewModel : ObservableObject
             });
             return;
         }
+
+            foreach (var statement in SqlScript.SplitStatements(sql))
+            {
+                if (Regex.IsMatch(statement, @"^\s*SET\s+USER\b", RegexOptions.IgnoreCase))
+                {
+                    await UiThread.RunAsync(() =>
+                    {
+                        StatusMessage = "Отказ в выполнении";
+                        HasMessage = true;
+                        IsError = true;
+                        ResultMessage = "Команда SET USER запрещена для использования в графическом интерфейсе. Пожалуйста, воспользуйтесь окном авторизации.";
+                    });
+                    return;
+                }
+            }
 
         try
         {

@@ -180,9 +180,9 @@ public sealed class AuthViewModel : ObservableObject
         {
             ClearStatus();
             var u = Username.Trim();
-            if (string.IsNullOrWhiteSpace(u) || string.IsNullOrWhiteSpace(Password))
+            if (string.IsNullOrWhiteSpace(u))
             {
-                SetStatus("Введите имя пользователя и пароль.", isError: true);
+                SetStatus("Введите имя пользователя.", isError: true);
                 return;
             }
 
