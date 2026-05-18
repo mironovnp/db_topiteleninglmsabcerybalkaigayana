@@ -14,7 +14,7 @@
         <Grid Grid.Column="0" Margin="0,0,20,0">
 
             
-            <Grid IsVisible="{Binding IsClassicMode}" RowDefinitions="Auto,*">
+            <Grid IsVisible="{Binding IsClassicMode}" RowDefinitions="Auto,Auto,*">
 
                 
                 <Border Grid.Row="0"
@@ -129,14 +129,62 @@
                                         Command="{Binding ExecuteCommand}" />
                                 <Button Classes="compact-action"
                                         Content="Dry run"
-                                        Margin="0,0,0,6"
+                                        Margin="0,0,8,6"
                                         Command="{Binding DryRunCommand}" />
+                                <Button Classes="ghost compact-action"
+                                        Content="Загрузить CSV"
+                                        Margin="0,0,0,6"
+                                        Command="{Binding PickCsvFileCommand}" />
                         </WrapPanel>
                     </Grid>
                 </Border>
 
-                
-                <Grid Grid.Row="1" RowDefinitions="Auto,Auto,*">
+                <StackPanel Grid.Row="1"
+                            Margin="0,0,0,12"
+                            Spacing="8"
+                            IsVisible="{Binding HasSelectedCsvPath}">
+                    <TextBlock Text="Файл на вашем компьютере:"
+                               FontSize="12"
+                               Classes="subtle" />
+                    <TextBlock Text="{Binding SelectedCsvFilePath}"
+                               Classes="mono"
+                               FontSize="12"
+                               TextWrapping="Wrap" />
+                    <Border Padding="12,10"
+                            CornerRadius="8"
+                            BorderBrush="{DynamicResource BorderSoftBrush}"
+                            BorderThickness="1"
+                            Background="{DynamicResource SurfaceMutedBrush}"
+                            IsVisible="{Binding HasImportTables, Converter={x:Static views:NegateBoolConverter.Instance}}">
+                        <TextBlock Text="Таблиц нет — выполните CREATE TABLE в редакторе выше"
+                                   TextWrapping="Wrap"
+                                   FontSize="12"
+                                   Foreground="{DynamicResource MutedTextBrush}" />
+                    </Border>
+                    <Grid ColumnDefinitions="*,Auto,Auto"
+                          ColumnSpacing="8"
+                          IsVisible="{Binding HasImportTables}">
+                        <ComboBox Grid.Column="0"
+                                  ItemsSource="{Binding ImportTables}"
+                                  SelectedItem="{Binding SelectedImportTable, Mode=TwoWay}" />
+                        <CheckBox Grid.Column="1"
+                                  Content="Добавить к существующим"
+                                  IsChecked="{Binding ImportAppend, Mode=TwoWay}"
+                                  VerticalAlignment="Center"
+                                  ToolTip.Tip="Без галочки: импорт только в пустую таблицу (данные не удаляются, но повторный импорт в заполненную таблицу запрещён). С галочкой: строки из CSV дописываются к уже имеющимся." />
+                        <Button Grid.Column="2"
+                                Classes="accent compact-action"
+                                Content="Импорт"
+                                Command="{Binding RunCsvImportCommand}" />
+                    </Grid>
+                    <TextBlock Text="{Binding ImportStatusMessage}"
+                               TextWrapping="Wrap"
+                               IsVisible="{Binding HasImportStatus}"
+                               FontSize="12"
+                               Foreground="{DynamicResource WarnBrush}" />
+                </StackPanel>
+
+                <Grid Grid.Row="2" RowDefinitions="Auto,Auto,*">
 
                     <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Margin="2,0,2,10">
                         <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">

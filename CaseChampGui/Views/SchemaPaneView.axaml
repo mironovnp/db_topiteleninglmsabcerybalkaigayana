@@ -29,7 +29,23 @@
             </Border>
 
             <ScrollViewer Padding="6,4">
-                <ItemsControl ItemsSource="{Binding Tables}">
+                <Panel>
+                <Border Padding="16,24"
+                        Margin="8"
+                        CornerRadius="8"
+                        BorderBrush="{DynamicResource BorderSoftBrush}"
+                        BorderThickness="1"
+                        Background="{DynamicResource SurfaceMutedBrush}"
+                        HorizontalAlignment="Stretch"
+                        IsVisible="{Binding ShowEmptyTablesHint}">
+                    <TextBlock Text="Таблиц нет"
+                               HorizontalAlignment="Center"
+                               FontSize="13"
+                               Foreground="{DynamicResource MutedTextBrush}" />
+                </Border>
+
+                <ItemsControl ItemsSource="{Binding Tables}"
+                              IsVisible="{Binding HasTables}">
                     <ItemsControl.ItemTemplate>
                         <DataTemplate DataType="vm:SchemaTableViewModel">
                             <Expander Classes="schema"
@@ -85,6 +101,7 @@
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
+                </Panel>
             </ScrollViewer>
         </DockPanel>
     </Border>

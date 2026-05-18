@@ -60,6 +60,7 @@ public sealed class SchemaPaneViewModel : ObservableObject
             if (SetProperty(ref _currentDatabase, value))
             {
                 OnPropertyChanged(nameof(HasDatabase));
+                OnPropertyChanged(nameof(HasTables));
                 OnPropertyChanged(nameof(Title));
                 RefreshCommand.RaiseCanExecuteChanged();
             }
@@ -67,6 +68,10 @@ public sealed class SchemaPaneViewModel : ObservableObject
     }
 
     public bool HasDatabase => !string.IsNullOrEmpty(_currentDatabase);
+
+    public bool HasTables => Tables.Count > 0;
+
+    public bool ShowEmptyTablesHint => HasDatabase && !IsLoading && !HasTables;
 
     public string Title => string.IsNullOrEmpty(_currentDatabase) ? "Схема" : $"Схема · {_currentDatabase}";
 
@@ -77,6 +82,7 @@ public sealed class SchemaPaneViewModel : ObservableObject
         {
             if (SetProperty(ref _isLoading, value))
             {
+                OnPropertyChanged(nameof(ShowEmptyTablesHint));
                 RefreshCommand.RaiseCanExecuteChanged();
             }
         }
@@ -97,6 +103,8 @@ public sealed class SchemaPaneViewModel : ObservableObject
     public void Clear()
     {
         Tables.Clear();
+        OnPropertyChanged(nameof(HasTables));
+        OnPropertyChanged(nameof(ShowEmptyTablesHint));
         StatusText = "Выберите базу данных вверху, чтобы увидеть таблицы.";
     }
 
@@ -118,6 +126,8 @@ public sealed class SchemaPaneViewModel : ObservableObject
             {
                 Tables.Add(new SchemaTableViewModel(t));
             }
+            OnPropertyChanged(nameof(HasTables));
+            OnPropertyChanged(nameof(ShowEmptyTablesHint));
             StatusText = tables.Count == 0
                 ? "В базе пока нет таблиц."
                 : $"Таблиц: {tables.Count}";

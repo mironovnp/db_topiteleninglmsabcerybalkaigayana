@@ -2,6 +2,7 @@
 #include "engine/storage/storage.hpp"
 #include "engine/parser.hpp"
 #include <nlohmann/json.hpp>
+#include <filesystem>
 #include <string>
 #include <map>
 #include <vector>
@@ -30,6 +31,10 @@ public:
     }
 
     bool isAdmin() const;
+
+    std::filesystem::path databaseDirectory(const std::string& db_name) const {
+        return storage_.databaseDirectory(db_name);
+    }
 
 private:
     Storage storage_;

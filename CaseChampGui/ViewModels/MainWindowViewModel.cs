@@ -607,6 +607,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         _client.Configure(s.Host, s.Port);
         if (await _client.PingAsync(cancellationToken).ConfigureAwait(false))
         {
+            await MaybeRestartStaleLocalServerAsync(s.Host, s.Port, cancellationToken).ConfigureAwait(false);
             return true;
         }
 
@@ -713,6 +714,32 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
         });
     }
 
+    private static bool IsLoopbackHost(string host) =>
+        string.Equals(host, "127.0.0.1", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(host, "::1", StringComparison.OrdinalIgnoreCase);
+
+    private async Task MaybeRestartStaleLocalServerAsync(string host, int port, CancellationToken cancellationToken)
+    {
+        if (!_settingsService.Current.AutoStartLocalServer || !IsLoopbackHost(host))
+            return;
+        if (_client.SupportsModernCsvImport)
+            return;
+        if (_localServer.FindExecutable() is null)
+            return;
+
+        Notifications.Push(
+            "Обновление dbserver",
+            "На порту работает устаревший сервер. Перезапускаю с исправлением импорта CSV…",
+            NotificationKind.Warning,
+            TimeSpan.FromSeconds(6));
+
+        LocalServerService.TryFreeTcpPort(port);
+        _localServer.Stop();
+        await Task.Delay(500, cancellationToken).ConfigureAwait(false);
+        await TryStartLocalServerAsync(host, port, cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task<bool> TryStartLocalServerAsync(string host, int port, CancellationToken cancellationToken = default)
     {
         var exe = _localServer.FindExecutable();
@@ -792,9 +819,12 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                     Text2Sql.Schema.CurrentDatabase = db.Name;
                     break;
                 }
+
+                if (string.IsNullOrEmpty(currentDb) && Databases.Count > 0)
+                    SelectedDatabase = Databases[0];
             });
 
-            if (refreshSchema && !string.IsNullOrEmpty(currentDb))
+            if (refreshSchema && !string.IsNullOrEmpty(Sql.Schema.CurrentDatabase ?? _client.CurrentDb))
             {
                 await PostToUiAsync(() => Sql.Schema.RefreshAsync());
             }
@@ -827,6 +857,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
             Text2Sql.Schema.CurrentDatabase = database;
             await Sql.Schema.RefreshAsync();
             await Browse.OnDatabaseChangedAsync();
+            RefreshCommandStates();
         }
         catch (Exception ex)
         {

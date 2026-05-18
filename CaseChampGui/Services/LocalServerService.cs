@@ -234,6 +234,41 @@ public sealed class LocalServerService : IDisposable
 
     public void Dispose() => Stop();
 
+    /// <summary>Освобождает TCP-порт (убивает процесс-слушатель). Нужно перед перезапуском устаревшего dbserver.</summary>
+    public static void TryFreeTcpPort(int port)
+    {
+        if (port <= 0 || port > 65535) return;
+        try
+        {
+            if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+            {
+                using var p = Process.Start(new ProcessStartInfo
+                {
+                    FileName = "fuser",
+                    ArgumentList = { "-k", $"{port}/tcp" },
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                });
+                p?.WaitForExit(3000);
+            }
+            else if (OperatingSystem.IsWindows())
+            {
+                using var find = Process.Start(new ProcessStartInfo
+                {
+                    FileName = "cmd.exe",
+                    Arguments = $"/c for /f \"tokens=5\" %a in ('netstat -ano ^| findstr :{port} ^| findstr LISTENING') do taskkill /F /PID %a",
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                });
+                find?.WaitForExit(5000);
+            }
+            Thread.Sleep(400);
+        }
+        catch
+        {
+        }
+    }
+
     private static string[] BuildSearchPaths()
     {
         var name = OperatingSystem.IsWindows() ? "dbserver.exe" : "dbserver";

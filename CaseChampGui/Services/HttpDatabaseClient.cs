@@ -1,5 +1,8 @@
 using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -53,6 +56,9 @@ public sealed class HttpDatabaseClient : IDatabaseClient, IDisposable
     public bool IsGlobalAdmin { get { lock (_sync) return _isGlobalAdmin; } }
     public string? SessionId { get { lock (_sync) return _sessionId; } }
 
+    /// <summary>Отвечает /ping с import_csv_v2 — сервер умеет читать table из multipart.</summary>
+    public bool SupportsModernCsvImport { get; private set; }
+
     public event EventHandler? StateChanged;
 
     public void Configure(string host, int port)
@@ -84,6 +90,23 @@ public sealed class HttpDatabaseClient : IDatabaseClient, IDisposable
                 var url = $"http://{Host}:{Port}/ping";
                 using var response = await _http.GetAsync(url, cts.Token).ConfigureAwait(false);
                 var ok = response.IsSuccessStatusCode;
+                SupportsModernCsvImport = false;
+                if (ok)
+                {
+                    var body = await response.Content.ReadAsStringAsync(cts.Token).ConfigureAwait(false);
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(body);
+                        if (doc.RootElement.TryGetProperty("import_csv_v2", out var flag)
+                            && flag.ValueKind == JsonValueKind.True)
+                        {
+                            SupportsModernCsvImport = true;
+                        }
+                    }
+                    catch
+                    {
+                    }
+                }
                 Status = ok ? ConnectionStatus.Connected : ConnectionStatus.Failed;
                 return ok;
             }
@@ -175,10 +198,14 @@ public sealed class HttpDatabaseClient : IDatabaseClient, IDisposable
                 _sessionId = result.SessionId;
                 changed = true;
             }
-            if (result.CurrentDb is not null && result.CurrentDb != _currentDb)
+            if (result.CurrentDb is not null)
             {
-                _currentDb = result.CurrentDb;
-                changed = true;
+                var nextDb = string.IsNullOrWhiteSpace(result.CurrentDb) ? null : result.CurrentDb;
+                if (nextDb != _currentDb)
+                {
+                    _currentDb = nextDb;
+                    changed = true;
+                }
             }
             if (result.CurrentUser is not null && result.CurrentUser != _currentUser)
             {
@@ -213,6 +240,94 @@ public sealed class HttpDatabaseClient : IDatabaseClient, IDisposable
         if (changed)
         {
             StateChanged?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    public async Task<CsvImportResult> ImportCsvAsync(
+        string tableName,
+        string fileName,
+        Stream fileContent,
+        bool append = false,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(tableName))
+            return new CsvImportResult { Success = false, Message = "Укажите таблицу." };
+        if (fileContent is null || !fileContent.CanRead)
+            return new CsvImportResult { Success = false, Message = "Файл не выбран." };
+
+        await _httpSerial.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using var form = new MultipartFormDataContent();
+            if (!string.IsNullOrEmpty(SessionId))
+                form.Add(new StringContent(SessionId), "session_id");
+            if (!string.IsNullOrEmpty(CurrentDb))
+                form.Add(new StringContent(CurrentDb), "database");
+            form.Add(new StringContent(tableName.Trim()), "table");
+            form.Add(new StringContent(append ? "true" : "false"), "append");
+
+            var filePart = new StreamContent(fileContent);
+            filePart.Headers.ContentType = new MediaTypeHeaderValue("text/csv");
+            form.Add(filePart, "file", string.IsNullOrWhiteSpace(fileName) ? "import.csv" : fileName);
+
+            // Дублируем поля в query: старый dbserver читал только req.params, не multipart.
+            var query = new List<string>
+            {
+                $"table={Uri.EscapeDataString(tableName.Trim())}",
+                $"append={Uri.EscapeDataString(append ? "true" : "false")}",
+            };
+            if (!string.IsNullOrEmpty(SessionId))
+                query.Add($"session_id={Uri.EscapeDataString(SessionId)}");
+            if (!string.IsNullOrEmpty(CurrentDb))
+                query.Add($"database={Uri.EscapeDataString(CurrentDb)}");
+
+            var url = $"http://{Host}:{Port}/import-csv?{string.Join("&", query)}";
+            using var response = await _http.PostAsync(url, form, cancellationToken).ConfigureAwait(false);
+            var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                Status = ConnectionStatus.Failed;
+                return new CsvImportResult
+                {
+                    Success = false,
+                    Message = $"HTTP {(int)response.StatusCode}: {json}",
+                };
+            }
+
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            var result = new CsvImportResult
+            {
+                Success = root.TryGetProperty("success", out var ok) && ok.GetBoolean(),
+                Message = root.TryGetProperty("message", out var msg) ? msg.GetString() ?? string.Empty : string.Empty,
+                ServerFileName = root.TryGetProperty("server_filename", out var fn) ? fn.GetString() : null,
+                Sql = root.TryGetProperty("sql", out var sql) ? sql.GetString() : null,
+                AffectedRows = root.TryGetProperty("affected_rows", out var ar) && ar.TryGetInt32(out var n) ? n : 0,
+            };
+
+            var queryLike = JsonSerializer.Deserialize<QueryResult>(json, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true,
+            });
+            if (queryLike is not null)
+                UpdateSessionFromResult(queryLike);
+
+            Status = ConnectionStatus.Connected;
+            return result;
+        }
+        catch (TaskCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return new CsvImportResult { Success = false, Message = "Импорт отменён." };
+        }
+        catch (Exception ex)
+        {
+            Status = ConnectionStatus.Failed;
+            return new CsvImportResult { Success = false, Message = ex.Message };
+        }
+        finally
+        {
+            _httpSerial.Release();
         }
     }
 

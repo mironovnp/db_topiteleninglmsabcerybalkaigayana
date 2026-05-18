@@ -113,6 +113,7 @@ public:
 
         std::cout << "\n>>> ФАЗА 22: LOAD CSV" << std::endl;
         test_load_csv();
+        test_load_csv_semicolon_delimiter();
         test_load_csv_nonempty_and_append();
 
         std::cout << "\n>>> ФАЗА 23: Многострочные запросы и Алиасы агрегатов" << std::endl;
@@ -1073,6 +1074,58 @@ private:
             }
         } catch (const std::exception& e) {
             std::cerr << "  [FAIL] test_load_csv exception: " << e.what() << std::endl;
+        }
+    }
+
+    void test_load_csv_semicolon_delimiter() {
+        executor.setThreadLocalContext("system");
+        executor.setThreadLocalUser("admin");
+
+        try {
+            const std::string db_name = "csv_semi_db";
+            const std::string csv_name = "semi.csv";
+            std::filesystem::path csv_path = std::filesystem::path(data_dir) / db_name / csv_name;
+
+            assert_success("Создание БД для ;-CSV", "CREATE DATABASE " + db_name + ";");
+            assert_success("USE для ;-CSV", "USE " + db_name + ";");
+            assert_success("Таблица для ;-CSV",
+                             "CREATE TABLE semi_t (dep_id INT PRIMARY KEY, dep_name VARCHAR(255));");
+
+            std::filesystem::create_directories(csv_path.parent_path());
+            {
+                std::ofstream out(csv_path);
+                out << "dep_id;dep_name\n";
+                out << "1;Backend Development\n";
+                out << "2;Frontend Department\n";
+            }
+
+            json res = executor.execute("LOAD CSV '" + csv_name + "' INTO semi_t;");
+            bool ok_load = res["success"].get<bool>();
+
+            json sel = executor.execute("SELECT dep_id, dep_name FROM semi_t ORDER BY dep_id;");
+            bool rows_ok = false;
+            if (sel["success"].get<bool>() && sel.contains("rows") && sel["rows"].is_array() &&
+                sel["rows"].size() == 2) {
+                rows_ok = (sel["rows"][0][0].get<std::string>() == "1" &&
+                           sel["rows"][0][1].get<std::string>() == "Backend Development" &&
+                           sel["rows"][1][0].get<std::string>() == "2" &&
+                           sel["rows"][1][1].get<std::string>() == "Frontend Department");
+            }
+
+            assert_success("Очистка ;-CSV", "DROP TABLE semi_t; DROP DATABASE " + db_name + ";");
+            std::error_code ec;
+            std::filesystem::remove_all(std::filesystem::path(data_dir) / db_name, ec);
+
+            total_count++;
+            if (ok_load && rows_ok) {
+                std::cout << "  [OK] LOAD CSV with semicolon delimiter" << std::endl;
+                passed_count++;
+            } else {
+                std::cerr << "  [FAIL] LOAD CSV semicolon: ok=" << ok_load << " res=" << res.dump()
+                          << " sel=" << sel.dump() << std::endl;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "  [FAIL] test_load_csv_semicolon_delimiter: " << e.what() << std::endl;
         }
     }
 

@@ -136,7 +136,7 @@
                                             Content="Очистить"
                                             Command="{Binding ClearCommand}" />
                                     <Button Classes="accent compact-action"
-                                            Content="▶ Перевести и выполнить"
+                                            Content="▶ Выполнить"
                                             Command="{Binding TranslateAndRunCommand}" />
                                 </StackPanel>
                             </Grid>

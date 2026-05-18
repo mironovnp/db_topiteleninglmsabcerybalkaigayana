@@ -76,7 +76,32 @@ static bool column_type_is_text_like(const ColumnDef& col) {
     return col.type.size() >= 7 && col.type.compare(0, 7, "VARCHAR") == 0;
 }
 
-static std::vector<std::string> split_csv_line(const std::string& line) {
+static char detect_csv_delimiter(const std::string& line) {
+    int commas = 0;
+    int semicolons = 0;
+    bool in_quotes = false;
+    for (size_t i = 0; i < line.size(); ++i) {
+        char c = line[i];
+        if (in_quotes) {
+            if (c == '"' && i + 1 < line.size() && line[i + 1] == '"') {
+                ++i;
+                continue;
+            }
+            if (c == '"')
+                in_quotes = false;
+        } else {
+            if (c == '"')
+                in_quotes = true;
+            else if (c == ',')
+                ++commas;
+            else if (c == ';')
+                ++semicolons;
+        }
+    }
+    return semicolons > commas ? ';' : ',';
+}
+
+static std::vector<std::string> split_csv_line(const std::string& line, char delim = ',') {
     std::vector<std::string> fields;
     std::string cur;
     bool in_quotes = false;
@@ -96,7 +121,7 @@ static std::vector<std::string> split_csv_line(const std::string& line) {
         } else {
             if (c == '"')
                 in_quotes = true;
-            else if (c == ',') {
+            else if (c == delim) {
                 fields.push_back(cur);
                 cur.clear();
             } else {
@@ -619,7 +644,8 @@ json Executor::execAlterTableAddColumnFromCsv(const AlterTableStatement* q) {
         return err("ALTER TABLE ADD COLUMN FROM CSV: need a header row and at least one data row");
 
     std::string header_line = strip_cr(strip_utf8_bom(lines[0]));
-    std::vector<std::string> header_fields = split_csv_line(header_line);
+    const char csv_delim = detect_csv_delimiter(header_line);
+    std::vector<std::string> header_fields = split_csv_line(header_line, csv_delim);
     if (header_fields.size() != 2)
         return err("ALTER TABLE ADD COLUMN FROM CSV: header must contain exactly two columns: "
                    "primary key '" +
@@ -642,7 +668,7 @@ json Executor::execAlterTableAddColumnFromCsv(const AlterTableStatement* q) {
         if (trim_csv_field(line).empty())
             continue;
 
-        std::vector<std::string> fields = split_csv_line(line);
+        std::vector<std::string> fields = split_csv_line(line, csv_delim);
         if (fields.size() != 2) {
             return err("ALTER TABLE ADD COLUMN FROM CSV: row " + std::to_string(li + 1) +
                        " must have exactly 2 fields");
@@ -1075,7 +1101,8 @@ json Executor::execLoadCsv(const LoadCsvStatement* q) {
         return err("CSV has no lines");
 
     std::string header_line = strip_cr(strip_utf8_bom(lines[0]));
-    std::vector<std::string> header_fields = split_csv_line(header_line);
+    const char csv_delim = detect_csv_delimiter(header_line);
+    std::vector<std::string> header_fields = split_csv_line(header_line, csv_delim);
     if (header_fields.empty())
         return err("CSV header is empty");
 
@@ -1125,7 +1152,7 @@ json Executor::execLoadCsv(const LoadCsvStatement* q) {
         if (trim_csv_field(line).empty())
             continue;
 
-        std::vector<std::string> fields = split_csv_line(line);
+        std::vector<std::string> fields = split_csv_line(line, csv_delim);
         if (fields.size() != header_fields.size()) {
             return err("CSV row " + std::to_string(li + 1) + ": expected " +
                        std::to_string(header_fields.size()) + " fields, got " +

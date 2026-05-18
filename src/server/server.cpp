@@ -5,6 +5,75 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+
+namespace {
+
+std::string sanitize_csv_filename(std::string name) {
+    const auto pos = name.find_last_of("/\\");
+    if (pos != std::string::npos) name = name.substr(pos + 1);
+    if (name.empty()) name = "import.csv";
+    std::string out;
+    out.reserve(name.size());
+    for (unsigned char c : name) {
+        if (std::isalnum(c) || c == '_' || c == '-' || c == '.')
+            out.push_back(static_cast<char>(c));
+    }
+    if (out.empty()) out = "import.csv";
+    if (out.find('.') == std::string::npos) out += ".csv";
+    return out;
+}
+
+bool is_safe_identifier(const std::string& name) {
+    if (name.empty()) return false;
+    for (size_t i = 0; i < name.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(name[i]);
+        if (i == 0) {
+            if (!std::isalpha(c) && c != '_') return false;
+        } else if (!std::isalnum(c) && c != '_') {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string escape_sql_string(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        if (c == '\'') out += "''";
+        else out.push_back(c);
+    }
+    return out;
+}
+
+static std::string trim_field(std::string s) {
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.erase(s.begin());
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
+    return s;
+}
+
+// Query (?table=…) попадает в req.params; части multipart — в req.files (не в params).
+std::string multipart_field(const httplib::Request& req, const std::string& name) {
+    if (req.has_param(name)) {
+        const auto v = trim_field(req.get_param_value(name));
+        if (!v.empty()) return v;
+    }
+    if (req.has_file(name)) {
+        const auto v = trim_field(req.get_file_value(name).content);
+        if (!v.empty()) return v;
+    }
+    for (const auto& kv : req.files) {
+        if (kv.second.name == name) {
+            const auto v = trim_field(kv.second.content);
+            if (!v.empty()) return v;
+        }
+    }
+    return "";
+}
+
+} // namespace
 
 namespace db {
 
@@ -35,6 +104,11 @@ void Server::start() {
                 auto it = sessions_.find(session_id);
                 if (it == sessions_.end()) {
                     it = sessions_.emplace(session_id, SessionContext{}).first;
+                }
+                if (body.contains("current_db")) {
+                    const std::string req_db = body.value("current_db", "");
+                    if (!req_db.empty())
+                        it->second.current_db = req_db;
                 }
                 session = it->second;
             }
@@ -274,8 +348,146 @@ void Server::start() {
         }
     });
 
+    svr.Post("/import-csv", [this](const httplib::Request& req, httplib::Response& res) {
+        try {
+            if (!req.is_multipart_form_data()) {
+                res.set_content(
+                    json({{"success", false}, {"message", "Expected multipart/form-data with file field."}})
+                        .dump(),
+                    "application/json");
+                return;
+            }
+
+            if (!req.has_file("file")) {
+                res.set_content(
+                    json({{"success", false}, {"message", "Missing file field 'file'."}}).dump(),
+                    "application/json");
+                return;
+            }
+
+            const auto& upload = req.get_file_value("file");
+            if (upload.content.empty()) {
+                res.set_content(
+                    json({{"success", false}, {"message", "CSV file is empty."}}).dump(),
+                    "application/json");
+                return;
+            }
+
+            constexpr size_t kMaxCsvBytes = 32 * 1024 * 1024;
+            if (upload.content.size() > kMaxCsvBytes) {
+                res.set_content(
+                    json({{"success", false},
+                          {"message", "CSV file is too large (max 32 MB)."}})
+                        .dump(),
+                    "application/json");
+                return;
+            }
+
+            std::string session_id = multipart_field(req, "session_id");
+            std::string database = multipart_field(req, "database");
+            std::string table = multipart_field(req, "table");
+
+            bool append = false;
+            {
+                const std::string a = multipart_field(req, "append");
+                append = (a == "1" || a == "true" || a == "TRUE" || a == "yes");
+            }
+
+            if (table.empty()) {
+                res.set_content(
+                    json({{"success", false},
+                          {"message", "Не указана таблица для импорта (поле table)."}})
+                        .dump(),
+                    "application/json");
+                return;
+            }
+            if (!is_safe_identifier(table)) {
+                res.set_content(
+                    json({{"success", false}, {"message", "Invalid table name."}}).dump(),
+                    "application/json");
+                return;
+            }
+
+            SessionContext session;
+            {
+                std::lock_guard<std::mutex> lock(sessions_mutex_);
+                if (session_id.empty()) {
+                    session_id = "s" + std::to_string(next_session_id_.fetch_add(1));
+                    sessions_[session_id] = SessionContext{};
+                }
+                auto it = sessions_.find(session_id);
+                if (it == sessions_.end()) {
+                    it = sessions_.emplace(session_id, SessionContext{}).first;
+                }
+                session = it->second;
+            }
+
+            if (!database.empty()) session.current_db = database;
+            if (session.current_db.empty()) {
+                res.set_content(
+                    json({{"success", false},
+                          {"message", "No database selected. Choose a database in the toolbar or pass 'database'."}})
+                        .dump(),
+                    "application/json");
+                return;
+            }
+            if (session.current_user.empty()) {
+                res.set_content(
+                    json({{"success", false}, {"message", "Not authenticated."}}).dump(),
+                    "application/json");
+                return;
+            }
+
+            const std::string server_filename = sanitize_csv_filename(upload.filename);
+            const auto db_dir = executor_.databaseDirectory(session.current_db);
+            std::error_code ec;
+            std::filesystem::create_directories(db_dir, ec);
+            const auto dest = db_dir / server_filename;
+
+            {
+                std::ofstream out(dest, std::ios::binary | std::ios::trunc);
+                if (!out) {
+                    res.set_content(
+                        json({{"success", false}, {"message", "Failed to write CSV on server."}}).dump(),
+                        "application/json");
+                    return;
+                }
+                out.write(upload.content.data(), static_cast<std::streamsize>(upload.content.size()));
+                if (!out) {
+                    res.set_content(
+                        json({{"success", false}, {"message", "Failed to write CSV on server."}}).dump(),
+                        "application/json");
+                    return;
+                }
+            }
+
+            executor_.setThreadLocalContext(session.current_db);
+            executor_.setThreadLocalUser(session.current_user);
+
+            std::string sql = "LOAD CSV '" + escape_sql_string(server_filename) + "' INTO " + table;
+            if (append) sql += " APPEND";
+            sql += ";";
+
+            json result;
+            {
+                std::unique_lock<std::shared_mutex> lock(db_rw_mutex_);
+                result = executor_.execute(sql);
+            }
+
+            result["server_filename"] = server_filename;
+            result["sql"] = sql;
+            res.set_content(attach_session_context(session_id, result).dump(), "application/json");
+        } catch (const std::exception& e) {
+            res.set_content(
+                json({{"success", false}, {"message", e.what()}}).dump(),
+                "application/json");
+        }
+    });
+
     svr.Get("/ping", [](const httplib::Request&, httplib::Response& res) {
-        res.set_content("{\"status\":\"ok\"}", "application/json");
+        res.set_content(
+            json({{"status", "ok"}, {"import_csv_v2", true}}).dump(),
+            "application/json");
     });
 
     std::cout << "[databasetopit] Server listening on " << host_ << ":" << port_ << std::endl;

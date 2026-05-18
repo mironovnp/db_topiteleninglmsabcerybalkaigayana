@@ -1,8 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.IO;
+using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Platform.Storage;
 using CaseChampGui.Models;
 using CaseChampGui.Services;
 
@@ -25,6 +30,15 @@ public sealed class SqlViewModel : ObservableObject
     private bool _isError;
     private int _affectedRows;
     private string _resultMessage = string.Empty;
+
+    private IStorageFile? _pickedCsvFile;
+    private string? _selectedCsvFilePath;
+    private string? _selectedCsvFileName;
+    private string? _selectedImportTable;
+    private bool _importAppend;
+    private string _importStatusMessage = string.Empty;
+    private bool _hasImportStatus;
+    private bool _isImportBusy;
 
     public SqlViewModel(
         IDatabaseClient client,
@@ -62,6 +76,20 @@ public sealed class SqlViewModel : ObservableObject
             if (item is null) return;
             SqlText = item.Sql;
         });
+
+        PickCsvFileCommand = new AsyncRelayCommand(PickCsvFileAsync, () => CanImportCsv && !IsImportBusy);
+        RunCsvImportCommand = new AsyncRelayCommand(RunCsvImportAsync, CanRunCsvImport);
+
+        _client.StateChanged += (_, _) => UiThread.Post(RefreshCommandStates);
+        Schema.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName is nameof(SchemaPaneViewModel.CurrentDatabase)
+                or nameof(SchemaPaneViewModel.HasDatabase))
+            {
+                UiThread.Post(RefreshCommandStates);
+            }
+        };
+        Schema.RefreshRequested += (_, _) => UiThread.Post(SyncImportTablesFromSchema);
     }
 
     public SchemaPaneViewModel Schema { get; }
@@ -156,11 +184,97 @@ public sealed class SqlViewModel : ObservableObject
     public AsyncRelayCommand ExecuteCommand { get; }
     public AsyncRelayCommand DryRunCommand { get; }
     public RelayCommand ClearCommand { get; }
+  /// <summary>База с вкладки сверху (схема) или с сервера после USE.</summary>
+    public string? ActiveDatabaseName =>
+        !string.IsNullOrWhiteSpace(Schema.CurrentDatabase) ? Schema.CurrentDatabase : _client.CurrentDb;
+
+    public bool CanImportCsv => !string.IsNullOrEmpty(ActiveDatabaseName);
+
+    public AsyncRelayCommand PickCsvFileCommand { get; }
+    public AsyncRelayCommand RunCsvImportCommand { get; }
+
+    public ObservableCollection<string> ImportTables { get; } = new();
+
+    public bool HasImportTables => ImportTables.Count > 0;
+
+    public string? SelectedCsvFilePath
+    {
+        get => _selectedCsvFilePath;
+        private set
+        {
+            if (SetProperty(ref _selectedCsvFilePath, value))
+            {
+                OnPropertyChanged(nameof(HasSelectedCsvPath));
+                RunCsvImportCommand.RaiseCanExecuteChanged();
+            }
+        }
+    }
+
+    public bool HasSelectedCsvPath => !string.IsNullOrWhiteSpace(SelectedCsvFilePath);
+
+    public string? SelectedCsvFileName
+    {
+        get => _selectedCsvFileName;
+        private set
+        {
+            if (SetProperty(ref _selectedCsvFileName, value))
+                RunCsvImportCommand.RaiseCanExecuteChanged();
+        }
+    }
+
+    public string? SelectedImportTable
+    {
+        get => _selectedImportTable;
+        set
+        {
+            if (SetProperty(ref _selectedImportTable, value))
+                RunCsvImportCommand.RaiseCanExecuteChanged();
+        }
+    }
+
+    public bool ImportAppend
+    {
+        get => _importAppend;
+        set => SetProperty(ref _importAppend, value);
+    }
+
+    public string ImportStatusMessage
+    {
+        get => _importStatusMessage;
+        private set
+        {
+            if (SetProperty(ref _importStatusMessage, value))
+                OnPropertyChanged(nameof(HasImportStatus));
+        }
+    }
+
+    public bool HasImportStatus
+    {
+        get => _hasImportStatus;
+        private set => SetProperty(ref _hasImportStatus, value);
+    }
+
+    public bool IsImportBusy
+    {
+        get => _isImportBusy;
+        private set
+        {
+            if (SetProperty(ref _isImportBusy, value))
+            {
+                PickCsvFileCommand.RaiseCanExecuteChanged();
+                RunCsvImportCommand.RaiseCanExecuteChanged();
+            }
+        }
+    }
 
     public void RefreshCommandStates()
     {
+        OnPropertyChanged(nameof(ActiveDatabaseName));
+        OnPropertyChanged(nameof(CanImportCsv));
         ExecuteCommand.RaiseCanExecuteChanged();
         DryRunCommand.RaiseCanExecuteChanged();
+        PickCsvFileCommand.RaiseCanExecuteChanged();
+        RunCsvImportCommand.RaiseCanExecuteChanged();
     }
     public RelayCommand ClearChatCommand { get; }
     public RelayCommand ClearHistoryCommand { get; }
@@ -497,5 +611,226 @@ public sealed class SqlViewModel : ObservableObject
                 return true;
         }
         return false;
+    }
+
+    private static string SanitizeDatabaseName(string database) =>
+        database.Replace("`", string.Empty).Replace(";", string.Empty);
+
+    private async Task<bool> EnsureActiveDatabaseAsync()
+    {
+        var db = ActiveDatabaseName;
+        if (string.IsNullOrWhiteSpace(db))
+            return false;
+
+        if (string.Equals(_client.CurrentDb, db, StringComparison.Ordinal))
+            return true;
+
+        var use = await _client.ExecuteAsync($"USE {SanitizeDatabaseName(db)};").ConfigureAwait(false);
+        if (use.Success && string.IsNullOrEmpty(_client.CurrentDb))
+            Schema.CurrentDatabase = db;
+        return use.Success;
+    }
+
+    private void RefreshImportTables()
+    {
+        ImportTables.Clear();
+        foreach (var table in Schema.Tables)
+            ImportTables.Add(table.Name);
+
+        OnPropertyChanged(nameof(HasImportTables));
+        RunCsvImportCommand.RaiseCanExecuteChanged();
+
+        if (ImportTables.Count == 0)
+        {
+            SelectedImportTable = null;
+            return;
+        }
+
+        if (string.IsNullOrEmpty(SelectedImportTable) || !ImportTables.Contains(SelectedImportTable))
+            SelectedImportTable = ImportTables[0];
+    }
+
+    private void SyncImportTablesFromSchema()
+    {
+        RefreshImportTables();
+        if (!HasImportTables || !HasSelectedCsvPath)
+            return;
+
+        ImportStatusMessage = $"Таблица «{SelectedImportTable}» готова. Нажмите «Импорт».";
+        HasImportStatus = true;
+    }
+
+    private bool CanRunCsvImport() =>
+        !IsImportBusy &&
+        !IsBusy &&
+        HasSelectedCsvPath &&
+        _pickedCsvFile is not null &&
+        !string.IsNullOrWhiteSpace(SelectedImportTable) &&
+        CanImportCsv;
+
+    private async Task PickCsvFileAsync()
+    {
+        if (!CanImportCsv)
+        {
+            await UiThread.RunAsync(() =>
+            {
+                ImportStatusMessage = "Сначала выберите базу данных на панели сверху.";
+                HasImportStatus = true;
+            });
+            return;
+        }
+
+        if (!await EnsureActiveDatabaseAsync().ConfigureAwait(false))
+        {
+            await UiThread.RunAsync(() =>
+            {
+                ImportStatusMessage = "Не удалось переключиться на выбранную базу (USE).";
+                HasImportStatus = true;
+            });
+            return;
+        }
+
+        if (Application.Current?.ApplicationLifetime
+            is not Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime desktop
+            || desktop.MainWindow is not Window window)
+        {
+            return;
+        }
+
+        var files = await window.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Выберите CSV-файл",
+            AllowMultiple = false,
+            FileTypeFilter =
+            [
+                new FilePickerFileType("CSV")
+                {
+                    Patterns = ["*.csv"],
+                    MimeTypes = ["text/csv"],
+                },
+            ],
+        }).ConfigureAwait(false);
+
+        var file = files?.FirstOrDefault();
+        if (file is null) return;
+
+        _pickedCsvFile = file;
+        SelectedCsvFileName = file.Name;
+        SelectedCsvFilePath = file.TryGetLocalPath() ?? file.Name;
+        RefreshImportTables();
+
+        if (ImportTables.Count == 0)
+        {
+            ImportStatusMessage =
+                "Файл выбран. Создайте таблицу (CREATE TABLE) — список обновится автоматически, затем нажмите «Импорт».";
+            HasImportStatus = true;
+            return;
+        }
+
+        ImportStatusMessage = $"Таблица «{SelectedImportTable}». Нажмите «Импорт».";
+        HasImportStatus = true;
+    }
+
+    private async Task RunCsvImportAsync()
+    {
+        if (string.IsNullOrWhiteSpace(SelectedImportTable) || _pickedCsvFile is null)
+        {
+            await UiThread.RunAsync(() =>
+            {
+                ImportStatusMessage = "Выберите CSV-файл и таблицу.";
+                HasImportStatus = true;
+            });
+            return;
+        }
+
+        try
+        {
+            if (!await EnsureActiveDatabaseAsync().ConfigureAwait(false))
+            {
+                await UiThread.RunAsync(() =>
+                {
+                    ImportStatusMessage = "Не удалось переключиться на выбранную базу (USE).";
+                    HasImportStatus = true;
+                });
+                return;
+            }
+
+            await UiThread.RunAsync(() =>
+            {
+                IsImportBusy = true;
+                HasImportStatus = true;
+                ImportStatusMessage = "Загрузка файла на сервер…";
+            });
+
+            var tableName = SelectedImportTable;
+            if (string.IsNullOrWhiteSpace(tableName) && ImportTables.Count > 0)
+                tableName = ImportTables[0];
+
+            if (string.IsNullOrWhiteSpace(tableName))
+            {
+                await UiThread.RunAsync(() =>
+                {
+                    ImportStatusMessage = "Выберите таблицу для импорта.";
+                    HasImportStatus = true;
+                });
+                return;
+            }
+
+            await using var stream = await _pickedCsvFile.OpenReadAsync().ConfigureAwait(false);
+            var import = await _client.ImportCsvAsync(
+                tableName,
+                _pickedCsvFile.Name,
+                stream,
+                ImportAppend).ConfigureAwait(false);
+
+            await UiThread.RunAsync(() =>
+            {
+                if (!string.IsNullOrWhiteSpace(import.Sql))
+                    SqlText = import.Sql;
+
+                if (import.Success)
+                {
+                    ResetResults();
+                    HasResults = false;
+                    HasMessage = true;
+                    IsError = false;
+                    AffectedRows = import.AffectedRows;
+                    var fileNote = string.IsNullOrWhiteSpace(import.ServerFileName)
+                        ? string.Empty
+                        : $" Файл на сервере: {import.ServerFileName}.";
+                    ResultMessage = string.IsNullOrWhiteSpace(import.Message)
+                        ? "Импорт CSV выполнен." + fileNote
+                        : import.Message + fileNote;
+                    StatusMessage = "Импорт CSV готов";
+                    ImportStatusMessage = ResultMessage;
+                    _notifications.Push("Импорт CSV", ResultMessage, NotificationKind.Info);
+                    SchemaInvalidationRequested?.Invoke(this, import.Sql ?? string.Empty);
+                    _ = Schema.RefreshAsync();
+                }
+                else
+                {
+                    IsError = true;
+                    HasMessage = true;
+                    HasResults = false;
+                    var msg = string.IsNullOrWhiteSpace(import.Message)
+                        ? "Импорт CSV завершился ошибкой."
+                        : import.Message;
+                    if (msg.Contains("Missing form field 'table'", StringComparison.OrdinalIgnoreCase))
+                    {
+                        msg += " Перезапустите dbserver: pkill dbserver && ./run.sh (или перезапустите GUI с авто-запуском сервера).";
+                    }
+                    ResultMessage = msg;
+                    StatusMessage = "Ошибка импорта";
+                    ImportStatusMessage = ResultMessage;
+                    _notifications.Push("Импорт CSV", ResultMessage, NotificationKind.Error);
+                }
+
+                ResultsChanged?.Invoke(this, EventArgs.Empty);
+            });
+        }
+        finally
+        {
+            await UiThread.RunAsync(() => IsImportBusy = false);
+        }
     }
 }
