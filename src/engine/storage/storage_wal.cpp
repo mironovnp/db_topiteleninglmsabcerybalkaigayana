@@ -36,6 +36,7 @@ void Storage::maybeCheckpoint() {
 
     wal_mgr_->flushTo(wal_mgr_->getNextLSN() - 1);
     flushAllPools();
+    wal_mgr_->flushTo(wal_mgr_->getNextLSN() - 1);
     wal_mgr_->reset();
 }
 
@@ -160,6 +161,7 @@ void Storage::rollbackTransaction() {
 void Storage::replayWalLogicalRecord(LogRecordType type, std::string abs_path, std::string key,
                                      std::string row_blob) {
     if (!pathEndsWithDb(abs_path) && !pathEndsWithIdx(abs_path)) return;
+    if (!walReplayDataFileReady(abs_path)) return;
 
     BufferPool& replayPool = getPool(abs_path);
 
@@ -173,6 +175,7 @@ void Storage::replayWalLogicalRecord(LogRecordType type, std::string abs_path, s
         std::string column_name = stem.substr(dot + 1);
 
         auto tp = tablePath(db_name, table_name);
+        if (!walReplayDataFileReady(tp)) return;
         BufferPool& schemaPool = getPool(tp.string());
         Page* sm = schemaPool.fetchPage(0);
         uint32_t slen = sm->getNumRecords();

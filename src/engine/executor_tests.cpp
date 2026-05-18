@@ -120,6 +120,7 @@ public:
         test_multi_line_and_aggr_aliases();
 
         std::cout << "\n>>> ФАЗА 24: WAL Undo и транзакции" << std::endl;
+        test_wal_skip_stale_empty_targets();
         test_wal_undo_transactions();
 
         std::cout << "\n>>> ФАЗА 25: Проверка RBAC" << std::endl;
@@ -1399,6 +1400,47 @@ private:
         executor.setThreadLocalUser("admin");
         assert_error("RBAC: CREATE ROLE deprecated", "CREATE ROLE reader;", "deprecated");
         assert_error("RBAC: GRANT ROLE deprecated", "GRANT ROLE reader TO alice;", "deprecated");
+    }
+
+    void test_wal_skip_stale_empty_targets() {
+        total_count++;
+        try {
+            const auto dir = std::filesystem::path(data_dir) / "wal_stale_skip";
+            std::error_code ec;
+            std::filesystem::remove_all(dir, ec);
+            std::filesystem::create_directories(dir);
+
+            const std::string db_name = "userdb";
+            {
+                db::Storage boot(dir.string());
+                boot.createDatabase(db_name);
+            }
+
+            const auto stub = dir / db_name / "sys_users.db";
+            { std::ofstream touch(stub); }
+
+            db::WALManager wal((dir / "wal.log").string());
+            db::LogRecord stale(0, 0, db::LogRecordType::ROW_UPSERT, 0,
+                                db::LogRecord::encodeRowPayload(stub.string(), "1", "x"));
+            wal.appendRecord(stale);
+            wal.flushTo(stale.lsn);
+
+            db::Storage storage(dir.string());
+            const bool stub_gone = !std::filesystem::exists(stub);
+            const bool db_ok = storage.databaseExists(db_name);
+
+            std::filesystem::remove_all(dir, ec);
+
+            if (stub_gone && db_ok) {
+                std::cout << "  [OK] WAL skips logical redo on empty legacy sys_*.db stubs" << std::endl;
+                passed_count++;
+            } else {
+                std::cerr << "  [FAIL] WAL stale skip: stub_gone=" << stub_gone << " db_ok=" << db_ok
+                          << std::endl;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "  [FAIL] test_wal_skip_stale_empty_targets: " << e.what() << std::endl;
+        }
     }
 
     void test_wal_undo_transactions() {

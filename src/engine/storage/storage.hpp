@@ -50,6 +50,9 @@ struct TableSchema {
     std::vector<IndexDef> indexes;  // secondary indexes
 };
 
+/// True if the file exists and is large enough to contain B+ tree metadata (page 0).
+bool walReplayDataFileReady(const std::filesystem::path& abs_path);
+
 class Storage {
 public:
     explicit Storage(const std::string& data_dir = "data");
@@ -154,6 +157,7 @@ private:
     mutable std::unordered_map<std::string, std::unique_ptr<BufferPool>> pools_;
 
     void initializeSystemTables(const std::string& db_name);
+    void pruneStaleWalStubFiles();
 
     LSN walAppendRecord(LogRecord record);
     void walAppendRowDelete(const std::string& abs_path, const std::string& key,

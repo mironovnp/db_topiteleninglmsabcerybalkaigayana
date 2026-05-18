@@ -1,4 +1,5 @@
 #include "engine/wal.hpp"
+#include "engine/page.hpp"
 #include "engine/storage/storage.hpp"
 #include <cstring>
 #include <filesystem>
@@ -356,25 +357,35 @@ void WALManager::recover(Storage* storage) {
 
     // --- PASS 2: Logical Redo ---
     // Now that metadata is physically present, we can safely run BTree operations.
+    size_t skipped_stale_logical = 0;
     if (storage) {
         for (const auto& rec : records) {
             if (rec.type == LogRecordType::ROW_UPSERT || rec.type == LogRecordType::ROW_DELETE ||
                 rec.type == LogRecordType::CLR_ROW_UPSERT || rec.type == LogRecordType::CLR_ROW_DELETE) {
-                
+
                 std::string pth, ky, blob;
-                if (LogRecord::decodeRowPayload(rec.payload, pth, ky, blob)) {
-                    LogRecordType replay_type = 
-                        (rec.type == LogRecordType::CLR_ROW_UPSERT) ? LogRecordType::ROW_UPSERT :
-                        (rec.type == LogRecordType::CLR_ROW_DELETE) ? LogRecordType::ROW_DELETE : rec.type;
-                    
-                    try {
-                        storage->replayWalLogicalRecord(replay_type, pth, ky, blob);
-                    } catch (const std::exception& e) {
-                        std::cerr << "[WAL] Logical redo failed for LSN " << rec.lsn << ": " << e.what() << "\n";
-                    }
+                if (!LogRecord::decodeRowPayload(rec.payload, pth, ky, blob)) continue;
+                if (!walReplayDataFileReady(pth)) {
+                    ++skipped_stale_logical;
+                    continue;
+                }
+
+                LogRecordType replay_type =
+                    (rec.type == LogRecordType::CLR_ROW_UPSERT) ? LogRecordType::ROW_UPSERT :
+                    (rec.type == LogRecordType::CLR_ROW_DELETE) ? LogRecordType::ROW_DELETE : rec.type;
+
+                try {
+                    storage->replayWalLogicalRecord(replay_type, pth, ky, blob);
+                } catch (const std::exception& e) {
+                    std::cerr << "[WAL] Logical redo failed for LSN " << rec.lsn << ": " << e.what()
+                              << "\n";
                 }
             }
         }
+    }
+    if (skipped_stale_logical > 0) {
+        std::cerr << "[WAL] Skipped " << skipped_stale_logical
+                  << " logical record(s) for missing or empty data files (legacy WAL entries).\n";
     }
 
     // --- PASS 3: Logical Undo for Uncommitted Transactions ---
@@ -396,6 +407,7 @@ void WALManager::recover(Storage* storage) {
 
             std::string path, key, row_blob;
             if (!LogRecord::decodeRowPayload(rec.payload, path, key, row_blob)) continue;
+            if (!walReplayDataFileReady(path)) continue;
 
             LogRecordType clr_type = (rec.type == LogRecordType::ROW_DELETE) ? LogRecordType::CLR_ROW_UPSERT : LogRecordType::CLR_ROW_DELETE;
             std::string clr_blob = (rec.type == LogRecordType::ROW_DELETE) ? row_blob : "";
@@ -427,6 +439,53 @@ void WALManager::recover(Storage* storage) {
         }
         ::fdatasync(log_fd_);
         log_buffer_.clear();
+    }
+
+    if (skipped_stale_logical > 0) {
+        std::vector<LogRecord> compacted;
+        compacted.reserve(records.size());
+        size_t dropped = 0;
+        for (const auto& rec : records) {
+            const bool is_logical_row =
+                rec.type == LogRecordType::ROW_UPSERT || rec.type == LogRecordType::ROW_DELETE ||
+                rec.type == LogRecordType::CLR_ROW_UPSERT || rec.type == LogRecordType::CLR_ROW_DELETE;
+            if (is_logical_row) {
+                std::string pth, ky, blob;
+                if (LogRecord::decodeRowPayload(rec.payload, pth, ky, blob) &&
+                    !walReplayDataFileReady(pth)) {
+                    ++dropped;
+                    continue;
+                }
+            }
+            compacted.push_back(rec);
+        }
+        if (dropped > 0) {
+            if (::ftruncate(log_fd_, 0) != 0) {
+                throw std::runtime_error("WALManager: ftruncate failed during compaction");
+            }
+            ::lseek(log_fd_, 0, SEEK_SET);
+            log_buffer_.clear();
+            LSN max_lsn = 0;
+            for (const auto& rec : compacted) {
+                log_buffer_.append(rec.serialize());
+                max_lsn = std::max(max_lsn, rec.lsn);
+            }
+            if (!log_buffer_.empty()) {
+                const char* p = log_buffer_.data();
+                size_t left = log_buffer_.size();
+                while (left > 0) {
+                    ssize_t w = ::write(log_fd_, p, left);
+                    if (w < 0) throw std::runtime_error("WALManager: write failed during compaction");
+                    p += static_cast<size_t>(w);
+                    left -= static_cast<size_t>(w);
+                }
+                ::fdatasync(log_fd_);
+                log_buffer_.clear();
+            }
+            last_lsn = max_lsn;
+            std::cerr << "[WAL] Compacted log: removed " << dropped
+                      << " stale logical record(s).\n";
+        }
     }
 
     next_lsn_ = last_lsn + 1;

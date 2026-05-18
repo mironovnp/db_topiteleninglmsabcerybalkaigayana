@@ -50,36 +50,36 @@ body.theme-light {
   --nav-active: rgba(147, 197, 253, 0.32);
 }
 
-/* ── Тёмная тема ── */
+/* ── Тёмная тема (как CaseChampGui/Themes/DarkTheme.axaml) ── */
 body.theme-dark {
-  --bg: #111827;
-  --text: #f3f4f6;
-  --icon-info: #374151;
-  --icon-regular: #4b5563;
-  --text-caption: #6b7280;
-  --text-label: #9ca3af;
-  --accent: #7dd3fc;
-  --accent-hover: #38bdf8;
-  --accent-soft: rgba(125, 211, 252, 0.16);
-  --accent-fg: #111827;
-  --panel: #1f2937;
-  --panel-elevated: #1f2937;
-  --border: #374151;
-  --border-strong: #4b5563;
-  --header-bg: #111827;
-  --drawer-bg: #1f2937;
+  --bg: #202124;
+  --text: #ece7df;
+  --icon-info: #33363c;
+  --icon-regular: #3a3d44;
+  --text-caption: #8b8278;
+  --text-label: #b5aba0;
+  --accent: #e2e6ed;
+  --accent-hover: #f4f6fa;
+  --accent-soft: rgba(226, 230, 237, 0.16);
+  --accent-fg: #1b1c1f;
+  --panel: #34373d;
+  --panel-elevated: #2a2c30;
+  --border: #3a3d44;
+  --border-strong: #484c55;
+  --header-bg: #202124;
+  --drawer-bg: #2c2e33;
   --backdrop: rgba(0, 0, 0, 0.55);
-  --shadow: rgba(0, 0, 0, 0.35);
-  --shadow-drawer: -12px 0 40px rgba(0, 0, 0, 0.45);
-  --success: #4ade80;
-  --warn: #facc15;
-  --error: #f87171;
-  --guide-placeholder: #1f2937;
-  --nav-hover: rgba(125, 211, 252, 0.1);
-  --nav-active: rgba(125, 211, 252, 0.22);
+  --shadow: rgba(0, 0, 0, 0.4);
+  --shadow-drawer: -12px 0 40px rgba(0, 0, 0, 0.5);
+  --success: #82b567;
+  --warn: #e0bc6b;
+  --error: #e07a7a;
+  --guide-placeholder: #2a2c30;
+  --nav-hover: rgba(226, 230, 237, 0.1);
+  --nav-active: rgba(226, 230, 237, 0.22);
 }
 
-/* ── Iu5 (бренд GUI) ── */
+/* ── ИУ5 (как CaseChampGui/Themes/Iu5Theme.axaml) ── */
 body.theme-iu5 {
   --bg: #050a10;
   --text: #f0f6fc;
@@ -165,7 +165,12 @@ a:hover {
   height: 48px;
   object-fit: contain;
   flex-shrink: 0;
-  transition: opacity var(--duration-med) var(--ease-soft);
+  /* Фон под прозрачными краями логотипа = фон шапки/страницы (важно для «мозга»). */
+  background: var(--header-bg);
+  border-radius: 8px;
+  transition:
+    opacity var(--duration-med) var(--ease-soft),
+    background-color var(--duration-med) var(--ease-soft);
 }
 
 .brand-compact .brand-title {

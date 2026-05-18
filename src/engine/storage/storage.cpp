@@ -1,19 +1,57 @@
 #include "engine/storage/storage.hpp"
-#include "engine/row_codec.hpp"                 
-#include "engine/cell_value.hpp"                
-#include "engine/storage/storage_internal.hpp"  
+#include "engine/row_codec.hpp"
+#include "engine/cell_value.hpp"
+#include "engine/page.hpp"
+#include "engine/storage/storage_internal.hpp"
 #include "engine/crypto.hpp"
 #include <iostream>
 
 namespace db {
 
+bool walReplayDataFileReady(const std::filesystem::path& abs_path) {
+    std::error_code ec;
+    if (!std::filesystem::exists(abs_path, ec) || ec) return false;
+    const auto sz = std::filesystem::file_size(abs_path, ec);
+    return !ec && sz >= PAGE_SIZE;
+}
+
 Storage::Storage(const std::string& data_dir) : data_dir_(data_dir) {
     std::filesystem::create_directories(data_dir_);
+    pruneStaleWalStubFiles();
     wal_mgr_ = std::make_unique<WALManager>((data_dir_ / "wal.log").string());
     try {
         wal_mgr_->recover(this);
     } catch (const std::exception& e) {
         std::cerr << "[WAL] Recovery failed: " << e.what() << ". Some data may be lost." << std::endl;
+    }
+    pruneStaleWalStubFiles();
+}
+
+void Storage::pruneStaleWalStubFiles() {
+    std::error_code ec;
+    if (!std::filesystem::exists(data_dir_, ec)) return;
+
+    for (const auto& db_entry : std::filesystem::directory_iterator(data_dir_, ec)) {
+        if (ec) break;
+        if (!db_entry.is_directory()) continue;
+        const std::string db_name = db_entry.path().filename().string();
+        if (db_name == "system") continue;
+
+        for (const auto& file_entry : std::filesystem::directory_iterator(db_entry.path(), ec)) {
+            if (ec) break;
+            if (!file_entry.is_regular_file()) continue;
+            if (file_entry.path().extension() != ".db") continue;
+
+            std::error_code size_ec;
+            const auto sz = file_entry.file_size(size_ec);
+            if (size_ec || sz > 0) continue;
+
+            const std::string stem = file_entry.path().stem().string();
+            if (stem.size() < 4 || stem.compare(0, 4, "sys_") != 0) continue;
+
+            closePool(file_entry.path().string());
+            std::filesystem::remove(file_entry.path(), ec);
+        }
     }
 }
 
