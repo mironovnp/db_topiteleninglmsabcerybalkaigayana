@@ -205,9 +205,27 @@ public sealed class Text2SqlViewModel : ObservableObject
     public void OnSectionActivated()
     {
         RefreshApiKeyState();
+        SyncSchemaDatabase();
         if (Schema.HasDatabase)
             _ = Schema.RefreshAsync();
     }
+
+    private string? ResolveActiveDatabase()
+    {
+        if (!string.IsNullOrWhiteSpace(Schema.CurrentDatabase))
+            return Schema.CurrentDatabase;
+        return string.IsNullOrWhiteSpace(_client.CurrentDb) ? null : _client.CurrentDb;
+    }
+
+    private void SyncSchemaDatabase()
+    {
+        if (string.IsNullOrWhiteSpace(_client.CurrentDb))
+            return;
+        Schema.CurrentDatabase = _client.CurrentDb;
+    }
+
+    private static string SanitizeDatabaseName(string database) =>
+        database.Replace("`", string.Empty).Replace(";", string.Empty);
 
     public void RefreshApiKeyState()
     {
@@ -284,7 +302,8 @@ public sealed class Text2SqlViewModel : ObservableObject
             Text2SqlResult translation;
             try
             {
-                translation = await _service.TranslateAsync(InputText).ConfigureAwait(false);
+                translation = await _service.TranslateAsync(InputText, ResolveActiveDatabase())
+                    .ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -300,6 +319,13 @@ public sealed class Text2SqlViewModel : ObservableObject
             }
 
             var sql = translation.Sql;
+            var activeDb = ResolveActiveDatabase();
+            if (!string.IsNullOrWhiteSpace(activeDb))
+            {
+                await _client.ExecuteAsync($"USE {SanitizeDatabaseName(activeDb)};", false)
+                    .ConfigureAwait(false);
+            }
+
             var statements = SqlScript.SplitStatements(sql);
 
             foreach (var statement in statements)

@@ -61,6 +61,7 @@ public:
 
     std::string getDbOwner(const std::string& db_name) const;
     bool hasDbDdlGrant(const std::string& db_name, const std::string& username) const;
+    bool hasDbGrantRole(const std::string& db_name, const std::string& username, const std::string& role) const;
 
     // Transaction control (logical WAL undo for row-level changes).
     bool transactionActive() const;

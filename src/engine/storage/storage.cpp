@@ -81,7 +81,7 @@ void Storage::initializeSystemTables(const std::string& db_name) {
         make_col("id", "INT", true),
         make_col("db_name", "VARCHAR(100)"),
         make_col("username", "VARCHAR(50)"),
-        make_col("role", "VARCHAR(20)") // "editor", "read-only" etc.
+        make_col("role", "VARCHAR(20)") // "editor" (DML), "ddl" (DML+DDL)
     }, 0, {} };
     createTable(db_name, sys_db_grants);
 
@@ -143,22 +143,38 @@ std::string Storage::getDbOwner(const std::string& db_name) const {
     return "";
 }
 
-bool Storage::hasDbDdlGrant(const std::string& db_name, const std::string& username) const {
+bool Storage::hasDbGrantRole(const std::string& db_name,
+                            const std::string& username,
+                            const std::string& role) const {
     auto pks = indexLookup("system", "sys_db_grants", "db_name", db_name);
     for (const auto& pk : pks) {
         Row row = findRow("system", "sys_db_grants", pk);
         if (row.size() > 3 && row[2].has_value() && cell_to_where_string(row[2]) == username) {
-            std::string role = cell_to_where_string(row[3]);
-            if (role == "editor" || role == "ddl") return true;
+            if (cell_to_where_string(row[3]) == role) return true;
         }
     }
     return false;
+}
+
+bool Storage::hasDbDdlGrant(const std::string& db_name, const std::string& username) const {
+    return hasDbGrantRole(db_name, username, "ddl");
+}
+
+static bool isDmlPrivilege(const std::string& privilege) {
+    return privilege == "SELECT" || privilege == "INSERT" ||
+           privilege == "UPDATE" || privilege == "DELETE";
+}
+
+static bool isDdlPrivilege(const std::string& privilege) {
+    return privilege == "CREATE" || privilege == "DROP" || privilege == "ALTER";
 }
 
 bool Storage::checkPrivilege(const std::string& db_name, 
                              const std::string& username,
                              const std::string& object_name, 
                              const std::string& privilege) const {
+    (void)object_name;
+
     // 1. Глобальный админ имеет все права всегда
     auto user_pks = indexLookup("system", "sys_users", "username", username);
     if (!user_pks.empty()) {
@@ -172,24 +188,16 @@ bool Storage::checkPrivilege(const std::string& db_name,
     std::string owner = getDbOwner(db_name);
     if (owner == username) return true;
     
-    // 3. Проверка грантов внутри БД (например, роль editor)
-    auto grant_pks = indexLookup("system", "sys_db_grants", "db_name", db_name);
-    for (const auto& pk : grant_pks) {
-        Row row = findRow("system", "sys_db_grants", pk);
-        if (row.size() > 3 && row[2].has_value() && cell_to_where_string(row[2]) == username) {
-            std::string role = cell_to_where_string(row[3]);
-            if (role == "editor") return true; // Editor в этой БД может всё (кроме drop db, что проверяется в Executor)
-        }
+    // 3. editor — DML; ddl — DML + DDL (все права кроме владения БД)
+    if (hasDbGrantRole(db_name, username, "editor") && isDmlPrivilege(privilege)) {
+        return true;
     }
-    
-    // По умолчанию обычным пользователям разрешено только чтение (SELECT)
-    if (privilege == "SELECT") {
+    if (hasDbGrantRole(db_name, username, "ddl") &&
+        (isDmlPrivilege(privilege) || isDdlPrivilege(privilege))) {
         return true;
     }
     
-    // DDL — только если есть явный грант
-    if (hasDbDdlGrant(db_name, username)) return true;
-    
-    return false;
+    // По умолчанию обычным пользователям разрешено только чтение (SELECT)
+    return privilege == "SELECT";
 }
 } // namespace db

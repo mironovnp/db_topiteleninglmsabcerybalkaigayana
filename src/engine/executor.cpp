@@ -423,28 +423,14 @@ void Executor::checkPermission(const std::string& table_name, const std::string&
         throw std::runtime_error("Not authenticated. Use LOGIN or REGISTER first.");
     }
 
-    // Админ имеет полный доступ
-    if (isAdmin()) return;
-
     if (current_db_.empty()) {
         throw std::runtime_error("No database selected. Use: USE <database>;");
     }
 
-    // Владелец БД имеет полный доступ
-    std::string owner = storage_.getDbOwner(current_db_);
-    if (owner == current_user_) return;
-
-    // DML разрешен всем
-    if (privilege == "SELECT" || privilege == "INSERT" || 
-        privilege == "UPDATE" || privilege == "DELETE") {
-        return;
+    if (!storage_.checkPrivilege(current_db_, current_user_, table_name, privilege)) {
+        throw std::runtime_error("Permission denied: " + privilege + " on " + table_name +
+                                 " in database '" + current_db_ + "'.");
     }
-
-    // DDL только с явным грантом
-    if (storage_.hasDbDdlGrant(current_db_, current_user_)) return;
-
-    throw std::runtime_error("Permission denied: " + privilege + " on " + table_name + 
-                             ". Only the owner of '" + current_db_ + "' can perform DDL operations.");
 }
 
 json Executor::execute(const std::string& sql) {
@@ -1884,12 +1870,15 @@ json Executor::execGrantDdl(const GrantDdlStatement* q) {
     auto user_pks = storage_.indexLookup("system", "sys_users", "username", q->username);
     if (user_pks.empty()) return err("User '" + q->username + "' does not exist.");
 
-    // Мы можем выдавать EDITOR или DDL
-    std::string role_to_grant = "editor"; // Default for now, or we could parse it from SQL.
-    
-    // Проверяем, нет ли уже такого гранта
-    // (Для простоты мы сейчас просто добавляем новую запись или обновляем существующую)
-    
+    const std::string& role_to_grant = q->role;
+    if (role_to_grant != "ddl" && role_to_grant != "editor") {
+        return err("Unsupported grant role '" + role_to_grant + "'. Use GRANT DDL or GRANT EDITOR.");
+    }
+
+    if (storage_.hasDbGrantRole(q->db_name, q->username, role_to_grant)) {
+        return ok("User '" + q->username + "' already has role '" + role_to_grant + "' on '" + q->db_name + "'.");
+    }
+
     auto sch = storage_.getTableSchema("system", "sys_db_grants");
     Row row(sch.columns.size());
     row[1] = coerce_string_to_cell_column(sch.columns[1], q->db_name, false);
@@ -1913,15 +1902,17 @@ json Executor::execRevokeDdl(const RevokeDdlStatement* q) {
         return err("Permission denied: only owner '" + owner + "' or admin can revoke privileges on '" + q->db_name + "'.");
     }
 
-    if (!storage_.hasDbDdlGrant(q->db_name, q->username)) {
-        return err("User '" + q->username + "' does not have rights on '" + q->db_name + "'.");
+    if (!storage_.hasDbGrantRole(q->db_name, q->username, q->role)) {
+        return err("User '" + q->username + "' does not have role '" + q->role + "' on '" + q->db_name + "'.");
     }
 
     auto grants = storage_.readAllRows("system", "sys_db_grants");
     std::vector<Row> to_delete;
     for (const auto& row : grants) {
-        if (row.size() >= 3 && row[1].has_value() && row[2].has_value()) {
-            if (cell_to_where_string(row[1]) == q->db_name && cell_to_where_string(row[2]) == q->username) {
+        if (row.size() >= 4 && row[1].has_value() && row[2].has_value() && row[3].has_value()) {
+            if (cell_to_where_string(row[1]) == q->db_name &&
+                cell_to_where_string(row[2]) == q->username &&
+                cell_to_where_string(row[3]) == q->role) {
                 to_delete.push_back(row);
                 break;
             }
@@ -1932,7 +1923,7 @@ json Executor::execRevokeDdl(const RevokeDdlStatement* q) {
     if (!to_delete.empty()) {
         performDelete("system", "sys_db_grants", to_delete, total_deleted);
     }
-    return ok("Revoked privileges on '" + q->db_name + "' from user '" + q->username + "'.");
+    return ok("Revoked role '" + q->role + "' on '" + q->db_name + "' from user '" + q->username + "'.");
 }
 
 json Executor::execLogout() {

@@ -294,7 +294,7 @@
                     <Grid ColumnDefinitions="*,260" RowDefinitions="Auto" RowSpacing="14" ColumnSpacing="20">
                         <StackPanel Grid.Row="0" Grid.Column="0" Spacing="2">
                             <TextBlock Text="Чат-режим SQL" />
-                            <TextBlock Text="Превращает SQL-консоль в диалог: запросы и ответы-таблицы идут сверху вниз, как в чате. По умолчанию выключено."
+                            <TextBlock Text="Диалог вместо классической консоли: можно писать SQL или запрос на русском (Text2SQL, как \ai в dbcli). По умолчанию выключено."
                                        Classes="muted" TextWrapping="Wrap" />
                         </StackPanel>
                         <ToggleSwitch Grid.Row="0" Grid.Column="1"

@@ -1263,25 +1263,34 @@ private:
         assert_success("RBAC: Alice DDL (ALTER TABLE)", "ALTER TABLE vault ADD COLUMN notes TEXT;");
         assert_success("RBAC: Alice DDL (CREATE INDEX)", "CREATE INDEX idx_secret ON vault(secret);");
 
-        // ═══ 3. Другие пользователи → DML только ═══
+        // ═══ 3. Другие пользователи → по умолчанию только SELECT ═══
         executor.setThreadLocalUser("bob");
         executor.setThreadLocalContext("alice_db");
 
-        // Bob может делать DML
-        assert_success("RBAC: Bob DML (INSERT)", "INSERT INTO vault (id, secret) VALUES (2, 'Bob data');");
-        assert_rows("RBAC: Bob DML (SELECT)", "SELECT id FROM vault ORDER BY id;", 2, {{"1"}, {"2"}});
-        assert_success("RBAC: Bob DML (UPDATE)", "UPDATE vault SET secret = 'Bob updated' WHERE id = 2;");
-        assert_success("RBAC: Bob DML (DELETE)", "DELETE FROM vault WHERE id = 2;");
-
-        // Bob НЕ может DDL
+        assert_rows("RBAC: Bob SELECT без гранта", "SELECT id FROM vault ORDER BY id;", 1, {{"1"}});
+        assert_error("RBAC: Bob INSERT без гранта", "INSERT INTO vault (id, secret) VALUES (2, 'Bob data');", "Permission denied");
+        assert_error("RBAC: Bob UPDATE без гранта", "UPDATE vault SET secret = 'Bob updated' WHERE id = 1;", "Permission denied");
+        assert_error("RBAC: Bob DELETE без гранта", "DELETE FROM vault WHERE id = 1;", "Permission denied");
         assert_error("RBAC: Bob DDL (CREATE TABLE)", "CREATE TABLE hack (id INT);", "Permission denied");
         assert_error("RBAC: Bob DDL (DROP TABLE)", "DROP TABLE vault;", "Permission denied");
         assert_error("RBAC: Bob DDL (ALTER TABLE)", "ALTER TABLE vault ADD COLUMN hack TEXT;", "Permission denied");
         assert_error("RBAC: Bob DDL (CREATE INDEX)", "CREATE INDEX idx_hack ON vault(secret);", "Permission denied");
 
-        // ═══ 4. Eve (без грантов) → тоже только DML ═══
+        executor.setThreadLocalUser("alice");
+        assert_success("RBAC: Alice грантит EDITOR Bob", "GRANT EDITOR ON alice_db TO bob;");
+
+        executor.setThreadLocalUser("bob");
+        executor.setThreadLocalContext("alice_db");
+        assert_success("RBAC: Bob DML после EDITOR (INSERT)", "INSERT INTO vault (id, secret) VALUES (2, 'Bob data');");
+        assert_rows("RBAC: Bob DML (SELECT)", "SELECT id FROM vault ORDER BY id;", 2, {{"1"}, {"2"}});
+        assert_success("RBAC: Bob DML (UPDATE)", "UPDATE vault SET secret = 'Bob updated' WHERE id = 2;");
+        assert_success("RBAC: Bob DML (DELETE)", "DELETE FROM vault WHERE id = 2;");
+        assert_error("RBAC: Bob DDL после EDITOR", "CREATE TABLE hack (id INT);", "Permission denied");
+
+        // ═══ 4. Eve (без грантов) → только SELECT ═══
         executor.setThreadLocalUser("eve");
         assert_rows("RBAC: Eve DML (SELECT)", "SELECT count(*) FROM vault;", 1, {{"1"}});
+        assert_error("RBAC: Eve INSERT без гранта", "INSERT INTO vault (id, secret) VALUES (9, 'x');", "Permission denied");
         assert_error("RBAC: Eve DDL (CREATE TABLE)", "CREATE TABLE backdoor (id INT);", "Permission denied");
         assert_error("RBAC: Eve DDL (DROP TABLE)", "DROP TABLE vault;", "Permission denied");
 
@@ -1305,6 +1314,14 @@ private:
         executor.setThreadLocalContext("alice_db");
         assert_success("RBAC: Bob DDL после гранта (CREATE TABLE)", "CREATE TABLE bob_table (id INT PRIMARY KEY, data TEXT);");
         assert_success("RBAC: Bob DDL после гранта (DROP TABLE)", "DROP TABLE bob_table;");
+
+        executor.setThreadLocalUser("alice");
+        assert_success("RBAC: Alice грантит DDL Eve", "GRANT DDL ON alice_db TO eve;");
+        executor.setThreadLocalUser("eve");
+        executor.setThreadLocalContext("alice_db");
+        assert_success("RBAC: Eve DML после DDL гранта", "INSERT INTO vault (id, secret) VALUES (9, 'eve');");
+        assert_success("RBAC: Eve DDL после DDL гранта", "CREATE TABLE eve_tbl (id INT PRIMARY KEY);");
+        assert_success("RBAC: Eve DROP TABLE после DDL", "DROP TABLE eve_tbl;");
 
         // ═══ 7. Admin → полный доступ всегда ═══
         executor.setThreadLocalUser("admin");
@@ -1371,11 +1388,13 @@ private:
         // Регистрируем пользователей для тестов
         executor.execute("REGISTER mt_alice PASSWORD 'a123';");
         executor.execute("REGISTER mt_bob PASSWORD 'b123';");
+        executor.setThreadLocalUser("admin");
+        assert_success("MT: EDITOR для mt_alice", "GRANT EDITOR ON mt_db TO mt_alice;");
+        assert_success("MT: EDITOR для mt_bob", "GRANT EDITOR ON mt_db TO mt_bob;");
 
         // 2. Многопоточный стресс-тест: Модель владения
         // admin — владелец mt_db (он создал её)
-        // mt_alice — DML only (не владелец, нет DDL-гранта)
-        // mt_bob — DML only (не владелец, нет DDL-гранта)
+        // mt_alice / mt_bob — DML по роли editor (без DDL)
         std::cout << "  [TEST] Запуск конкурентных потоков (Стресс-тест RBAC Ownership)... -> ";
         
         const int NUM_THREADS = 20;

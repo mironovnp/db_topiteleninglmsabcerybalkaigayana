@@ -34,7 +34,10 @@ public sealed class MistralText2SqlService : IText2SqlService, IDisposable
 
     public bool IsEnabled => _apiKeys.HasValidKey;
 
-    public async Task<Text2SqlResult> TranslateAsync(string russianText, CancellationToken cancellationToken = default)
+    public async Task<Text2SqlResult> TranslateAsync(
+        string russianText,
+        string? activeDatabase = null,
+        CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(russianText))
             return new Text2SqlResult(false, null, "Введите запрос на русском языке.");
@@ -48,7 +51,7 @@ public sealed class MistralText2SqlService : IText2SqlService, IDisposable
                 "API-ключ Mistral не задан. Укажите ключ в этом разделе или в настройках.");
         }
 
-        var schema = await BuildSchemaContextAsync(cancellationToken).ConfigureAwait(false);
+        var schema = await BuildSchemaContextAsync(activeDatabase, cancellationToken).ConfigureAwait(false);
         if (schema.Error is not null)
             return new Text2SqlResult(false, null, schema.Error);
 
@@ -69,6 +72,7 @@ public sealed class MistralText2SqlService : IText2SqlService, IDisposable
                         "Ты переводишь точные русскоязычные запросы пользователя в SQL для учебной СУБД CaseChamp. " +
                         "Используй только переданную схему и каталог баз. Не выдумывай таблицы, колонки, значения и условия. " +
                         "Поддерживаются команды каталога: CREATE DATABASE имя;, DROP DATABASE [IF EXISTS] имя;, USE имя;, SHOW DATABASES;. " +
+                        "Если указана активная база, запросы к таблицам относятся к ней; не добавляй USE, если пользователь не просит другую базу или операции с каталогом. " +
                         "Запросы вроде «удали базу X» / «создай базу Y» переводи в DROP DATABASE или CREATE DATABASE. " +
                         "НЕ проверяй права пользователя и НЕ отказывай с формулировками «недостаточно прав» — это решает сервер СУБД. " +
                         "Если для корректного SQL не хватает имени таблицы, колонки, условия, периода или значения, " +
@@ -80,7 +84,7 @@ public sealed class MistralText2SqlService : IText2SqlService, IDisposable
                 new
                 {
                     role = "user",
-                    content = "Схема базы данных:\n" + schema.Text + "\nЗадача на русском:\n" + russianText.Trim(),
+                    content = BuildUserPrompt(schema.Text!, russianText.Trim(), activeDatabase),
                 },
             },
         };
@@ -148,12 +152,34 @@ public sealed class MistralText2SqlService : IText2SqlService, IDisposable
         }
     }
 
-    private async Task<(string? Text, string? Error)> BuildSchemaContextAsync(CancellationToken token)
+    private static string BuildUserPrompt(string schemaText, string russianText, string? activeDatabase)
+    {
+        var sb = new StringBuilder();
+        if (!string.IsNullOrWhiteSpace(activeDatabase))
+        {
+            sb.Append("Активная база данных (выбрана пользователем): ").AppendLine(activeDatabase.Trim());
+            sb.AppendLine("Все запросы к таблицам без явного имени базы относятся к этой базе.");
+            sb.AppendLine();
+        }
+
+        sb.AppendLine("Схема базы данных:");
+        sb.AppendLine(schemaText);
+        sb.Append("Задача на русском:\n").Append(russianText);
+        return sb.ToString();
+    }
+
+    private async Task<(string? Text, string? Error)> BuildSchemaContextAsync(string? activeDatabase, CancellationToken token)
     {
         var databases = await _schema.GetDatabasesAsync(token).ConfigureAwait(false);
         var tables = await _schema.GetTablesAsync(token: token).ConfigureAwait(false);
 
         var sb = new StringBuilder();
+        if (!string.IsNullOrWhiteSpace(activeDatabase))
+        {
+            sb.Append("Текущая активная база: ").AppendLine(activeDatabase.Trim());
+            sb.AppendLine();
+        }
+
         sb.AppendLine("Каталог баз (SHOW DATABASES):");
         if (databases.Count == 0)
         {

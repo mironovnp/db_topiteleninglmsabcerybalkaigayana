@@ -18,7 +18,7 @@
                        FontSize="15"
                        FontWeight="SemiBold"
                        Foreground="{DynamicResource TextBrush}" />
-            <TextBlock Text="Опишите задачу на русском — Mistral переведёт её в SQL. База выбирается наверху (USE применяется автоматически)."
+            <TextBlock Text="Опишите задачу на русском — Mistral переведёт её в SQL. Выберите базу на панели сверху: она подставится в запрос автоматически."
                        FontSize="12"
                        Foreground="{DynamicResource MutedTextBrush}"
                        TextWrapping="Wrap" />
