@@ -79,17 +79,15 @@
           <h2>О проекте</h2>
           <p>
             <strong>topiteneninglmsabce_и_гаяна</strong> — учебная система управления базами данных
-            с десктопным клиентом, консольным интерфейсом и поддержкой Text2SQL через Mistral AI.
+            с десктопным клиентом и поддержкой Text2SQL через Mistral AI.
           </p>
-          <div class="placeholder-box">
-            Подробное описание проекта будет добавлено позже. Здесь появится информация о возможностях,
-            архитектуре и сценариях использования.
+          <div style="margin: 1.5rem 0;">
+            <a href="documentation.html" target="_blank" class="btn-download" style="display: inline-block; text-decoration: none;">Техническое описание</a>
           </div>
           <h3>Компоненты</h3>
           <ul>
             <li>Движок СУБД на C++ (хранение, индексы, WAL, выполнение SQL)</li>
             <li>Сервер <code>dbserver</code> с HTTP API</li>
-            <li>CLI <code>dbcli</code> с командой <code>\ai</code> для запросов на русском языке</li>
             <li>Графический клиент для Windows и Linux</li>
           </ul>
         </section>
@@ -114,7 +112,7 @@
               </div>
             </article>
             <article class="team-card">
-              <img class="team-avatar" src="assets/team/nemtsov.png" alt="Немцов Иван" width="80" height="80" loading="lazy" />
+              <img class="team-avatar" src="assets/team/nemtsov.jpg" alt="Немцов Иван" width="80" height="80" loading="lazy" />
               <div class="team-info">
                 <p class="name">Немцов Иван</p>
                 <p class="role">Разработчик</p>
@@ -222,10 +220,6 @@
             <div class="guide-links">
               <a href="https://mistral.ai/" target="_blank" rel="noopener noreferrer">mistral.ai ↗</a>
             </div>
-            <figure class="guide-screenshot placeholder">
-              <img src="assets/guide/mistral/01-mistral-home.svg" alt="Главная страница Mistral AI" loading="lazy" data-fallback-png="01-mistral-home.png" />
-              <figcaption>Главная страница mistral.ai (замените SVG на свой скриншот PNG при необходимости)</figcaption>
-            </figure>
           </article>
 
           <article class="guide-step">
@@ -237,74 +231,38 @@
             <div class="guide-links">
               <a href="https://console.mistral.ai/" target="_blank" rel="noopener noreferrer">console.mistral.ai ↗</a>
             </div>
-            <figure class="guide-screenshot placeholder">
-              <img src="assets/guide/mistral/02-console-login.svg" alt="Страница входа в консоль Mistral" loading="lazy" data-fallback-png="02-console-login.png" />
-              <figcaption>Вход или регистрация в консоли</figcaption>
-            </figure>
           </article>
 
           <article class="guide-step">
             <div class="step-header">
               <span class="step-num">3</span>
-              <h3>Зарегистрируйтесь или войдите</h3>
+              <h3>Откройте раздел API keys</h3>
             </div>
-            <p>Используйте email или способ входа, который предложит сайт (Google, GitHub и т.д.).</p>
-            <figure class="guide-screenshot placeholder">
-              <img src="assets/guide/mistral/03-api-keys-menu.svg" alt="Меню консоли Mistral" loading="lazy" data-fallback-png="03-api-keys-menu.png" />
-              <figcaption>После входа откроется рабочая область (workspace)</figcaption>
-            </figure>
+            <p>В боковом меню найдите пункт <strong>API keys</strong> (или <strong>Workspace → API keys</strong>).</p>
           </article>
 
           <article class="guide-step">
             <div class="step-header">
               <span class="step-num">4</span>
-              <h3>Откройте раздел API keys</h3>
+              <h3>Создайте новый ключ</h3>
             </div>
-            <p>В боковом меню найдите пункт <strong>API keys</strong> (или <strong>Workspace → API keys</strong>).</p>
-            <figure class="guide-screenshot placeholder">
-              <img src="assets/guide/mistral/03-api-keys-menu.svg" alt="Раздел API keys" loading="lazy" data-fallback-png="03-api-keys-menu.png" />
-              <figcaption>Раздел управления ключами API</figcaption>
-            </figure>
+            <p>Нажмите <strong>Create new key</strong> / <strong>Add API key</strong>, задайте имя (например <code>topiteneninglmsabce</code>).</p>
           </article>
 
           <article class="guide-step">
             <div class="step-header">
               <span class="step-num">5</span>
-              <h3>Создайте новый ключ</h3>
+              <h3>Скопируйте ключ</h3>
             </div>
-            <p>Нажмите <strong>Create new key</strong> / <strong>Add API key</strong>, задайте имя (например <code>topiteneninglmsabce</code>).</p>
-            <figure class="guide-screenshot placeholder">
-              <img src="assets/guide/mistral/04-create-key.svg" alt="Создание API-ключа" loading="lazy" data-fallback-png="04-create-key.png" />
-              <figcaption>Диалог создания ключа</figcaption>
-            </figure>
+            <p>Ключ показывают один раз — сразу сохраните его в надёжное место. На скриншотах для сайта используйте замазанный ключ.</p>
           </article>
 
           <article class="guide-step">
             <div class="step-header">
               <span class="step-num">6</span>
-              <h3>Скопируйте ключ</h3>
-            </div>
-            <p>Ключ показывают один раз — сразу сохраните его в надёжное место. На скриншотах для сайта используйте замазанный ключ.</p>
-            <figure class="guide-screenshot placeholder">
-              <img src="assets/guide/mistral/05-copy-key.svg" alt="Копирование API-ключа" loading="lazy" data-fallback-png="05-copy-key.png" />
-              <figcaption>Окно с созданным ключом — скопируйте и закройте</figcaption>
-            </figure>
-          </article>
-
-          <article class="guide-step">
-            <div class="step-header">
-              <span class="step-num">7</span>
               <h3>Укажите ключ в проекте</h3>
             </div>
-            <p>Один из способов:</p>
-            <ol>
-              <li>Файл <code>mistral_api_key</code> в корне проекта (одна строка, без кавычек)</li>
-              <li>Переменная окружения: <code>export MISTRAL_API_KEY="ваш-ключ"</code></li>
-              <li>В графическом клиенте: <strong>Настройки → Mistral</strong> — вставить и сохранить</li>
-            </ol>
-            <div class="alert alert-info">
-              Файл <code>mistral_api_key</code> указан в <code>.gitignore</code> — не коммитьте его в репозиторий.
-            </div>
+            <p>В графическом клиенте: <strong>Настройки → Mistral</strong> — вставить и сохранить.</p>
           </article>
         </section>
 
