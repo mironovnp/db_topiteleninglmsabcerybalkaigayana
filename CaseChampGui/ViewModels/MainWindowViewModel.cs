@@ -789,6 +789,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                     _selectedDatabase = db;
                     OnPropertyChanged(nameof(SelectedDatabase));
                     Sql.Schema.CurrentDatabase = db.Name;
+                    Text2Sql.Schema.CurrentDatabase = db.Name;
                     break;
                 }
             });
@@ -823,6 +824,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
                 return;
             }
             Sql.Schema.CurrentDatabase = database;
+            Text2Sql.Schema.CurrentDatabase = database;
             await Sql.Schema.RefreshAsync();
             await Browse.OnDatabaseChangedAsync();
         }

@@ -45,7 +45,7 @@ static const std::unordered_map<std::string, TokenType> KEYWORDS = {
     {"BEGIN",TokenType::KW_BEGIN}, {"COMMIT",TokenType::KW_COMMIT},
     {"ROLLBACK",TokenType::KW_ROLLBACK},
     {"REGISTER",TokenType::KW_REGISTER}, {"LOGIN",TokenType::KW_LOGIN},
-    {"DDL",TokenType::KW_DDL}, {"LOGOUT",TokenType::KW_LOGOUT},
+    {"DDL",TokenType::KW_DDL}, {"EDITOR",TokenType::KW_EDITOR}, {"LOGOUT",TokenType::KW_LOGOUT},
     {"CHANGE",TokenType::KW_CHANGE}, {"CURRENT_DATE",TokenType::KW_CURRENT_DATE},
 };
 
@@ -471,9 +471,20 @@ std::unique_ptr<Statement> Parser::parseGrant() {
         match(SEMICOLON);
         return q;
     }
-    // Branch 2: GRANT DDL ON <db> TO <user>;
+    // Branch 2: GRANT DDL|EDITOR ON <db> TO <user>;
     if (match(KW_DDL)) {
         auto q = std::make_unique<GrantDdlStatement>();
+        q->role = "ddl";
+        expect(KW_ON);
+        q->db_name = expect(IDENTIFIER).value;
+        expect(KW_TO);
+        q->username = expect(IDENTIFIER).value;
+        match(SEMICOLON);
+        return q;
+    }
+    if (match(KW_EDITOR)) {
+        auto q = std::make_unique<GrantDdlStatement>();
+        q->role = "editor";
         expect(KW_ON);
         q->db_name = expect(IDENTIFIER).value;
         expect(KW_TO);
@@ -543,6 +554,7 @@ std::unique_ptr<LogoutStatement> Parser::parseLogout() {
 std::unique_ptr<Statement> Parser::parseRevoke() {
     if (match(KW_DDL)) {
         auto q = std::make_unique<RevokeDdlStatement>();
+        q->role = "ddl";
         expect(KW_ON);
         q->db_name = expect(IDENTIFIER).value;
         expect(KW_FROM);
@@ -550,7 +562,17 @@ std::unique_ptr<Statement> Parser::parseRevoke() {
         match(SEMICOLON);
         return q;
     }
-    throw std::runtime_error("Expected DDL after REVOKE");
+    if (match(KW_EDITOR)) {
+        auto q = std::make_unique<RevokeDdlStatement>();
+        q->role = "editor";
+        expect(KW_ON);
+        q->db_name = expect(IDENTIFIER).value;
+        expect(KW_FROM);
+        q->username = expect(IDENTIFIER).value;
+        match(SEMICOLON);
+        return q;
+    }
+    throw std::runtime_error("Expected DDL or EDITOR after REVOKE");
 }
 
 // ── Helper: parse [table.]column ────────────────────────────────────────

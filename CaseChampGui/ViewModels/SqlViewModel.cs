@@ -11,6 +11,8 @@ namespace CaseChampGui.ViewModels;
 public sealed class SqlViewModel : ObservableObject
 {
     private readonly IDatabaseClient _client;
+    private readonly IText2SqlService _text2Sql;
+    private readonly IMistralApiKeyStore _apiKeys;
     private readonly NotificationService _notifications;
 
     private string _sqlText = string.Empty;
@@ -24,9 +26,16 @@ public sealed class SqlViewModel : ObservableObject
     private int _affectedRows;
     private string _resultMessage = string.Empty;
 
-    public SqlViewModel(IDatabaseClient client, SchemaPaneViewModel schema, NotificationService notifications)
+    public SqlViewModel(
+        IDatabaseClient client,
+        IText2SqlService text2Sql,
+        IMistralApiKeyStore apiKeys,
+        SchemaPaneViewModel schema,
+        NotificationService notifications)
     {
         _client = client;
+        _text2Sql = text2Sql;
+        _apiKeys = apiKeys;
         _notifications = notifications;
         Schema = schema;
 
@@ -175,8 +184,8 @@ public sealed class SqlViewModel : ObservableObject
 
     private async Task RunAsync(bool dryRun)
     {
-        var sql = SqlText;
-        if (string.IsNullOrWhiteSpace(sql))
+        var userInput = SqlText.Trim();
+        if (string.IsNullOrWhiteSpace(userInput))
         {
             await UiThread.RunAsync(() =>
             {
@@ -188,20 +197,7 @@ public sealed class SqlViewModel : ObservableObject
             return;
         }
 
-            foreach (var statement in SqlScript.SplitStatements(sql))
-            {
-                if (Regex.IsMatch(statement, @"^\s*SET\s+USER\b", RegexOptions.IgnoreCase))
-                {
-                    await UiThread.RunAsync(() =>
-                    {
-                        StatusMessage = "Отказ в выполнении";
-                        HasMessage = true;
-                        IsError = true;
-                        ResultMessage = "Команда SET USER запрещена для использования в графическом интерфейсе. Пожалуйста, воспользуйтесь окном авторизации.";
-                    });
-                    return;
-                }
-            }
+        var sql = userInput;
 
         try
         {
@@ -216,7 +212,7 @@ public sealed class SqlViewModel : ObservableObject
             {
                 if (IsChatMode && !dryRun)
                 {
-                    chatMessage = new ChatMessageViewModel(sql);
+                    chatMessage = new ChatMessageViewModel(userInput);
                     Messages.Add(chatMessage);
                     SqlText = string.Empty;
                 }
@@ -225,6 +221,115 @@ public sealed class SqlViewModel : ObservableObject
                     ResetResults();
                 }
             });
+
+            if (IsChatMode && !dryRun && SqlInputClassifier.ShouldUseText2Sql(userInput, out var text2SqlRequest))
+            {
+                await UiThread.RunAsync(() =>
+                {
+                    if (chatMessage is not null)
+                        chatMessage.BusyHint = "Перевод в SQL…";
+                });
+
+                if (!_apiKeys.HasValidKey)
+                {
+                    const string keyMsg =
+                        "Настройте API-ключ Mistral в разделе Text2SQL или в настройках.";
+                    await UiThread.RunAsync(() =>
+                    {
+                        if (chatMessage is not null)
+                        {
+                            chatMessage.Result = QueryResult.Fail(keyMsg);
+                            chatMessage.IsBusy = false;
+                            chatMessage.BusyHint = string.Empty;
+                        }
+                        StatusMessage = "Ошибка";
+                    });
+                    return;
+                }
+
+                Text2SqlResult translation;
+                try
+                {
+                    translation = await _text2Sql.TranslateAsync(
+                            text2SqlRequest,
+                            string.IsNullOrWhiteSpace(Schema.CurrentDatabase) ? _client.CurrentDb : Schema.CurrentDatabase)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _notifications.Push("Text2SQL", ex.Message, NotificationKind.Error);
+                    await UiThread.RunAsync(() =>
+                    {
+                        if (chatMessage is not null)
+                        {
+                            chatMessage.Result = QueryResult.Fail($"Ошибка перевода: {ex.Message}");
+                            chatMessage.IsBusy = false;
+                            chatMessage.BusyHint = string.Empty;
+                        }
+                        StatusMessage = "Ошибка";
+                    });
+                    return;
+                }
+
+                if (!translation.Success || string.IsNullOrWhiteSpace(translation.Sql))
+                {
+                    var msg = string.IsNullOrWhiteSpace(translation.Message)
+                        ? "Не удалось перевести запрос в SQL."
+                        : translation.Message;
+                    await UiThread.RunAsync(() =>
+                    {
+                        if (chatMessage is not null)
+                        {
+                            chatMessage.Result = QueryResult.Fail(msg);
+                            chatMessage.IsBusy = false;
+                            chatMessage.BusyHint = string.Empty;
+                        }
+                        StatusMessage = "Ошибка";
+                    });
+                    return;
+                }
+
+                sql = translation.Sql;
+                await UiThread.RunAsync(() =>
+                {
+                    if (chatMessage is not null)
+                    {
+                        chatMessage.GeneratedSql = sql;
+                        chatMessage.BusyHint = "Выполнение…";
+                    }
+                });
+            }
+            else if (chatMessage is not null)
+            {
+                await UiThread.RunAsync(() => chatMessage.BusyHint = "Выполнение…");
+            }
+
+            foreach (var statement in SqlScript.SplitStatements(sql))
+            {
+                if (Regex.IsMatch(statement, @"^\s*SET\s+USER\b", RegexOptions.IgnoreCase))
+                {
+                    const string setUserMsg =
+                        "Команда SET USER запрещена для использования в графическом интерфейсе. Пожалуйста, воспользуйтесь окном авторизации.";
+                    await UiThread.RunAsync(() =>
+                    {
+                        if (chatMessage is not null)
+                        {
+                            chatMessage.Result = QueryResult.Fail(setUserMsg);
+                            chatMessage.IsBusy = false;
+                            chatMessage.BusyHint = string.Empty;
+                            StatusMessage = "Отказ в выполнении";
+                        }
+                        else
+                        {
+                            StatusMessage = "Отказ в выполнении";
+                            HasMessage = true;
+                            IsError = true;
+                            ResultMessage = setUserMsg;
+                        }
+                    });
+                    return;
+                }
+            }
 
             SqlScript.RunResult run;
             try
@@ -263,6 +368,7 @@ public sealed class SqlViewModel : ObservableObject
                 {
                     capturedChat.Result = result;
                     capturedChat.IsBusy = false;
+                    capturedChat.BusyHint = string.Empty;
                     StatusMessage = result.Success
                         ? (run.TotalCount > 1 ? $"Готово · {run.TotalCount} команд" : "Готово")
                         : "Ошибка";
@@ -289,7 +395,7 @@ public sealed class SqlViewModel : ObservableObject
 
                 if (!dryRun)
                 {
-                    PushHistory(sql, result);
+                    PushHistory(userInput, result);
                 }
             });
         }

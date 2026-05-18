@@ -8,5 +8,8 @@ public sealed record Text2SqlResult(bool Success, string? Sql, string Message);
 public interface IText2SqlService
 {
     bool IsEnabled { get; }
-    Task<Text2SqlResult> TranslateAsync(string russianText, CancellationToken cancellationToken = default);
+    Task<Text2SqlResult> TranslateAsync(
+        string russianText,
+        string? activeDatabase = null,
+        CancellationToken cancellationToken = default);
 }

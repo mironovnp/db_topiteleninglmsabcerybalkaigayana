@@ -213,10 +213,13 @@
                             </StackPanel.IsVisible>
                             <TextBlock Text="💬" FontSize="42" HorizontalAlignment="Center"
                                        Foreground="{DynamicResource MutedTextBrush}" />
-                            <TextBlock Text="Диалог пуст. Напишите SQL-запрос ниже."
+                            <TextBlock Text="Диалог пуст. Напишите SQL или запрос на русском — Text2SQL переведёт его автоматически."
                                        FontSize="13"
                                        Foreground="{DynamicResource MutedTextBrush}"
-                                       HorizontalAlignment="Center" />
+                                       HorizontalAlignment="Center"
+                                       TextWrapping="Wrap"
+                                       TextAlignment="Center"
+                                       MaxWidth="420" />
                         </StackPanel>
 
                         <ItemsControl ItemsSource="{Binding Messages}">
@@ -224,11 +227,22 @@
                                 <DataTemplate DataType="vm:ChatMessageViewModel">
                                     <StackPanel Spacing="6" Margin="0,0,0,18">
                                         <Border Classes="bubble-user">
-                                            <TextBlock Text="{Binding Query}"
-                                                       Classes="mono"
-                                                       FontSize="13"
-                                                       TextWrapping="Wrap"
-                                                       Foreground="{DynamicResource TextBrush}" />
+                                            <StackPanel Spacing="8">
+                                                <TextBlock Text="{Binding Query}"
+                                                           FontSize="13"
+                                                           TextWrapping="Wrap"
+                                                           Foreground="{DynamicResource TextBrush}" />
+                                                <StackPanel Spacing="4" IsVisible="{Binding HasGeneratedSql}">
+                                                    <TextBlock Text="Сгенерированный SQL"
+                                                               FontSize="11"
+                                                               Classes="muted" />
+                                                    <TextBlock Text="{Binding GeneratedSql}"
+                                                               Classes="mono"
+                                                               FontSize="12"
+                                                               TextWrapping="Wrap"
+                                                               Foreground="{DynamicResource TextBrush}" />
+                                                </StackPanel>
+                                            </StackPanel>
                                         </Border>
 
                                         <Border Classes="bubble-ai">
@@ -269,7 +283,7 @@
                                  MinHeight="56"
                                  MaxHeight="180"
                                  Padding="16,14,16,6"
-                                 PlaceholderText="Напишите SQL-запрос. Ctrl+Enter — отправить." />
+                                 PlaceholderText="SQL или запрос на русском (также \ai …). Ctrl+Enter — отправить." />
                         <Grid Grid.Row="1" ColumnDefinitions="*,Auto" Margin="12,2,12,10">
                             <Button Grid.Column="0"
                                     Classes="ghost"

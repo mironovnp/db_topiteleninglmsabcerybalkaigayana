@@ -78,7 +78,7 @@ public partial class App : Application
             var text2Sql = new MistralText2SqlService(mistralApiKeys, schemaService);
             var columnFilterTranslator = new MistralColumnFilterService(mistralApiKeys, schemaService);
 
-            var sqlVm = new SqlViewModel(client, schemaPane, notifications);
+            var sqlVm = new SqlViewModel(client, text2Sql, mistralApiKeys, schemaPane, notifications);
             var text2SqlVm = new Text2SqlViewModel(text2Sql, mistralApiKeys, client, schemaPane, notifications);
             var browseVm = new TableBrowseViewModel(client, schemaService, columnFilterTranslator, notifications);
             var settingsVm = new SettingsViewModel(settingsService, themeService, client, mistralApiKeys);
