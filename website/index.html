@@ -167,7 +167,6 @@
                 class="btn-download disabled"
                 href="https://github.com/mironovnp/db_topiteleninglmsabcerybalkaigayana/releases/download/v1.0.0/DB_TopIT_Installer.exe"
                 download="topiteneninglmsabce-windows.exe"
-                aria-disabled="true"
               >
                 Скачать
               </a>
@@ -181,18 +180,27 @@
                 class="btn-download disabled"
                 href="https://github.com/mironovnp/db_topiteleninglmsabcerybalkaigayana/releases/download/v1.0.0/DB_TopIT_Linux.tar.gz"
                 download="topiteneninglmsabce-linux"
-                aria-disabled="true"
               >
                 Скачать
               </a>
             </article>
           </div>
 
-          <h3>Инструкция (после появления релизов)</h3>
-          <p><strong>Windows:</strong> скачайте <code>.exe</code> и запустите установщик или исполняемый файл.</p>
-          <p><strong>Linux:</strong> скачайте бинарник, выдайте права на выполнение и запустите:</p>
-          <pre class="placeholder-box" style="font-family: ui-monospace, monospace; font-size: 13px;"><code>chmod +x topiteneninglmsabce-linux
-./topiteneninglmsabce-linux</code></pre>
+          <h3>Инструкция для пользователей Windows</h3>
+<p>1. Скачайте файл <code>DB_TopIT_Installer.exe</code>.</p>
+<p>2. Запустите установщик (при необходимости разрешите запуск в Windows SmartScreen) и следуйте инструкциям мастера.</p>
+<p>3. Откройте меню «Пуск».</p>
+<p>4. <strong>Важно:</strong> Если вы являетесь хостом, запустите <code>dbServerTopIT</code> (откроется фоновая консоль сервера).</p>
+<p>5. Запустите саму программу (<code>DB_TopIT</code> — ярлык на рабочем столе), чтобы подключиться к серверу через графический интерфейс.</p>
+
+<h3>Инструкция для пользователей Linux</h3>
+<p>1. Скачайте архив <code>DB_TopIT_Linux.tar.gz</code>.</p>
+<p>2. Распакуйте архив в терминале:</p>
+<pre><code>tar -xzf DB_TopIT_Linux.tar.gz
+cd DB_TopIT_Release</code></pre>
+<p>3. Запустите скрипт установки (может потребоваться пароль sudo для копирования в /opt):</p>
+<pre><code>./install.sh</code></pre>
+<p>4. После успешной установки вы сможете найти графический интерфейс прямо в меню приложений вашей системы. Серверную часть (<code>dbserver</code>) можно запустить из директории установки или настроить как системную службу.</p>
           <p>Для Text2SQL настройте API-ключ Mistral — см. вкладку <strong>Mistral API</strong>.</p>
         </section>
 
