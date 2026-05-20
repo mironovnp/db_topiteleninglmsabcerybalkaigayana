@@ -7,7 +7,7 @@
 
 namespace db {
 
-class TableSchema;
+struct TableSchema;
 
 // ════════════════════════════════════════════════════════════════════════
 //  BPlusTree — typed CellValue keys (1 part = clustered PK, 2 parts = secondary)
