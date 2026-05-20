@@ -1,0 +1,57 @@
+name: Build and Release Windows Installer
+
+on:
+  push:
+    tags:
+      - 'v*' # Trigger on tags starting with v (e.g., v1.0.0, v2.1)
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x' # Adjust based on your project requirements (e.g., 9.0/10.0 if needed)
+
+      - name: Configure CMake (C++ Backend)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build C++ Backend
+        run: cmake --build build --config Release
+
+      - name: Publish C# GUI (Frontend)
+        # Publish as a self-contained single file or framework-dependent folder
+        run: dotnet publish CaseChampGui/CaseChampGui.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o staging/GUI
+
+      - name: Prepare Staging Directory
+        run: |
+          # The GUI is already in staging/GUI
+          # Copy the C++ server backend to the staging root
+          Copy-Item "build\Release\dbserver.exe" -Destination "staging\dbserver.exe"
+          # (If CMake outputs dbserver.exe without Release/ folder, adjust the path)
+          if (-Not (Test-Path "staging\dbserver.exe")) {
+             Copy-Item "build\dbserver.exe" -Destination "staging\dbserver.exe" -ErrorAction SilentlyContinue
+          }
+
+      - name: Compile Inno Setup Installer
+        # iscc is pre-installed on windows-latest runners in GitHub Actions
+        run: |
+          $Version = "${{ github.ref_name }}"
+          # Remove 'v' prefix for InnoSetup versioning
+          $Version = $Version.TrimStart('v')
+          iscc "/DAppVersion=$Version" installer.iss
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Output/DatabaseTopit-Setup.exe
+          name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
