@@ -4,6 +4,13 @@
 #include <mutex>
 #include <vector>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 namespace db {
 
 class Storage;
@@ -100,8 +107,10 @@ public:
 
 private:
     std::string log_file_path_;
-    // Use an explicit file descriptor on POSIX so we can fdatasync()
-#ifndef _WIN32
+    // Use an explicit file descriptor/handle so we can fdatasync/FlushFileBuffers
+#ifdef _WIN32
+    HANDLE log_handle_ = INVALID_HANDLE_VALUE;
+#else
     int log_fd_ = -1;
 #endif
     

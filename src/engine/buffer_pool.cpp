@@ -2,6 +2,11 @@
 #include <stdexcept>
 #include <filesystem>
 
+#ifdef _WIN32
+#include <io.h>      // _fileno
+#include <stdio.h>   // _fileno for fstream
+#endif
+
 namespace db {
 
 // ════════════════════════════════════════════════════════════════════════
@@ -67,6 +72,19 @@ void BufferPool::writeToDisk(PageId id, const Page& pg) {
     file_.seekp(offset);
     file_.write(pg.data, PAGE_SIZE);
     file_.flush();
+
+#ifdef _WIN32
+    // fstream::flush() only flushes C++ buffers to OS.
+    // FlushFileBuffers forces data to durable storage (Windows fsync equivalent).
+    HANDLE h = ::CreateFileA(file_path_.c_str(),
+                              GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              nullptr, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h != INVALID_HANDLE_VALUE) {
+        ::FlushFileBuffers(h);
+        ::CloseHandle(h);
+    }
+#endif
 }
 
 // ════════════════════════════════════════════════════════════════════════
