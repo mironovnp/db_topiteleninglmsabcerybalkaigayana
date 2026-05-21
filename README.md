@@ -1,1 +1,1 @@
-Вся актуальная информация доступна через сделанный нами [сайт](https://db-topiteleninglmsabcerybalkaigayana.pages.dev/).
+Вся актуальная информация доступна через сделанный нами [сайт](https://db-topiteleninglmsabcerybalkaigayana.pages.dev/). Для перехода на сайт требуется VPN.
