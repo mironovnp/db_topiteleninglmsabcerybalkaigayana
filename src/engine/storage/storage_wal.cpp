@@ -87,6 +87,16 @@ bool Storage::transactionActive() const {
     return txn_active_;
 }
 
+Storage::TransactionState Storage::getTransactionState() const {
+    return {txn_active_, current_txn_id_, current_txn_prev_lsn_};
+}
+
+void Storage::setTransactionState(const TransactionState& state) {
+    txn_active_ = state.active;
+    current_txn_id_ = state.id;
+    current_txn_prev_lsn_ = state.prev_lsn;
+}
+
 void Storage::beginTransaction() {
     if (txn_active_) throw std::runtime_error("Transaction already active");
     txn_active_ = true;

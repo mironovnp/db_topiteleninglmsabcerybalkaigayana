@@ -849,7 +849,7 @@ private:
                     storage.upsertClusterRowWal(db_name, "items", s, nullptr, row2);
                     
                     // Unclean shutdown here, no commit.
-                    // The thread_local state txn_active_ = true will be isolated to this thread.
+                    // Unclean shutdown: recovery must undo the uncommitted transaction.
                 }
 
                 // Recovery phase

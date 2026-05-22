@@ -79,6 +79,29 @@ namespace db {
 
 using json = nlohmann::json;
 
+Server::QueryRunResult Server::runSessionQuery(const SessionContext& session, const std::string& sql,
+                                               bool is_read_only) {
+    QueryRunResult out;
+    out.session = session;
+
+    executor_.setThreadLocalContext(session.current_db);
+    executor_.setThreadLocalUser(session.current_user);
+
+    std::lock_guard<std::mutex> txn_lock(txn_bridge_mutex_);
+    executor_.setTransactionState(session.txn);
+
+    if (is_read_only) {
+        std::shared_lock<std::shared_mutex> lock(db_rw_mutex_);
+        out.response = executor_.execute(sql);
+    } else {
+        std::unique_lock<std::shared_mutex> lock(db_rw_mutex_);
+        out.response = executor_.execute(sql);
+    }
+
+    out.session.txn = executor_.getTransactionState();
+    return out;
+}
+
 Server::Server(const std::string& host, int port, const std::string& data_dir)
     : host_(host), port_(port), executor_(data_dir) {
     svr_ptr_ = new httplib::Server();
@@ -112,13 +135,6 @@ void Server::start() {
                 }
                 session = it->second;
             }
-
-            // Thread-local хранит только рабочий контекст текущего HTTP-потока.
-            // Пользователь берется из серверной сессии, а не из тела запроса.
-            executor_.setThreadLocalContext(session.current_db);
-            executor_.setThreadLocalUser(session.current_user);
-
-
 
             std::string sql = body.value("sql", "");
             if (sql.empty()) {
@@ -162,18 +178,13 @@ void Server::start() {
 
             bool is_read_only = (upper_sql.find("SELECT") == 0 || upper_sql.find("SHOW") == 0);
 
-            nlohmann::json result;
-
-            // БЛОК МНОГОПОТОЧНОЙ СИНХРОНИЗАЦИИ
-            if (is_read_only) {
-                std::shared_lock<std::shared_mutex> lock(db_rw_mutex_);
-                result = executor_.execute(sql);
-            } else {
-                std::unique_lock<std::shared_mutex> lock(db_rw_mutex_);
-                result = executor_.execute(sql);
+            auto run = runSessionQuery(session, sql, is_read_only);
+            {
+                std::lock_guard<std::mutex> lock(sessions_mutex_);
+                sessions_[session_id] = run.session;
             }
 
-            res.set_content(attach_session_context(session_id, result).dump(), "application/json");
+            res.set_content(attach_session_context(session_id, run.response).dump(), "application/json");
         } catch (const std::exception& e) {
             res.set_content(
                 json({{"success", false}, {"message", e.what()}}).dump(),
@@ -194,18 +205,19 @@ void Server::start() {
                 if (it != sessions_.end()) session = it->second;
             }
 
-            executor_.setThreadLocalContext(session.current_db);
-            executor_.setThreadLocalUser(session.current_user);
-
             // 1. Build schema context
             std::string schema;
-            auto tables_res = executor_.execute("SHOW TABLES;");
+            auto tables_run = runSessionQuery(session, "SHOW TABLES;", true);
+            auto tables_res = tables_run.response;
+            session = tables_run.session;
             if (tables_res.value("success", false) && tables_res.contains("rows")) {
                 for (const auto& row : tables_res["rows"]) {
                     if (row.empty()) continue;
                     std::string table = row[0].get<std::string>();
                     schema += "TABLE " + table + " (";
-                    auto cols_res = executor_.execute("SHOW COLUMNS FROM " + table + ";");
+                    auto cols_run = runSessionQuery(session, "SHOW COLUMNS FROM " + table + ";", true);
+                    session = cols_run.session;
+                    auto cols_res = cols_run.response;
                     if (cols_res.value("success", false) && cols_res.contains("rows")) {
                         for (size_t i = 0; i < cols_res["rows"].size(); ++i) {
                             const auto& c = cols_res["rows"][i];
@@ -333,16 +345,14 @@ void Server::start() {
                 return;
             }
 
-            executor_.setThreadLocalContext("");
-            executor_.setThreadLocalUser("");
-
-            nlohmann::json result;
+            SessionContext auth_session;
+            auto run = runSessionQuery(auth_session, sql, false);
             {
-                std::unique_lock<std::shared_mutex> lock(db_rw_mutex_);
-                result = executor_.execute(sql);
+                std::lock_guard<std::mutex> lock(sessions_mutex_);
+                sessions_[session_id] = run.session;
             }
 
-            res.set_content(attach_session_context(session_id, result).dump(), "application/json");
+            res.set_content(attach_session_context(session_id, run.response).dump(), "application/json");
         } catch (const std::exception& e) {
             res.set_content(json({{"success", false}, {"message", e.what()}}).dump(), "application/json");
         }
@@ -461,19 +471,17 @@ void Server::start() {
                 }
             }
 
-            executor_.setThreadLocalContext(session.current_db);
-            executor_.setThreadLocalUser(session.current_user);
-
             std::string sql = "LOAD CSV '" + escape_sql_string(server_filename) + "' INTO " + table;
             if (append) sql += " APPEND";
             sql += ";";
 
-            json result;
+            auto run = runSessionQuery(session, sql, false);
             {
-                std::unique_lock<std::shared_mutex> lock(db_rw_mutex_);
-                result = executor_.execute(sql);
+                std::lock_guard<std::mutex> lock(sessions_mutex_);
+                sessions_[session_id] = run.session;
             }
 
+            json result = run.response;
             result["server_filename"] = server_filename;
             result["sql"] = sql;
             res.set_content(attach_session_context(session_id, result).dump(), "application/json");

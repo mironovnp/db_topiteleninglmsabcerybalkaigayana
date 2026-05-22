@@ -66,8 +66,16 @@ public:
     bool hasDbDdlGrant(const std::string& db_name, const std::string& username) const;
     bool hasDbGrantRole(const std::string& db_name, const std::string& username, const std::string& role) const;
 
+    struct TransactionState {
+        bool active = false;
+        TxnId id = 0;
+        LSN prev_lsn = INVALID_LSN;
+    };
+
     // Transaction control (logical WAL undo for row-level changes).
     bool transactionActive() const;
+    TransactionState getTransactionState() const;
+    void setTransactionState(const TransactionState& state);
     void beginTransaction();
     void commitTransaction();
     void rollbackTransaction();
@@ -149,9 +157,9 @@ private:
     std::filesystem::path data_dir_;
     std::unique_ptr<WALManager> wal_mgr_;
     std::atomic<TxnId> next_txn_id_{1};
-    inline thread_local static bool txn_active_ = false;
-    inline thread_local static TxnId current_txn_id_ = 0;
-    inline thread_local static LSN current_txn_prev_lsn_ = INVALID_LSN;
+    bool txn_active_ = false;
+    TxnId current_txn_id_ = 0;
+    LSN current_txn_prev_lsn_ = INVALID_LSN;
     // Protects pools_ from concurrent access (HTTP server runs queries in parallel).
     mutable std::mutex pools_latch_;
     mutable std::unordered_map<std::string, std::unique_ptr<BufferPool>> pools_;

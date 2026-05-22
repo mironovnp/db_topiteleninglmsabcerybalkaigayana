@@ -36,6 +36,14 @@ public:
         return storage_.databaseDirectory(db_name);
     }
 
+    Storage::TransactionState getTransactionState() const {
+        return storage_.getTransactionState();
+    }
+
+    void setTransactionState(const Storage::TransactionState& state) {
+        storage_.setTransactionState(state);
+    }
+
 private:
     Storage storage_;
 
