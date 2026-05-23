@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Linq;
 using System.Threading.Tasks;
 using CaseChampGui.Models;
 using CaseChampGui.Services;
@@ -99,6 +101,9 @@ public sealed class SchemaPaneViewModel : ObservableObject
 
     public event EventHandler? RefreshRequested;
     public event EventHandler<string>? OpenTableRequested;
+
+    public IReadOnlyList<SchemaTable> GetSchemaTables() =>
+        Tables.Select(t => new SchemaTable(t.Name, t.Columns.ToList())).ToList();
 
     public void Clear()
     {

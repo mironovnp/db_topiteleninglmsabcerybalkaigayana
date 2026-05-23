@@ -262,6 +262,7 @@ public sealed class MainWindowViewModel : ObservableObject, IDisposable
     public Text2SqlViewModel Text2Sql { get; }
     public TableBrowseViewModel Browse { get; }
     public SettingsViewModel Settings { get; }
+    public ISettingsService SettingsService => _settingsService;
 
     public ObservableCollection<NavItemViewModel> NavItems { get; }
     public ObservableCollection<NavItemViewModel> PrimaryNavItems { get; }

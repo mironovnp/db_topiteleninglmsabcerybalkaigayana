@@ -21,14 +21,24 @@
                         Classes="editor-card"
                         Margin="0,0,0,18">
                     <Grid RowDefinitions="*,Auto">
-                        <TextBox Grid.Row="0"
-                                 x:Name="EditorTextBox"
-                                 Classes="editor flat"
-                                 Text="{Binding SqlText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                 FontSize="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).EditorFontSize, FallbackValue=14}"
-                                 MinHeight="120"
-                                 Padding="18,16,18,8"
-                                 PlaceholderText="SELECT * FROM users;" />
+                        <Grid Grid.Row="0" ClipToBounds="True">
+                            <TextBox x:Name="EditorTextBox"
+                                     Classes="editor flat"
+                                     Background="Transparent"
+                                     Text="{Binding SqlText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                     FontSize="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).EditorFontSize, FallbackValue=14}"
+                                     MinHeight="120"
+                                     Padding="18,16,18,8"
+                                     PlaceholderText="SELECT * FROM users;" />
+                            <TextBlock x:Name="EditorGhostText"
+                                       IsHitTestVisible="False"
+                                       Classes="editor"
+                                       FontSize="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).EditorFontSize, FallbackValue=14}"
+                                       HorizontalAlignment="Left"
+                                       VerticalAlignment="Top"
+                                       ZIndex="10"
+                                       IsVisible="False" />
+                        </Grid>
 
                         <WrapPanel x:Name="EditorToolbar"
                                   Grid.Row="1"
@@ -323,15 +333,25 @@
                 
                 <Border Grid.Row="1" Classes="editor-card" Margin="0,4,0,0">
                     <Grid RowDefinitions="*,Auto">
-                        <TextBox Grid.Row="0"
-                                 x:Name="ChatInputBox"
-                                 Classes="editor flat"
-                                 Text="{Binding SqlText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                 FontSize="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).EditorFontSize, FallbackValue=13}"
-                                 MinHeight="56"
-                                 MaxHeight="180"
-                                 Padding="16,14,16,6"
-                                 PlaceholderText="SQL или запрос на русском (также \ai …). Ctrl+Enter — отправить." />
+                        <Grid Grid.Row="0" ClipToBounds="True">
+                            <TextBox x:Name="ChatInputBox"
+                                     Classes="editor flat"
+                                     Background="Transparent"
+                                     Text="{Binding SqlText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                     FontSize="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).EditorFontSize, FallbackValue=13}"
+                                     MinHeight="56"
+                                     MaxHeight="180"
+                                     Padding="16,14,16,6"
+                                     PlaceholderText="SQL или запрос на русском (также \ai …). Ctrl+Enter — отправить." />
+                            <TextBlock x:Name="ChatGhostText"
+                                       IsHitTestVisible="False"
+                                       Classes="editor"
+                                       FontSize="{Binding $parent[Window].((vm:MainWindowViewModel)DataContext).EditorFontSize, FallbackValue=13}"
+                                       HorizontalAlignment="Left"
+                                       VerticalAlignment="Top"
+                                       ZIndex="10"
+                                       IsVisible="False" />
+                        </Grid>
                         <Grid Grid.Row="1" ColumnDefinitions="*,Auto" Margin="12,2,12,10">
                             <Button Grid.Column="0"
                                     Classes="ghost"

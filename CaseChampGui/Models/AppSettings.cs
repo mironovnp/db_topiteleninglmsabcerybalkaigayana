@@ -42,6 +42,13 @@ public sealed class AppSettings
     [JsonPropertyName("sidebar_auto_collapse")]
     public bool SidebarAutoCollapse { get; set; } = true;
 
+    [JsonPropertyName("intellisense_enabled")]
+    public bool IntellisenseEnabled { get; set; } = true;
+
+    /// <summary>Если true, первый Backspace при видимой подсказке только скрывает её, не удаляя текст.</summary>
+    [JsonPropertyName("intellisense_backspace_dismisses_ghost")]
+    public bool IntellisenseBackspaceDismissesGhost { get; set; } = true;
+
     [JsonPropertyName("auth_completed_once")]
     public bool AuthCompletedOnce { get; set; }
 
@@ -72,6 +79,8 @@ public sealed class AppSettings
         ChatModeEnabled = ChatModeEnabled,
         AutoStartLocalServer = AutoStartLocalServer,
         SidebarAutoCollapse = SidebarAutoCollapse,
+        IntellisenseEnabled = IntellisenseEnabled,
+        IntellisenseBackspaceDismissesGhost = IntellisenseBackspaceDismissesGhost,
         AuthCompletedOnce = AuthCompletedOnce,
         LastUsername = LastUsername,
         RememberPassword = RememberPassword,

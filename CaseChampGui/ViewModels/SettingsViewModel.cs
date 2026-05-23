@@ -31,6 +31,8 @@ public sealed class SettingsViewModel : ObservableObject
     private bool _chatModeEnabled;
     private bool _autoStartLocalServer;
     private bool _sidebarAutoCollapse;
+    private bool _intellisenseEnabled = true;
+    private bool _intellisenseBackspaceDismissesGhost = true;
     private string _connectionStatusText = string.Empty;
     private bool _isReconnecting;
 
@@ -436,6 +438,38 @@ public sealed class SettingsViewModel : ObservableObject
         }
     }
 
+    public bool IntellisenseEnabled
+    {
+        get => _intellisenseEnabled;
+        set
+        {
+            if (SetProperty(ref _intellisenseEnabled, value))
+            {
+                OnPropertyChanged(nameof(ShowIntellisenseSubOptions));
+                IntellisenseSettingsChanged?.Invoke(this, EventArgs.Empty);
+                _ = SaveAsync();
+            }
+        }
+    }
+
+  /// <summary>Доступны только при включённом Intellisense.</summary>
+    public bool ShowIntellisenseSubOptions => _intellisenseEnabled;
+
+    public bool IntellisenseBackspaceDismissesGhost
+    {
+        get => _intellisenseBackspaceDismissesGhost;
+        set
+        {
+            if (SetProperty(ref _intellisenseBackspaceDismissesGhost, value))
+            {
+                IntellisenseSettingsChanged?.Invoke(this, EventArgs.Empty);
+                _ = SaveAsync();
+            }
+        }
+    }
+
+    public event EventHandler? IntellisenseSettingsChanged;
+
     public event EventHandler<bool>? ChatModeChanged;
     public event EventHandler<bool>? SidebarAutoCollapseChanged;
     public event EventHandler<bool>? CompactModeChanged;
@@ -482,6 +516,8 @@ public sealed class SettingsViewModel : ObservableObject
         _chatModeEnabled = s.ChatModeEnabled;
         _autoStartLocalServer = s.AutoStartLocalServer;
         _sidebarAutoCollapse = s.SidebarAutoCollapse;
+        _intellisenseEnabled = s.IntellisenseEnabled;
+        _intellisenseBackspaceDismissesGhost = s.IntellisenseBackspaceDismissesGhost;
         _accountDisplayName = s.DisplayNameOverride ?? string.Empty;
         _rememberPassword = s.RememberPassword;
         _avatarPath = s.AvatarFilePath;
@@ -506,6 +542,8 @@ public sealed class SettingsViewModel : ObservableObject
         b.ChatModeEnabled = _chatModeEnabled;
         b.AutoStartLocalServer = _autoStartLocalServer;
         b.SidebarAutoCollapse = _sidebarAutoCollapse;
+        b.IntellisenseEnabled = _intellisenseEnabled;
+        b.IntellisenseBackspaceDismissesGhost = _intellisenseBackspaceDismissesGhost;
         b.DisplayNameOverride = string.IsNullOrWhiteSpace(_accountDisplayName) ? null : _accountDisplayName.Trim();
         b.RememberPassword = _rememberPassword;
         if (IsAdminAccount)

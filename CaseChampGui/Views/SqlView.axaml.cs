@@ -6,6 +6,7 @@ using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
+using CaseChampGui.Services;
 using CaseChampGui.ViewModels;
 
 namespace CaseChampGui.Views;
@@ -16,6 +17,9 @@ public partial class SqlView : UserControl
 
     private SqlViewModel? _vm;
     private Control? _editorToolbar;
+    private SqlIntellisenseController? _editorIntellisense;
+    private SqlIntellisenseController? _chatIntellisense;
+    private ISettingsService? _settingsService;
 
     public SqlView()
     {
@@ -30,6 +34,7 @@ public partial class SqlView : UserControl
     {
         AttachEditorShortcuts(this.FindControl<TextBox>("EditorTextBox"));
         AttachEditorShortcuts(this.FindControl<TextBox>("ChatInputBox"));
+        AttachIntellisense();
         RebuildResultsTable();
 
         _editorToolbar = this.FindControl<Control>("EditorToolbar");
@@ -42,6 +47,14 @@ public partial class SqlView : UserControl
 
     private void OnDetachedFromVisualTree(object? sender, VisualTreeAttachmentEventArgs e)
     {
+        _editorIntellisense?.Dispose();
+        _editorIntellisense = null;
+        _chatIntellisense?.Dispose();
+        _chatIntellisense = null;
+
+        if (_settingsService is not null)
+            _settingsService.SettingsChanged -= OnSettingsChanged;
+
         if (_editorToolbar is not null)
         {
             _editorToolbar.SizeChanged -= OnEditorToolbarSizeChanged;
@@ -72,6 +85,53 @@ public partial class SqlView : UserControl
             handledEventsToo: true);
     }
 
+    private void AttachIntellisense()
+    {
+        _editorIntellisense?.Dispose();
+        _chatIntellisense?.Dispose();
+
+        var settings = ResolveSettings();
+        var schema = _vm?.Schema;
+        if (settings is null || schema is null) return;
+
+        if (_settingsService is not null)
+            _settingsService.SettingsChanged -= OnSettingsChanged;
+        _settingsService = settings;
+        _settingsService.SettingsChanged += OnSettingsChanged;
+
+        var getSettings = () => settings.Current;
+
+        _editorIntellisense = SqlIntellisenseSetup.Attach(
+            this.FindControl<TextBox>("EditorTextBox"),
+            this.FindControl<TextBlock>("EditorGhostText"),
+            schema,
+            getSettings,
+            SqlIntellisenseMode.SqlEditor);
+
+        _chatIntellisense = SqlIntellisenseSetup.Attach(
+            this.FindControl<TextBox>("ChatInputBox"),
+            this.FindControl<TextBlock>("ChatGhostText"),
+            schema,
+            getSettings,
+            SqlIntellisenseMode.Text2SqlAware);
+    }
+
+    private void OnSettingsChanged(object? sender, Models.AppSettings e)
+    {
+        _editorIntellisense?.Refresh();
+        _chatIntellisense?.Refresh();
+    }
+
+    private ISettingsService? ResolveSettings()
+    {
+        if (TopLevel.GetTopLevel(this) is Window window &&
+            window.DataContext is MainWindowViewModel mainVm)
+        {
+            return mainVm.SettingsService;
+        }
+        return null;
+    }
+
     private void OnEditorKeyDown(object? sender, KeyEventArgs e)
     {
         var isEnter = e.Key == Key.Enter || e.Key == Key.Return;
@@ -99,6 +159,7 @@ public partial class SqlView : UserControl
         {
             _vm.ResultsChanged += OnResultsChanged;
             ((INotifyCollectionChanged)_vm.Messages).CollectionChanged += OnMessagesChanged;
+            AttachIntellisense();
             RebuildResultsTable();
         }
     }

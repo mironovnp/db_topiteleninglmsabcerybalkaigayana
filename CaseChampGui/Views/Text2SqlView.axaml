@@ -112,15 +112,24 @@
 
                 <Border Grid.Row="2" Classes="editor-card" Margin="0,0,0,12">
                     <Grid RowDefinitions="*,Auto">
-                        <TextBox Grid.Row="0"
-                                 x:Name="RequestTextBox"
-                                 Classes="editor flat"
-                                 Text="{Binding InputText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                 AcceptsReturn="True"
-                                 TextWrapping="Wrap"
-                                 MinHeight="100"
-                                 Padding="20,18,20,8"
-                                 PlaceholderText="Например: покажи имена всех пользователей старше 25 лет" />
+                        <Grid Grid.Row="0" ClipToBounds="True">
+                            <TextBox x:Name="RequestTextBox"
+                                     Classes="editor flat"
+                                     Background="Transparent"
+                                     Text="{Binding InputText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                     AcceptsReturn="True"
+                                     TextWrapping="Wrap"
+                                     MinHeight="100"
+                                     Padding="20,18,20,8"
+                                     PlaceholderText="Например: покажи имена всех пользователей старше 25 лет" />
+                            <TextBlock x:Name="RequestGhostText"
+                                       IsHitTestVisible="False"
+                                       Classes="editor"
+                                       HorizontalAlignment="Left"
+                                       VerticalAlignment="Top"
+                                       ZIndex="10"
+                                       IsVisible="False" />
+                        </Grid>
 
                         <Border Grid.Row="1"
                                 BorderBrush="{DynamicResource BorderSoftBrush}"

@@ -22,7 +22,7 @@
                         <TextBlock Text="Внешний вид" Classes="h2" VerticalAlignment="Center" />
                     </StackPanel>
 
-                    <Grid ColumnDefinitions="*,260" RowDefinitions="Auto,Auto,Auto,Auto,Auto" RowSpacing="14" ColumnSpacing="20">
+                    <Grid ColumnDefinitions="*,260" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto" RowSpacing="14" ColumnSpacing="20">
                         <StackPanel Grid.Row="0" Grid.Column="0" Spacing="2" VerticalAlignment="Center">
                             <TextBlock Text="Тема оформления" />
                         </StackPanel>
@@ -75,6 +75,28 @@
                         </StackPanel>
                         <ToggleSwitch Grid.Row="4" Grid.Column="1"
                                       IsChecked="{Binding CompactMode, Mode=TwoWay}"
+                                      HorizontalAlignment="Right" />
+
+                        <StackPanel Grid.Row="5" Grid.Column="0" Spacing="2">
+                            <TextBlock Text="SQL Intellisense" />
+                            <TextBlock Text="Серые подсказки в редакторе SQL и Text2SQL (когда ввод похож на SQL). Tab — принять."
+                                       Classes="muted"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Row="5" Grid.Column="1"
+                                      IsChecked="{Binding IntellisenseEnabled, Mode=TwoWay}"
+                                      HorizontalAlignment="Right" />
+
+                        <StackPanel Grid.Row="6" Grid.Column="0" Spacing="2"
+                                    IsEnabled="{Binding ShowIntellisenseSubOptions}">
+                            <TextBlock Text="Backspace сначала убирает подсказку" />
+                            <TextBlock Text="Если выключить — Backspace сразу удаляет символ, подсказка тоже пропадает."
+                                       Classes="muted"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Row="6" Grid.Column="1"
+                                      IsChecked="{Binding IntellisenseBackspaceDismissesGhost, Mode=TwoWay}"
+                                      IsEnabled="{Binding ShowIntellisenseSubOptions}"
                                       HorizontalAlignment="Right" />
                     </Grid>
                 </StackPanel>
