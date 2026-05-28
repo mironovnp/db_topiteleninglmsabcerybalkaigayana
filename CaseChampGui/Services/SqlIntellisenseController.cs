@@ -26,6 +26,8 @@ public sealed class SqlIntellisenseController : IDisposable
     private readonly SqlIntellisenseMode _mode;
 
     private string _ghostSuffix = string.Empty;
+    private string _ghostAcceptText = string.Empty;
+    private int _ghostReplaceBeforeCaret;
     private bool _ghostVisible;
     private bool _suppressed;
     private int _typedSinceDelete;
@@ -229,11 +231,16 @@ public sealed class SqlIntellisenseController : IDisposable
     {
         var text = _editor.Text ?? string.Empty;
         var caret = Math.Clamp(_editor.CaretIndex, 0, text.Length);
-        var suffix = _ghostSuffix;
-        if (string.IsNullOrEmpty(suffix)) return;
+        var insert = _ghostAcceptText;
+        if (string.IsNullOrEmpty(insert)) return;
 
-        _editor.Text = text.Insert(caret, suffix);
-        var newCaret = caret + suffix.Length;
+        var replaceBefore = Math.Clamp(_ghostReplaceBeforeCaret, 0, caret);
+        if (replaceBefore > 0)
+            text = text.Remove(caret - replaceBefore, replaceBefore);
+
+        caret -= replaceBefore;
+        _editor.Text = text.Insert(caret, insert);
+        var newCaret = caret + insert.Length;
         _editor.CaretIndex = newCaret;
         _editor.SelectionStart = newCaret;
         _editor.SelectionEnd = newCaret;
@@ -285,6 +292,8 @@ public sealed class SqlIntellisenseController : IDisposable
             }
 
             _ghostSuffix = suggestion.GhostSuffix;
+            _ghostAcceptText = suggestion.AcceptText ?? suggestion.GhostSuffix;
+            _ghostReplaceBeforeCaret = suggestion.ReplaceCharsBeforeCaret;
             _ghostVisible = true;
             RenderGhost(text, caret);
             _ghost.IsVisible = true;
@@ -302,6 +311,7 @@ public sealed class SqlIntellisenseController : IDisposable
     private void RenderGhost(string text, int caret)
     {
         caret = Math.Clamp(caret, 0, text.Length);
+
         var lineStart = caret == 0 ? 0 : text.LastIndexOf('\n', caret - 1) + 1;
         if (lineStart < 0) lineStart = 0;
 
@@ -373,6 +383,8 @@ public sealed class SqlIntellisenseController : IDisposable
     {
         _ghostVisible = false;
         _ghostSuffix = string.Empty;
+        _ghostAcceptText = string.Empty;
+        _ghostReplaceBeforeCaret = 0;
         _ghost.Text = string.Empty;
         _ghost.IsVisible = false;
     }

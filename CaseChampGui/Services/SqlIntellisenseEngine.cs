@@ -15,7 +15,14 @@ public enum SqlIntellisenseMode
     Text2SqlAware,
 }
 
-public sealed record SqlIntellisenseSuggestion(string GhostSuffix, double Confidence);
+public sealed record SqlIntellisenseSuggestion(
+    /// <summary>Серый хвост сразу после каретки (только недописанная часть).</summary>
+    string GhostSuffix,
+    double Confidence,
+    /// <summary>Сколько символов перед кареткой заменить при Tab (для cre → CREATE).</summary>
+    int ReplaceCharsBeforeCaret = 0,
+    /// <summary>Текст при Tab; если null — используется GhostSuffix.</summary>
+    string? AcceptText = null);
 
 /// <summary>Вычисляет ghost-подсказки для SQL по схеме и контексту ввода.</summary>
 public static class SqlIntellisenseEngine
@@ -177,7 +184,7 @@ public static class SqlIntellisenseEngine
         int caret)
     {
         if (tokens.Count == 0)
-            return CompleteKeyword(upperPartial, CommandKeywords, trailingSpace: true);
+            return CompleteKeyword(partial, upperPartial, CommandKeywords, trailingSpace: true);
 
         // Убираем незавершённый последний токен из анализа контекста.
         var contextTokens = new List<string>(tokens);
@@ -190,13 +197,13 @@ public static class SqlIntellisenseEngine
         var first = contextTokens.Count > 0 ? Upper(contextTokens[0]) : upperPartial;
 
         if (contextTokens.Count == 0)
-            return CompleteKeyword(upperPartial, CommandKeywords, trailingSpace: true);
+            return CompleteKeyword(partial, upperPartial, CommandKeywords, trailingSpace: true);
 
         if (first is "SELECT")
             return SuggestAfterSelect(contextTokens, partial, upperPartial, tables);
 
         if (first is "FROM" && contextTokens.Count == 1)
-            return CompleteKeyword(upperPartial, CommandKeywords, trailingSpace: true);
+            return CompleteKeyword(partial, upperPartial, CommandKeywords, trailingSpace: true);
 
         if (first is "INSERT")
             return SuggestAfterInsert(contextTokens, partial, upperPartial, tables);
@@ -226,7 +233,7 @@ public static class SqlIntellisenseEngine
             return new SqlIntellisenseSuggestion(" ", 0.95);
 
         if (contextTokens.Count == 1 && hasPartial)
-            return CompleteKeyword(upperPartial, CommandKeywords, trailingSpace: true);
+            return CompleteKeyword(partial, upperPartial, CommandKeywords, trailingSpace: true);
 
         return null;
     }
@@ -244,7 +251,7 @@ public static class SqlIntellisenseEngine
             {
                 if (string.IsNullOrEmpty(partial))
                     return new SqlIntellisenseSuggestion(" FROM ", 0.95);
-                return CompleteKeyword(upperPartial, ["FROM"], trailingSpace: true);
+                return CompleteKeyword(partial, upperPartial, ["FROM"], trailingSpace: true);
             }
 
             if (tokens.Count >= 2 && Upper(tokens[^1]) == "FROM" && string.IsNullOrEmpty(partial))
@@ -272,7 +279,7 @@ public static class SqlIntellisenseEngine
             }
         }
 
-        return CompleteKeyword(upperPartial, CommandKeywords, trailingSpace: true);
+        return CompleteKeyword(partial, upperPartial, CommandKeywords, trailingSpace: true);
     }
 
     private static SqlIntellisenseSuggestion? SuggestSelectStarFrom(IReadOnlyList<SchemaTable> tables)
@@ -293,7 +300,7 @@ public static class SqlIntellisenseEngine
         {
             if (string.IsNullOrEmpty(partial))
                 return new SqlIntellisenseSuggestion("INTO ", 0.95);
-            return CompleteKeyword(upperPartial, ["INTO"], trailingSpace: true);
+            return CompleteKeyword(partial, upperPartial, ["INTO"], trailingSpace: true);
         }
 
         if (tokens.Count == 2 && Upper(tokens[1]) == "INTO" && string.IsNullOrEmpty(partial))
@@ -327,7 +334,7 @@ public static class SqlIntellisenseEngine
         if (tokens.Count >= 2 && Upper(tokens[1]) == "INTO" && !string.IsNullOrEmpty(partial))
             return SuggestTableName(partial, tables, trailingSemicolon: false);
 
-        return CompleteKeyword(upperPartial, CommandKeywords, trailingSpace: true);
+        return CompleteKeyword(partial, upperPartial, CommandKeywords, trailingSpace: true);
     }
 
     private static SqlIntellisenseSuggestion? SuggestFirstInsertColumn(SchemaTable table)
@@ -386,7 +393,7 @@ public static class SqlIntellisenseEngine
         if (tokens.Count == 2 && !string.IsNullOrEmpty(partial))
             return SuggestTableName(partial, tables, trailingSemicolon: false);
 
-        return CompleteKeyword(upperPartial, CommandKeywords, trailingSpace: true);
+        return CompleteKeyword(partial, upperPartial, CommandKeywords, trailingSpace: true);
     }
 
     private static SqlIntellisenseSuggestion? SuggestAfterDelete(
@@ -396,11 +403,11 @@ public static class SqlIntellisenseEngine
         {
             if (string.IsNullOrEmpty(partial))
                 return new SqlIntellisenseSuggestion("FROM ", 0.95);
-            return CompleteKeyword(upperPartial, ["FROM"], trailingSpace: true);
+            return CompleteKeyword(partial, upperPartial, ["FROM"], trailingSpace: true);
         }
 
         if (tokens.Count < 2)
-            return CompleteKeyword(upperPartial, CommandKeywords, trailingSpace: true);
+            return CompleteKeyword(partial, upperPartial, CommandKeywords, trailingSpace: true);
 
         if (tokens.Count >= 3 && Upper(tokens[1]) == "FROM" && string.IsNullOrEmpty(partial) &&
             !tokens.Any(t => Upper(t) == "WHERE"))
@@ -409,17 +416,17 @@ public static class SqlIntellisenseEngine
         if (Upper(tokens[1]) == "FROM")
             return SuggestTableName(partial, tables, trailingSemicolon: false);
 
-        return CompleteKeyword(upperPartial, CommandKeywords, trailingSpace: true);
+        return CompleteKeyword(partial, upperPartial, CommandKeywords, trailingSpace: true);
     }
 
     private static SqlIntellisenseSuggestion? SuggestAfterCreate(
         List<string> tokens, string partial, string upperPartial, IReadOnlyList<SchemaTable> tables)
     {
         if (tokens.Count == 1)
-            return CompleteKeyword(upperPartial, ["TABLE", "DATABASE", "INDEX"], trailingSpace: true);
+            return CompleteKeyword(partial, upperPartial, ["TABLE", "DATABASE", "INDEX"], trailingSpace: true);
 
         if (tokens.Count < 2)
-            return CompleteKeyword(upperPartial, CommandKeywords, trailingSpace: true);
+            return CompleteKeyword(partial, upperPartial, CommandKeywords, trailingSpace: true);
 
         var kind = Upper(tokens[1]);
 
@@ -460,17 +467,17 @@ public static class SqlIntellisenseEngine
         if (kind == "INDEX" && tokens.Count == 2 && string.IsNullOrEmpty(partial))
             return new SqlIntellisenseSuggestion("idx_name ON table_name(column);", 0.9);
 
-        return CompleteKeyword(upperPartial, CommandKeywords, trailingSpace: true);
+        return CompleteKeyword(partial, upperPartial, CommandKeywords, trailingSpace: true);
     }
 
     private static SqlIntellisenseSuggestion? SuggestAfterDrop(
         List<string> tokens, string partial, string upperPartial, IReadOnlyList<SchemaTable> tables)
     {
         if (tokens.Count == 1)
-            return CompleteKeyword(upperPartial, ["TABLE", "DATABASE", "INDEX"], trailingSpace: true);
+            return CompleteKeyword(partial, upperPartial, ["TABLE", "DATABASE", "INDEX"], trailingSpace: true);
 
         if (tokens.Count < 2)
-            return CompleteKeyword(upperPartial, CommandKeywords, trailingSpace: true);
+            return CompleteKeyword(partial, upperPartial, CommandKeywords, trailingSpace: true);
 
         var kind = Upper(tokens[1]);
 
@@ -480,7 +487,7 @@ public static class SqlIntellisenseEngine
         if (kind == "DATABASE" && string.IsNullOrEmpty(partial))
             return new SqlIntellisenseSuggestion("name;", 0.9);
 
-        return CompleteKeyword(upperPartial, CommandKeywords, trailingSpace: true);
+        return CompleteKeyword(partial, upperPartial, CommandKeywords, trailingSpace: true);
     }
 
     private static SqlIntellisenseSuggestion? SuggestAfterAlter(
@@ -490,11 +497,11 @@ public static class SqlIntellisenseEngine
         {
             if (string.IsNullOrEmpty(partial))
                 return new SqlIntellisenseSuggestion("TABLE ", 0.95);
-            return CompleteKeyword(upperPartial, ["TABLE"], trailingSpace: true);
+            return CompleteKeyword(partial, upperPartial, ["TABLE"], trailingSpace: true);
         }
 
         if (tokens.Count < 2)
-            return CompleteKeyword(upperPartial, CommandKeywords, trailingSpace: true);
+            return CompleteKeyword(partial, upperPartial, CommandKeywords, trailingSpace: true);
 
         if (Upper(tokens[1]) == "TABLE")
             return SuggestTableName(partial, tables, trailingSemicolon: false);
@@ -502,21 +509,21 @@ public static class SqlIntellisenseEngine
         if (tokens.Count == 3 && string.IsNullOrEmpty(partial))
             return new SqlIntellisenseSuggestion(" ADD COLUMN name TYPE;", 0.92);
 
-        return CompleteKeyword(upperPartial, CommandKeywords, trailingSpace: true);
+        return CompleteKeyword(partial, upperPartial, CommandKeywords, trailingSpace: true);
     }
 
     private static SqlIntellisenseSuggestion? SuggestAfterShow(
         List<string> tokens, string partial, string upperPartial)
     {
         if (tokens.Count == 1 && string.IsNullOrEmpty(partial))
-            return CompleteKeyword(upperPartial,
+            return CompleteKeyword(partial, upperPartial,
                 ["TABLES", "DATABASES", "COLUMNS"],
                 trailingSpace: true);
 
         if (tokens.Count == 2 && Upper(tokens[1]) == "COLUMNS" && string.IsNullOrEmpty(partial))
             return new SqlIntellisenseSuggestion("FROM table_name;", 0.92);
 
-        return CompleteKeyword(upperPartial, CommandKeywords, trailingSpace: true);
+        return CompleteKeyword(partial, upperPartial, CommandKeywords, trailingSpace: true);
     }
 
     private static SqlIntellisenseSuggestion? SuggestDatabaseName(
@@ -559,16 +566,53 @@ public static class SqlIntellisenseEngine
     }
 
     private static SqlIntellisenseSuggestion? CompleteKeyword(
+        string partial,
         string upperPartial,
         IEnumerable<string> candidates,
         bool trailingSpace)
     {
-        var suffix = CompleteUniqueSuffix(upperPartial, candidates);
-        if (suffix is null) return null;
+        var match = FindUniqueKeywordMatch(upperPartial, candidates);
+        if (match is null) return null;
 
-        var tail = trailingSpace ? suffix + " " : suffix;
+        var rest = match[upperPartial.Length..];
+        if (rest.Length == 0) return null;
+
+        var tail = trailingSpace ? rest + " " : rest;
+
+        if (ShouldNormalizeKeywordToUppercase(partial, match))
+        {
+            var full = trailingSpace ? match + " " : match;
+            return new SqlIntellisenseSuggestion(tail, 0.95, partial.Length, AcceptText: full);
+        }
+
         return new SqlIntellisenseSuggestion(tail, 0.95);
     }
+
+    private static string? FindUniqueKeywordMatch(string upperPartial, IEnumerable<string> candidates)
+    {
+        var cmp = StringComparison.OrdinalIgnoreCase;
+        var matches = candidates
+            .Where(c => c.StartsWith(upperPartial, cmp))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (matches.Count == 1)
+            return matches[0];
+
+        if (matches.Count > 1)
+        {
+            var common = CommonContinuation(upperPartial, matches);
+            if (common.Length > upperPartial.Length)
+                return common;
+        }
+
+        return null;
+    }
+
+    private static bool ShouldNormalizeKeywordToUppercase(string partial, string match) =>
+        !string.IsNullOrEmpty(partial) &&
+        partial.Length < match.Length &&
+        partial.Any(char.IsLower);
 
     private static SqlIntellisenseSuggestion? CompleteIdentifier(
         string partial,
